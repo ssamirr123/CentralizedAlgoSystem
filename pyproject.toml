@@ -1,0 +1,15 @@
+[project]
+name = "centralizedalgosystem"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+	"fastapi>=0.115.0",
+	"pandas>=2.2.2",
+	"plotly>=5.23.0",
+	"pydantic>=2.8.0",
+	"sqlalchemy>=2.0.32",
+	"streamlit>=1.37.0",
+	"streamlit-autorefresh>=1.0.1",
+	"uvicorn>=0.30.0",
+	"requests>=2.32.0",
+]
