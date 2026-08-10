@@ -58,9 +58,16 @@ async def _stale_heartbeat_watcher() -> None:
 async def lifespan(_: FastAPI):
     init_db()
     logger.info("Database initialized at startup")
-    watcher_task = asyncio.create_task(_stale_heartbeat_watcher())
+    # Background watcher is disabled on serverless platforms (e.g. Vercel)
+    # Set DISABLE_BACKGROUND_WATCHER=true in Vercel environment variables
+    watcher_task = None
+    if not os.environ.get("DISABLE_BACKGROUND_WATCHER", "").lower() in ("1", "true", "yes"):
+        watcher_task = asyncio.create_task(_stale_heartbeat_watcher())
+    else:
+        logger.info("Background watcher disabled (serverless mode)")
     yield
-    watcher_task.cancel()
+    if watcher_task is not None:
+        watcher_task.cancel()
 
 app = FastAPI(
     title="Central Strategy Monitoring API",
