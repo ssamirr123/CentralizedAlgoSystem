@@ -1,5 +1,5 @@
 """
-ASGI entry point for Streamlit Cloud.
+ASGI entry point for local development.
 
 Architecture:
   /          → Streamlit dashboard (dashboard/streamlit_app.py)
@@ -7,6 +7,10 @@ Architecture:
 
 Run locally:
   streamlit run asgi_app.py
+
+Streamlit Cloud runs streamlit_app.py instead, which duplicates this
+construction rather than importing it — `streamlit run` only detects an
+App instance when st.App(...) is called directly in the entry script.
 """
 from __future__ import annotations
 
