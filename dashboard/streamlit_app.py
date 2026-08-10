@@ -20,32 +20,26 @@ st.set_page_config(
 HEARTBEAT_STALE_AFTER = timedelta(minutes=2)
 
 # ---------------------------------------------------------------------------
-# Backend URL — set BACKEND_URL in Streamlit Cloud secrets or .streamlit/secrets.toml
-# Example: BACKEND_URL = "https://your-app.vercel.app"
-# ---------------------------------------------------------------------------
-BACKEND_URL: str = st.secrets.get("BACKEND_URL", "")  # type: ignore[arg-type]
-
-# ---------------------------------------------------------------------------
 # Auto-refresh every 30 s
 # ---------------------------------------------------------------------------
 st_autorefresh(interval=30_000, key="strategy_dashboard_refresh")
 
 
 # ---------------------------------------------------------------------------
-# Data loading
+# Data loading — calls the FastAPI backend mounted at /api on the same host
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=30)
-def load_strategy_data(backend_url: str) -> pd.DataFrame:
-    """Fetch strategy heartbeats from the FastAPI backend on Vercel."""
+def load_strategy_data() -> pd.DataFrame:
+    """Fetch strategy heartbeats from the FastAPI backend (/api/strategies)."""
     try:
-        resp = requests.get(f"{backend_url}/strategies", timeout=10)
+        resp = requests.get("http://localhost:8501/api/strategies", timeout=10)
         resp.raise_for_status()
         data = resp.json()
         if not data:
             return pd.DataFrame()
         return pd.DataFrame(data)
     except requests.exceptions.ConnectionError:
-        st.error(":material/wifi_off: Cannot reach the backend. Check BACKEND_URL in secrets.")
+        st.error(":material/wifi_off: Cannot reach the backend API.")
         return pd.DataFrame()
     except requests.exceptions.HTTPError as e:
         st.error(f":material/error: Backend returned an error: {e}")
@@ -84,21 +78,10 @@ st.caption("Live view of all strategy heartbeats · Auto-refreshes every 30 s")
 # ---------------------------------------------------------------------------
 # Config check
 # ---------------------------------------------------------------------------
-if not BACKEND_URL:
-    st.warning(
-        ":material/settings: **BACKEND_URL not configured.**\n\n"
-        "Add it to your Streamlit Cloud secrets:\n"
-        "```toml\n"
-        'BACKEND_URL = "https://your-app.vercel.app"\n'
-        "```",
-        icon=":material/info:",
-    )
-    st.stop()
-
-# ---------------------------------------------------------------------------
 # Load data
 # ---------------------------------------------------------------------------
-df = load_strategy_data(BACKEND_URL)
+df = load_strategy_data()
+
 
 if df.empty:
     st.info(
