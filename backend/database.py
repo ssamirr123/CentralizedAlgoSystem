@@ -1,4 +1,4 @@
-from __future__ import annotations
+import os
 
 from pathlib import Path
 
@@ -8,7 +8,13 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "tracker.db"
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+
+# On Vercel (or any hosted env), set DATABASE_URL to a PostgreSQL connection string.
+# Falls back to local SQLite for development.
+DATABASE_URL: str = os.environ.get("DATABASE_URL", f"sqlite:///{DB_PATH}")
+
+# SQLite requires check_same_thread=False; PostgreSQL does not support it
+_connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 
 class Base(DeclarativeBase):
@@ -17,7 +23,7 @@ class Base(DeclarativeBase):
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args=_connect_args,
     pool_pre_ping=True,
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
@@ -25,7 +31,8 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 def get_db() -> Session:
     """Yield a transactional SQLAlchemy session for each request."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if DATABASE_URL.startswith("sqlite"):
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
     db = SessionLocal()
     try:
         yield db
@@ -35,7 +42,8 @@ def get_db() -> Session:
 
 def init_db() -> None:
     """Create required database tables if they do not already exist."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if DATABASE_URL.startswith("sqlite"):
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
     from backend import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)

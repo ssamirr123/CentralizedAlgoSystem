@@ -69,9 +69,14 @@ logging.basicConfig(format=LOG_FORMAT, level=logging.INFO)
 logger = logging.getLogger("alerts.telegram")
 
 _log_dir = os.path.dirname(os.path.abspath(__file__))
-_file_handler = logging.FileHandler(os.path.join(_log_dir, "telegram_alerts.log"))
-_file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-logger.addHandler(_file_handler)
+_log_file = os.path.join(_log_dir, "telegram_alerts.log")
+try:
+    _file_handler = logging.FileHandler(_log_file)
+    _file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    logger.addHandler(_file_handler)
+except (OSError, PermissionError):
+    # Read-only filesystem (e.g. Vercel serverless) — skip file logging
+    logger.warning("Could not attach file log handler (read-only filesystem); logging to stdout only.")
 
 # ---------------------------------------------------------------------------
 # Constants
