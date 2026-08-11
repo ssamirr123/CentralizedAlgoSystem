@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -20,6 +21,22 @@ st.set_page_config(
 HEARTBEAT_STALE_AFTER = timedelta(minutes=2)
 
 # ---------------------------------------------------------------------------
+# Backend API base URL — the FastAPI service is hosted separately (e.g. on
+# Vercel), NOT inside this Streamlit app. Streamlit Cloud's edge gates every
+# request behind a browser-only session handshake, so machine clients (EC2
+# workers posting heartbeats) can never reach an API mounted in this process.
+# Configure via Streamlit secrets (API_BASE_URL) or the API_BASE_URL env var.
+# ---------------------------------------------------------------------------
+API_BASE_URL = st.secrets.get("API_BASE_URL", os.environ.get("API_BASE_URL", ""))
+if not API_BASE_URL:
+    st.error(
+        ":material/error: `API_BASE_URL` is not configured. Set it in this app's "
+        "Streamlit secrets to the deployed backend URL (e.g. `https://your-app.vercel.app`)."
+    )
+    st.stop()
+API_BASE_URL = API_BASE_URL.rstrip("/")
+
+# ---------------------------------------------------------------------------
 # Auto-refresh every 30 s
 # ---------------------------------------------------------------------------
 st_autorefresh(interval=30_000, key="strategy_dashboard_refresh")
@@ -30,9 +47,9 @@ st_autorefresh(interval=30_000, key="strategy_dashboard_refresh")
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=30)
 def load_strategy_data() -> pd.DataFrame:
-    """Fetch strategy heartbeats from the FastAPI backend (/api/strategies)."""
+    """Fetch strategy heartbeats from the FastAPI backend."""
     try:
-        resp = requests.get("http://localhost:8501/api/strategies", timeout=10)
+        resp = requests.get(f"{API_BASE_URL}/strategies", timeout=10)
         resp.raise_for_status()
         data = resp.json()
         if not data:

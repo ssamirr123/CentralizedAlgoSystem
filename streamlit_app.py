@@ -1,25 +1,16 @@
 # Root entry point for Streamlit Cloud.
 # Streamlit Cloud runs: streamlit run streamlit_app.py
 #
-# Streamlit's CLI only detects an ASGI App instance when `st.App(...)` is
-# called directly in the script passed to `streamlit run` — importing it
-# from another module (e.g. `from asgi_app import app`) is NOT detected,
-# so the /api Mount silently never gets registered. This must therefore
-# duplicate asgi_app.py's construction rather than import it.
-from __future__ import annotations
-
+# The backend (FastAPI) is deployed separately (e.g. on Vercel) — see
+# api/index.py and vercel.json — because Streamlit Cloud's edge gates every
+# request behind a browser-only session handshake that non-browser HTTP
+# clients (like EC2 heartbeat workers) can never complete. This app is a
+# pure frontend that talks to that backend over HTTPS (see API_BASE_URL in
+# dashboard/streamlit_app.py).
+#
+# runpy re-executes the dashboard script fresh on every Streamlit rerun,
+# unlike a plain import (which Python would cache after the first run).
+import runpy
 import pathlib
 
-import streamlit as st
-from starlette.routing import Mount
-
-from backend.main import app as fastapi_app
-
-_DASHBOARD = pathlib.Path(__file__).parent / "dashboard" / "streamlit_app.py"
-
-app = st.App(
-    str(_DASHBOARD),
-    routes=[
-        Mount("/api", app=fastapi_app),
-    ],
-)
+runpy.run_path(str(pathlib.Path(__file__).parent / "dashboard" / "streamlit_app.py"))
