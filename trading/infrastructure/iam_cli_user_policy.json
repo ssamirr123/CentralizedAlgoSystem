@@ -1,0 +1,52 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OneTimeRoleSetup",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:AttachRolePolicy",
+        "iam:CreateInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:GetInstanceProfile"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/TradingEC2SSMRole",
+        "arn:aws:iam::*:instance-profile/TradingEC2SSMProfile"
+      ]
+    },
+    {
+      "Sid": "PassRoleToEC2",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/TradingEC2SSMRole",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "AttachProfileToInstance",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AssociateIamInstanceProfile",
+        "ec2:DescribeIamInstanceProfileAssociations",
+        "ec2:DescribeInstances"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SSMControl",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommands",
+        "ssm:ListCommandInvocations",
+        "ssm:DescribeInstanceInformation"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
