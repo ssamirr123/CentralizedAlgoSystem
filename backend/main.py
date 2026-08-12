@@ -14,6 +14,8 @@ from backend.database import SessionLocal, get_db, init_db
 from backend.models import StrategyHeartbeat
 from backend.schemas import HealthResponse, StrategyHeartbeatIn, StrategyHeartbeatOut, StrategyStatus
 from alerts.telegram import alert_service
+from trading.api.routes import router as control_center_router
+from trading.database.connection import init_db as init_control_center_db
 
 DAY_LOSS_LIMIT = float(os.environ.get("DAY_LOSS_LIMIT", "10000.0"))
 STALE_THRESHOLD_MINUTES = float(os.environ.get("STALE_THRESHOLD_MINUTES", "2"))
@@ -57,7 +59,8 @@ async def _stale_heartbeat_watcher() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    logger.info("Database initialized at startup")
+    init_control_center_db()
+    logger.info("Database initialized at startup (heartbeat monitor + control center schemas)")
     # Background watcher is disabled on serverless platforms (e.g. Vercel)
     # Set DISABLE_BACKGROUND_WATCHER=true in Vercel environment variables
     watcher_task = None
@@ -75,6 +78,7 @@ app = FastAPI(
     description="Receives strategy heartbeats from distributed EC2 strategy workers.",
     lifespan=lifespan,
 )
+app.include_router(control_center_router, prefix="/api")
 
 
 @app.post(
