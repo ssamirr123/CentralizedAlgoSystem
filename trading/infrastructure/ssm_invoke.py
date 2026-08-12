@@ -32,7 +32,7 @@ from pathlib import Path
 
 try:
     import boto3
-    from botocore.exceptions import ClientError, WaiterError
+    from botocore.exceptions import BotoCoreError, ClientError, WaiterError
 except ImportError:
     print("Missing dependency: pip install boto3", file=sys.stderr)
     sys.exit(1)
@@ -72,7 +72,28 @@ def send_powershell_command(
 
     try:
         result = client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-    except ClientError as exc:
+    except (ClientError, BotoCoreError) as exc:
+        return {"CommandId": command_id, "Error": str(exc)}
+
+    return {
+        "CommandId": command_id,
+        "Status": result.get("Status"),
+        "StandardOutputContent": result.get("StandardOutputContent", ""),
+        "StandardErrorContent": result.get("StandardErrorContent", ""),
+        "ResponseCode": result.get("ResponseCode"),
+    }
+
+
+def check_command(instance_id: str, region: str, command_id: str) -> dict:
+    """Look up an already-sent command's current status/output without
+    sending a new one -- avoids racing a still-running command by
+    accidentally re-triggering it, and doesn't depend on the local aws
+    CLI being installed/on PATH (uses boto3 directly, same as everything
+    else in this script)."""
+    client = boto3.client("ssm", region_name=region)
+    try:
+        result = client.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+    except (ClientError, BotoCoreError) as exc:
         return {"CommandId": command_id, "Error": str(exc)}
 
     return {
@@ -111,6 +132,9 @@ def _cli() -> int:
     algo_parser.add_argument("algo_name")
     algo_parser.add_argument("--lines", type=int, default=None)
 
+    check_parser = subparsers.add_parser("check", help="Look up an already-sent command by its CommandId")
+    check_parser.add_argument("command_id")
+
     raw_parser = subparsers.add_parser("raw", help="Run an arbitrary PowerShell command or script file")
     raw_group = raw_parser.add_mutually_exclusive_group(required=True)
     raw_group.add_argument("powershell_command", nargs="?", default=None)
@@ -132,6 +156,11 @@ def _cli() -> int:
         parser.error("--instance-id is required (or set EC2_INSTANCE_ID)")
     if not args.region:
         parser.error("--region is required (or set AWS_REGION)")
+
+    if args.mode == "check":
+        result = check_command(args.instance_id, args.region, args.command_id)
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result.get("Status") == "Success" else 1
 
     if args.mode == "algo":
         if not args.repo_path:
