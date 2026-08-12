@@ -182,8 +182,12 @@ with st.container(border=True):
     table_df["Status"] = table_df.apply(
         lambda r: status_badge(r["status"], r["is_stale"]), axis=1
     )
-    table_df["Last Heartbeat"] = table_df["last_update_time"].dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-    table_df["Received At"] = table_df["received_at"].dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    table_df["Last Heartbeat"] = (
+        table_df["last_update_time"].dt.tz_convert("Asia/Kolkata").dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    )
+    table_df["Received At"] = (
+        table_df["received_at"].dt.tz_convert("Asia/Kolkata").dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    )
 
     display_df = table_df.rename(columns={
         "strategy_name": "Strategy",
