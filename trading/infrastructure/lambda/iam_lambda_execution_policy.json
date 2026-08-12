@@ -1,0 +1,45 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:ap-south-1:471112713822:log-group:/aws/lambda/TradingOrchestrator:*"
+    },
+    {
+      "Sid": "SSMSendCommand",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:471112713822:instance/i-0f60543b5534c332f",
+        "arn:aws:ssm:ap-south-1::document/AWS-RunPowerShellScript"
+      ]
+    },
+    {
+      "Sid": "SSMReadResult",
+      "Effect": "Allow",
+      "Action": "ssm:GetCommandInvocation",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2Describe",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2PowerControl",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances"
+      ],
+      "Resource": "arn:aws:ec2:ap-south-1:471112713822:instance/i-0f60543b5534c332f"
+    }
+  ]
+}
