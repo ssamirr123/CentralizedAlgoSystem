@@ -142,16 +142,20 @@ st.divider()
 # ---------------------------------------------------------------------------
 col1, col2 = st.columns(2)
 
+PNL_SIGN_COLORS = {"Profit": "#16a34a", "Loss": "#dc2626"}
+
 with col1:
     with st.container(border=True):
         st.subheader("Strategy-wise Day P&L")
+        pnl_df = df.copy()
+        pnl_df["P&L"] = pnl_df["day_pnl"].apply(lambda v: "Loss" if v < 0 else "Profit")
         pnl_fig = px.bar(
-            df,
+            pnl_df,
             x="strategy_name",
             y="day_pnl",
-            color="status",
-            labels={"strategy_name": "Strategy", "day_pnl": "Day P&L", "status": "Status"},
-            color_discrete_map={"RUNNING": "#16a34a", "STOPPED": "#dc2626", "ERROR": "#b91c1c"},
+            color="P&L",
+            labels={"strategy_name": "Strategy", "day_pnl": "Day P&L"},
+            color_discrete_map=PNL_SIGN_COLORS,
         )
         pnl_fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), showlegend=True)
         st.plotly_chart(pnl_fig)
@@ -159,13 +163,15 @@ with col1:
 with col2:
     with st.container(border=True):
         st.subheader("Strategy-wise MTM")
+        mtm_df = df.copy()
+        mtm_df["P&L"] = mtm_df["current_mtm"].apply(lambda v: "Loss" if v < 0 else "Profit")
         mtm_fig = px.bar(
-            df,
+            mtm_df,
             x="strategy_name",
             y="current_mtm",
-            color="status",
-            labels={"strategy_name": "Strategy", "current_mtm": "MTM", "status": "Status"},
-            color_discrete_map={"RUNNING": "#16a34a", "STOPPED": "#dc2626", "ERROR": "#b91c1c"},
+            color="P&L",
+            labels={"strategy_name": "Strategy", "current_mtm": "MTM"},
+            color_discrete_map=PNL_SIGN_COLORS,
         )
         mtm_fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), showlegend=True)
         st.plotly_chart(mtm_fig)
@@ -197,11 +203,11 @@ with st.container(border=True):
         "number_of_trades": "Trades",
     })[["Strategy", "Server", "Status", "Day P&L (₹)", "MTM (₹)", "Trades", "Last Heartbeat", "Received At"]]
 
-    st.dataframe(
-        display_df,
-        hide_index=True,
-        column_config={
-            "Day P&L (₹)": st.column_config.NumberColumn(format="₹%.2f"),
-            "MTM (₹)": st.column_config.NumberColumn(format="₹%.2f"),
-        },
-    )
+    def _negative_red(val: float) -> str:
+        return "color: #dc2626" if val < 0 else ""
+
+    styled_df = display_df.style.map(
+        _negative_red, subset=["Day P&L (₹)", "MTM (₹)"]
+    ).format({"Day P&L (₹)": "₹{:,.2f}", "MTM (₹)": "₹{:,.2f}"})
+
+    st.dataframe(styled_df, hide_index=True)
