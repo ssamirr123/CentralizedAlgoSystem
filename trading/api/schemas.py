@@ -62,3 +62,20 @@ class DailyPnlEntry(BaseModel):
     date: date
     pnl: float
     trade_count: int
+
+
+class AlgoListEntry(BaseModel):
+    algo_id: str  # algo name
+    server_id: str  # server name
+    status: str
+    enabled: bool
+    script_path: str
+    updated_at: datetime
+
+
+class ServerListEntry(BaseModel):
+    server_id: str  # server name
+    ec2_instance_id: str
+    region: str
+    status: str
+    last_heartbeat: datetime | None

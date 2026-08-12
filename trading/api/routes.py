@@ -21,11 +21,13 @@ from trading.api.deps import get_db, require_api_key
 from trading.api.lambda_client import LambdaInvokeError, invoke_orchestrator
 from trading.api.schemas import (
     AlgoActionRequest,
+    AlgoListEntry,
     AlgoStatusResponse,
     CommandResponse,
     DailyPnlEntry,
     LogEntry,
     PositionEntry,
+    ServerListEntry,
     ServerStatusResponse,
 )
 from trading.database import models
@@ -180,6 +182,30 @@ def server_status(server_id: str, db: Session = Depends(get_db)) -> ServerStatus
         status=server.status,
         last_heartbeat=server.last_heartbeat,
     )
+
+
+@router.get("/servers", response_model=list[ServerListEntry])
+def list_servers(db: Session = Depends(get_db)) -> list[ServerListEntry]:
+    rows = db.query(models.Server).order_by(models.Server.name).all()
+    return [
+        ServerListEntry(
+            server_id=r.name, ec2_instance_id=r.ec2_instance_id, region=r.region,
+            status=r.status, last_heartbeat=r.last_heartbeat,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/algos", response_model=list[AlgoListEntry])
+def list_algos(db: Session = Depends(get_db)) -> list[AlgoListEntry]:
+    rows = db.query(models.Algo).join(models.Server).order_by(models.Server.name, models.Algo.name).all()
+    return [
+        AlgoListEntry(
+            algo_id=r.name, server_id=r.server.name, status=r.status,
+            enabled=r.enabled, script_path=r.script_path, updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/logs", response_model=list[LogEntry])
