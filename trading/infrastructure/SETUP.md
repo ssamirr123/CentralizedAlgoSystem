@@ -7,39 +7,37 @@ on, per your own rule about not assuming things worked.
 
 Target: Windows EC2 instance `i-0f60543b5534c332f` in `ap-south-1`.
 
-## 1. Install & configure the AWS CLI locally
+## 1. Create an IAM user and configure the AWS CLI locally
 
+The IAM user has to be created through the **AWS Console (browser)**, not
+the CLI — the CLI needs credentials to do anything, so it can't create
+the very first credentials itself.
+
+1. [console.aws.amazon.com](https://console.aws.amazon.com) → **IAM** →
+   **Users** → **Create user** → name it `trading-control-cli` → Next →
+   "Attach policies directly" → skip → Next → **Create user**
+2. Click into the new user → **Permissions** tab → **Add permissions** →
+   **Create inline policy** → **JSON** tab → paste the contents of
+   `iam_cli_user_policy.json` (this folder) → Next → name it
+   `TradingControlCLI` → **Create policy**
+3. Still on the user's page → **Security credentials** tab → **Access
+   keys** → **Create access key** → use case: **Command Line Interface
+   (CLI)** → Next → **Create access key** — copy both values now, the
+   secret is shown only this once
+
+Install the CLI locally:
 ```powershell
-# Download & install AWS CLI v2 for Windows from:
-# https://awscli.amazonaws.com/AWSCLIV2.msi
-# (or via winget: winget install Amazon.AWSCLI)
+winget install Amazon.AWSCLI
+# or download https://awscli.amazonaws.com/AWSCLIV2.msi
 
 aws --version
 ```
 
-You'll need an IAM user (or SSO profile) with credentials — avoid using
-your root account or a broad admin policy for this. If you don't have a
-user yet, create one and attach the scoped policy in this folder (covers
-exactly the one-time role setup below plus ongoing SSM control, nothing
-broader):
-
-```powershell
-aws iam create-user --user-name trading-control-cli
-
-aws iam put-user-policy `
-  --user-name trading-control-cli `
-  --policy-name TradingControlCLI `
-  --policy-document file://iam_cli_user_policy.json
-
-aws iam create-access-key --user-name trading-control-cli
-# Save the AccessKeyId / SecretAccessKey shown — this is the only time
-# the secret is ever displayed.
-```
-
+Configure it with the access key from step 3:
 ```powershell
 aws configure
-# AWS Access Key ID: <from the IAM user>
-# AWS Secret Access Key: <from the IAM user>
+# AWS Access Key ID: <paste>
+# AWS Secret Access Key: <paste>
 # Default region: ap-south-1
 # Default output format: json
 ```
