@@ -49,6 +49,19 @@ class LogEntry(BaseModel):
     details: dict[str, Any] | None = None
 
 
+class LogIn(BaseModel):
+    algo_id: str  # algo NAME
+    server_id: str  # server NAME
+    level: str
+    event: str
+    details: dict[str, Any] | None = None
+    timestamp: datetime | None = None  # server sets to now if omitted
+
+
+class LogAck(BaseModel):
+    success: bool
+
+
 class PositionEntry(BaseModel):
     symbol: str
     quantity: int

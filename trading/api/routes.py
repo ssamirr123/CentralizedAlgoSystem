@@ -14,7 +14,7 @@ Milestones 8-10 wire up ingestion, which is expected at this milestone.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func
@@ -30,7 +30,9 @@ from trading.api.schemas import (
     DailyPnlEntry,
     HeartbeatAck,
     HeartbeatIn,
+    LogAck,
     LogEntry,
+    LogIn,
     PositionEntry,
     ServerListEntry,
     ServerStatusResponse,
@@ -253,19 +255,50 @@ def post_heartbeat(body: HeartbeatIn, db: Session = Depends(get_db)) -> Heartbea
 
 
 @router.get("/logs", response_model=list[LogEntry])
-def get_logs(algo_id: str, server_id: str, limit: int = 100, db: Session = Depends(get_db)) -> list[LogEntry]:
+def get_logs(
+    algo_id: str,
+    server_id: str,
+    limit: int = 100,
+    level: str | None = None,
+    event: str | None = None,
+    log_date: str | None = None,  # YYYY-MM-DD, matches that calendar day (UTC)
+    db: Session = Depends(get_db),
+) -> list[LogEntry]:
     server = _resolve_server(db, server_id)
     algo = _get_or_create_algo(db, algo_id, server)
     db.commit()
 
-    rows = (
-        db.query(models.Log)
-        .filter(models.Log.algo_id == algo.id)
-        .order_by(models.Log.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
+    query = db.query(models.Log).filter(models.Log.algo_id == algo.id)
+    if level:
+        query = query.filter(models.Log.level == level.upper())
+    if event:
+        query = query.filter(models.Log.event == event)
+    if log_date:
+        try:
+            day = datetime.strptime(log_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"log_date must be YYYY-MM-DD: {exc}") from exc
+        query = query.filter(models.Log.timestamp >= day, models.Log.timestamp < day + timedelta(days=1))
+
+    rows = query.order_by(models.Log.timestamp.desc()).limit(limit).all()
     return [LogEntry(timestamp=r.timestamp, level=r.level, event=r.event, details=r.details) for r in rows]
+
+
+@router.post("/logs", response_model=LogAck)
+def post_log(body: LogIn, db: Session = Depends(get_db)) -> LogAck:
+    """Ingests a shipped log event (see trading/common/log_shipper.py) --
+    only the curated trading-significant events + WARNING/ERROR, not
+    every line the local structured logger emits."""
+    server = _resolve_server(db, body.server_id)
+    algo = _get_or_create_algo(db, body.algo_id, server)
+
+    db.add(models.Log(
+        algo_id=algo.id, server_id=server.id,
+        timestamp=body.timestamp or datetime.now(timezone.utc),
+        level=body.level.upper(), event=body.event, details=body.details,
+    ))
+    db.commit()
+    return LogAck(success=True)
 
 
 @router.get("/pnl", response_model=list[DailyPnlEntry])

@@ -150,6 +150,19 @@ def post_action(action: str, algo_id: str, server_id: str) -> dict:
     return resp.json()
 
 
+def load_logs(algo_id: str, server_id: str, level: str, event: str, log_date, limit: int) -> list[dict]:
+    params: dict[str, str | int] = {"algo_id": algo_id, "server_id": server_id, "limit": limit}
+    if level and level != "All":
+        params["level"] = level
+    if event:
+        params["event"] = event
+    if log_date:
+        params["log_date"] = log_date.isoformat()
+    resp = requests.get(f"{API_BASE_URL}/api/logs", params=params, headers=HEADERS, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
@@ -247,3 +260,50 @@ for algo in algos:
                 st.error(f"Failed to reach the API to start {algo_id}: {exc}")
 
 st.caption("Auto-refreshes every 30s. Status/P&L come from the last known DB state, not a live check on every load.")
+
+# ---------------------------------------------------------------------------
+# Trading logs -- filterable by algo, server, date, level, event type, per
+# the project's own spec. Only shows curated trading-significant events +
+# WARNING/ERROR (see trading/common/log_shipper.py) -- not every line the
+# local structured logger emits.
+# ---------------------------------------------------------------------------
+st.divider()
+st.subheader(":material/receipt_long: Trading Logs")
+
+algo_names = sorted({a["algo_id"] for a in algos})
+server_names = sorted({a["server_id"] for a in algos})
+
+filter_cols = st.columns(5)
+f_algo = filter_cols[0].selectbox("Strategy", algo_names)
+f_server = filter_cols[1].selectbox("Server", server_names)
+f_level = filter_cols[2].selectbox("Level", ["All", "INFO", "WARNING", "ERROR", "CRITICAL"])
+f_event = filter_cols[3].text_input("Event (exact match)", placeholder="e.g. ENTRY")
+f_date = filter_cols[4].date_input("Date", value=None)
+
+try:
+    log_rows = load_logs(f_algo, f_server, f_level, f_event.strip(), f_date, limit=200)
+except requests.exceptions.RequestException as exc:
+    st.error(f":material/wifi_off: Could not load logs: {exc}")
+    log_rows = []
+
+if not log_rows:
+    st.info(
+        ":material/hourglass_empty: No matching log events. Only curated trading events "
+        "(START/STOP/ENTRY/EXIT/SL/RE-ENTRY/SQUARE_OFF) and WARNING+ get shipped here -- "
+        "everything else stays in the instance's local log files.",
+        icon=":material/info:",
+    )
+else:
+    st.dataframe(
+        [
+            {
+                "Time (UTC)": row["timestamp"],
+                "Level": row["level"],
+                "Event": row["event"],
+                "Details": row.get("details") or {},
+            }
+            for row in log_rows
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )

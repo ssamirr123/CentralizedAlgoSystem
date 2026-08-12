@@ -92,6 +92,25 @@ def get_logger(component: str, server: str = "local-dev", algo: str | None = Non
     return logger
 
 
+def attach_shipper(logger: logging.Logger, shipper: Any) -> None:
+    """Attach a trading.common.log_shipper.LogShipper to a logger. log_event()
+    checks for this and ships qualifying events (see log_shipper.should_ship)
+    to the control-center API in addition to the normal local logging."""
+    logger._cc_log_shipper = shipper  # noqa: SLF001
+
+
 def log_event(logger: logging.Logger, level: int, event: str, **details: Any) -> None:
-    """Emit a structured event log line, e.g. log_event(logger, logging.INFO, "ENTRY", strike=24750)."""
+    """Emit a structured event log line, e.g. log_event(logger, logging.INFO, "ENTRY", strike=24750).
+
+    Also ships to the control-center API if a shipper is attached (see
+    attach_shipper) and the event qualifies (log_shipper.should_ship) --
+    the curated trading-event list, or WARNING+ regardless of event name.
+    """
     logger.log(level, event, extra={"event": event, "details": details})
+
+    shipper = getattr(logger, "_cc_log_shipper", None)
+    if shipper is not None:
+        from trading.common.log_shipper import should_ship
+
+        if should_ship(event, level):
+            shipper.ship(level=logging.getLevelName(level), event=event, details=details)

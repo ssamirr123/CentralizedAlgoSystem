@@ -27,7 +27,8 @@ from trading.algos.example_strategy.strategy import ExampleStrategy
 from trading.common.broker import BrokerConfigError, BrokerConnectionError, create_broker
 from trading.common.config import load_config
 from trading.common.heartbeat import ControlCenterHeartbeatAgent
-from trading.common.logger import get_logger, log_event
+from trading.common.log_shipper import LogShipper
+from trading.common.logger import attach_shipper, get_logger, log_event
 from trading.common.utils import (
     GracefulShutdown,
     clear_stop_flag,
@@ -85,6 +86,21 @@ def main() -> int:
     write_pid_file(ALGO_NAME)
     clear_stop_flag(ALGO_NAME)  # defensive: drop any stale flag from a prior run
 
+    # Created early, before any WARNING/ERROR-level event can fire (e.g. a
+    # broker connect failure) -- SHIPPABLE_EVENTS ships WARNING+ regardless
+    # of event name, so this needs to be attached before those can happen,
+    # not just before the main loop. Explicitly stopped (drains the queue)
+    # on every early-return path below, since a daemon thread's queued-but-
+    # unsent items don't survive an abrupt process exit.
+    shipper: LogShipper | None = None
+    if config.control_api_key:
+        shipper = LogShipper(
+            algo_name=config.strategy_name, server_name=server_name,
+            api_base_url=config.api_base_url, api_key=config.control_api_key,
+        )
+        shipper.start()
+        attach_shipper(logger, shipper)
+
     shutdown = GracefulShutdown(algo_name=ALGO_NAME)
 
     broker = create_broker(config)
@@ -92,16 +108,22 @@ def main() -> int:
         connect_with_retry(broker, config, logger)
     except BrokerConfigError as exc:
         log_event(logger, logging.ERROR, "BROKER_CONFIG_ERROR", error=str(exc))
+        if shipper:
+            shipper.stop()
         remove_pid_file(ALGO_NAME)
         return 1
     except BrokerConnectionError as exc:
         log_event(logger, logging.ERROR, "BROKER_CONNECT_FATAL", error=str(exc))
+        if shipper:
+            shipper.stop()
         remove_pid_file(ALGO_NAME)
         return 1
     except NotImplementedError as exc:
         # Expected for the real broker stubs (zerodha/angelone/icici_breeze)
         # until their connect() methods are actually implemented.
         log_event(logger, logging.ERROR, "BROKER_NOT_IMPLEMENTED", error=str(exc))
+        if shipper:
+            shipper.stop()
         remove_pid_file(ALGO_NAME)
         return 1
 
@@ -112,6 +134,8 @@ def main() -> int:
         log_event(logger, logging.INFO, "MARKET_DATA_CONNECTED", symbol=quote.symbol, last_price=quote.last_price)
     except Exception as exc:  # noqa: BLE001
         log_event(logger, logging.ERROR, "MARKET_DATA_FAILED", error=str(exc))
+        if shipper:
+            shipper.stop()
         broker.disconnect()
         remove_pid_file(ALGO_NAME)
         return 1
@@ -119,6 +143,7 @@ def main() -> int:
     strategy = ExampleStrategy(broker=broker, config=strategy_config, logger=logger)
     strategy.on_start()
     log_event(logger, logging.INFO, "STRATEGY_INITIALIZED")
+    log_event(logger, logging.INFO, "START")  # shippable per the project's own event list
 
     heartbeat_agent = StrategyHeartbeatAgent(
         strategy_name=config.strategy_name,
@@ -194,6 +219,11 @@ def main() -> int:
         if control_center_agent is not None:
             control_center_agent.update_metrics(status="STOPPED", pnl=strategy.day_pnl)
             control_center_agent.stop()
+
+        log_event(logger, logging.INFO, "STOP")  # shippable per the project's own event list
+
+        if shipper:
+            shipper.stop()  # drains the queue (including the STOP event above) before exit
 
         try:
             broker.disconnect()
