@@ -56,11 +56,39 @@ def is_process_running(pid: int) -> bool:
     """Check whether a PID is alive. Does not confirm it's the expected algo."""
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _is_process_running_windows(pid)
     try:
         os.kill(pid, 0)
     except OSError:
         return False
     return True
+
+
+def _is_process_running_windows(pid: int) -> bool:
+    # os.kill(pid, 0) is NOT a safe existence check on Windows: signal value
+    # 0 is signal.CTRL_C_EVENT, so it actually attempts to deliver Ctrl+C
+    # rather than querying existence — and that delivery fails with OSError
+    # for processes started in their own process group (as trading_agent.py
+    # does), producing false "not running" results for processes that are
+    # very much alive. Query the Win32 API directly instead, with no signal
+    # sent to the target at all.
+    import ctypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class GracefulShutdown:
