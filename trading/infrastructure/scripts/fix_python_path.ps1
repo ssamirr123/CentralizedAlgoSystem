@@ -8,16 +8,18 @@
 $pyDir = "C:\Users\Administrator\AppData\Local\Programs\Python\Python313"
 
 if (-not (Test-Path $pyDir)) {
-    Write-Output "ERROR: $pyDir does not exist — re-check the install location."
+    Write-Output "ERROR: $pyDir does not exist -- re-check the install location."
     exit 1
 }
 
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+$scriptsDir = Join-Path $pyDir "Scripts"
 
 if ($machinePath -notlike "*$pyDir*") {
-    $newPath = "$machinePath;$pyDir;$pyDir\Scripts"
+    $newPathParts = @($machinePath, $pyDir, $scriptsDir)
+    $newPath = $newPathParts -join ";"
     [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
     Write-Output "Added $pyDir to machine PATH."
 } else {
-    Write-Output "$pyDir already on machine PATH — nothing to do."
+    Write-Output "$pyDir already on machine PATH -- nothing to do."
 }
