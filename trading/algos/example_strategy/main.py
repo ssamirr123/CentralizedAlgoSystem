@@ -26,6 +26,7 @@ from trading.algos.example_strategy.config import load_strategy_config
 from trading.algos.example_strategy.strategy import ExampleStrategy
 from trading.common.broker import BrokerConfigError, BrokerConnectionError, create_broker
 from trading.common.config import load_config
+from trading.common.heartbeat import ControlCenterHeartbeatAgent
 from trading.common.logger import get_logger, log_event
 from trading.common.utils import (
     GracefulShutdown,
@@ -128,6 +129,28 @@ def main() -> int:
     heartbeat_agent.start()
     log_event(logger, logging.INFO, "HEARTBEAT_RUNNING", interval_seconds=config.heartbeat_interval_seconds)
 
+    # Second, independent heartbeat sender feeding the control-center schema
+    # (Milestone 5's heartbeats table) alongside the one above, which still
+    # feeds the old dashboard unchanged. Optional -- runs only if
+    # CONTROL_API_KEY is configured, so this doesn't break setups that
+    # haven't adopted the control-center API yet.
+    control_center_agent: ControlCenterHeartbeatAgent | None = None
+    if config.control_api_key:
+        control_center_agent = ControlCenterHeartbeatAgent(
+            algo_name=config.strategy_name,
+            server_name=server_name,
+            api_base_url=config.api_base_url,
+            api_key=config.control_api_key,
+            interval_seconds=config.control_heartbeat_interval_seconds,
+        )
+        control_center_agent.start()
+        log_event(
+            logger, logging.INFO, "CONTROL_CENTER_HEARTBEAT_RUNNING",
+            interval_seconds=config.control_heartbeat_interval_seconds,
+        )
+    else:
+        log_event(logger, logging.INFO, "CONTROL_CENTER_HEARTBEAT_SKIPPED", reason="CONTROL_API_KEY not set")
+
     log_event(logger, logging.INFO, "ALGO_RUNNING")
 
     exit_code = 0
@@ -138,6 +161,8 @@ def main() -> int:
                 heartbeat_agent.update_metrics(
                     mtm=mtm, pnl=day_pnl, trade_count=trade_count, status=status,
                 )
+                if control_center_agent is not None:
+                    control_center_agent.update_metrics(status=status, pnl=day_pnl)
             except Exception as exc:  # noqa: BLE001
                 # A single bad tick should not crash the whole process —
                 # log it, report ERROR status via heartbeat, keep looping.
@@ -146,6 +171,8 @@ def main() -> int:
                     mtm=strategy.mtm, pnl=strategy.day_pnl,
                     trade_count=strategy.trade_count, status="ERROR",
                 )
+                if control_center_agent is not None:
+                    control_center_agent.update_metrics(status="ERROR", pnl=strategy.day_pnl)
 
             shutdown.wait(strategy_config.loop_interval_seconds)
     except Exception as exc:  # noqa: BLE001
@@ -163,6 +190,10 @@ def main() -> int:
             trade_count=strategy.trade_count, status="STOPPED",
         )
         heartbeat_agent.stop()
+
+        if control_center_agent is not None:
+            control_center_agent.update_metrics(status="STOPPED", pnl=strategy.day_pnl)
+            control_center_agent.stop()
 
         try:
             broker.disconnect()

@@ -56,12 +56,22 @@ class TradingConfig:
     # Which BrokerClient implementation to instantiate: paper | zerodha | angelone | icici_breeze
     broker_name: str = field(default_factory=lambda: _env("BROKER", "paper").lower())
 
-    # Identity used for heartbeat reporting to the existing monitoring backend.
+    # Identity used for heartbeat reporting. Both heartbeat senders share
+    # api_base_url -- the control-center API (Milestone 6) is mounted onto
+    # the same deployed app as the old /update_strategy endpoint.
     strategy_name: str = field(default_factory=lambda: _env("STRATEGY_NAME", "example_strategy"))
     server_name: str = field(default_factory=lambda: _env("SERVER_NAME", "local-dev"))
     api_base_url: str = field(default_factory=lambda: _env("API_BASE_URL", "http://127.0.0.1:8000"))
     heartbeat_interval_seconds: int = field(
         default_factory=lambda: _env_int("HEARTBEAT_INTERVAL_SECONDS", 30)
+    )
+
+    # Control-center heartbeat (POST /api/heartbeat) -- separate interval
+    # from the line above (project's own recommended default is 10s here,
+    # vs. the old dashboard's 30s, which staleness math elsewhere depends on).
+    control_api_key: str = field(default_factory=lambda: _env("CONTROL_API_KEY"))
+    control_heartbeat_interval_seconds: int = field(
+        default_factory=lambda: _env_int("CONTROL_HEARTBEAT_INTERVAL_SECONDS", 10)
     )
 
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())

@@ -59,14 +59,46 @@ STATUS_DISPLAY = {
     "STOPPED": ("⚪", "STOPPED"),
     "ERROR": ("🔴", "ERROR"),
     "STALE": ("⚠️", "STALE"),
+    "OFFLINE": ("🔴", "OFFLINE"),
 }
 
 IN_FLIGHT_STATUSES = {"STARTING", "STOPPING", "RESTARTING", "UPDATING", "PENDING"}
+
+# Heartbeat staleness thresholds, per the project's own spec: <20s RUNNING,
+# 20-60s STALE, >60s OFFLINE. Configurable via secrets/env, not hard-coded.
+HEARTBEAT_STALE_AFTER_SECONDS = int(
+    st.secrets.get("HEARTBEAT_STALE_AFTER_SECONDS", os.environ.get("HEARTBEAT_STALE_AFTER_SECONDS", 20))
+)
+HEARTBEAT_OFFLINE_AFTER_SECONDS = int(
+    st.secrets.get("HEARTBEAT_OFFLINE_AFTER_SECONDS", os.environ.get("HEARTBEAT_OFFLINE_AFTER_SECONDS", 60))
+)
 
 
 def status_label(s: str) -> str:
     icon, text = STATUS_DISPLAY.get(s, ("❓", "UNKNOWN"))
     return f"{icon} {text}"
+
+
+def effective_status(stored_status: str, last_heartbeat_iso: str | None) -> str:
+    """Overrides a stored RUNNING status with STALE/OFFLINE based on
+    heartbeat recency -- other statuses (STOPPED, ERROR, in-flight ones)
+    pass through unchanged, since heartbeat age is meaningless for an
+    algo that isn't supposed to be sending them right now."""
+    if stored_status != "RUNNING":
+        return stored_status
+    if not last_heartbeat_iso:
+        return "OFFLINE"  # claims RUNNING but has never sent a heartbeat
+
+    last_hb = datetime.fromisoformat(last_heartbeat_iso.replace("Z", "+00:00"))
+    if last_hb.tzinfo is None:
+        last_hb = last_hb.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - last_hb).total_seconds()
+
+    if age_seconds < HEARTBEAT_STALE_AFTER_SECONDS:
+        return "RUNNING"
+    if age_seconds < HEARTBEAT_OFFLINE_AFTER_SECONDS:
+        return "STALE"
+    return "OFFLINE"
 
 
 def is_market_open(now: datetime | None = None) -> bool:
@@ -169,7 +201,8 @@ for col, label in zip(header_cols, ["Strategy", "Server", "Status", "Day P&L (�
 for algo in algos:
     algo_id = algo["algo_id"]
     server_id = algo["server_id"]
-    current_status = algo["status"]
+    raw_status = algo["status"]
+    display_status = effective_status(raw_status, algo.get("last_heartbeat"))
 
     try:
         pnl = load_today_pnl(algo_id, server_id)
@@ -179,13 +212,18 @@ for algo in algos:
     row_cols = st.columns([2, 2, 2, 2, 2])
     row_cols[0].write(algo_id)
     row_cols[1].write(server_id)
-    row_cols[2].write(status_label(current_status))
+    row_cols[2].write(status_label(display_status))
     row_cols[3].write("—" if pnl is None else f"₹{pnl:,.2f}")
 
+    # Action availability follows the RAW stored status (what the backend
+    # actually tracks), not the heartbeat-derived display status -- a
+    # STALE/OFFLINE algo that's still marked RUNNING should still offer a
+    # STOP button, since the underlying process may genuinely be running
+    # and just not heartbeating.
     action_col = row_cols[4]
-    if current_status in IN_FLIGHT_STATUSES:
-        action_col.button(status_label(current_status), key=f"noop-{algo_id}-{server_id}", disabled=True)
-    elif current_status == "RUNNING":
+    if raw_status in IN_FLIGHT_STATUSES:
+        action_col.button(status_label(raw_status), key=f"noop-{algo_id}-{server_id}", disabled=True)
+    elif raw_status == "RUNNING":
         if action_col.button("STOP", key=f"stop-{algo_id}-{server_id}"):
             try:
                 result = post_action("stop", algo_id, server_id)

@@ -71,6 +71,24 @@ class AlgoListEntry(BaseModel):
     enabled: bool
     script_path: str
     updated_at: datetime
+    last_heartbeat: datetime | None = None
+
+
+class HeartbeatIn(BaseModel):
+    algo_id: str  # algo NAME
+    server_id: str  # server NAME
+    status: str
+    cpu: float | None = None
+    memory: float | None = None
+    pnl: float | None = None
+    position: str | None = None
+    timestamp: datetime | None = None  # server sets to now if omitted
+
+
+class HeartbeatAck(BaseModel):
+    success: bool
+    algo_id: str
+    server_id: str
 
 
 class ServerListEntry(BaseModel):

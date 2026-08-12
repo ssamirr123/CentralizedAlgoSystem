@@ -14,7 +14,10 @@ Milestones 8-10 wire up ingestion, which is expected at this milestone.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from trading.api.deps import get_db, require_api_key
@@ -25,6 +28,8 @@ from trading.api.schemas import (
     AlgoStatusResponse,
     CommandResponse,
     DailyPnlEntry,
+    HeartbeatAck,
+    HeartbeatIn,
     LogEntry,
     PositionEntry,
     ServerListEntry,
@@ -198,14 +203,53 @@ def list_servers(db: Session = Depends(get_db)) -> list[ServerListEntry]:
 
 @router.get("/algos", response_model=list[AlgoListEntry])
 def list_algos(db: Session = Depends(get_db)) -> list[AlgoListEntry]:
-    rows = db.query(models.Algo).join(models.Server).order_by(models.Server.name, models.Algo.name).all()
+    # algos has no last_heartbeat column (matches the schema's original
+    # field list) -- computed here via MAX(timestamp) per algo instead of
+    # requiring an ALTER TABLE on an already-created Supabase table.
+    latest_hb = (
+        db.query(models.Heartbeat.algo_id, func.max(models.Heartbeat.timestamp).label("last_heartbeat"))
+        .group_by(models.Heartbeat.algo_id)
+        .subquery()
+    )
+
+    rows = (
+        db.query(models.Algo, latest_hb.c.last_heartbeat)
+        .join(models.Server)
+        .outerjoin(latest_hb, latest_hb.c.algo_id == models.Algo.id)
+        .order_by(models.Server.name, models.Algo.name)
+        .all()
+    )
     return [
         AlgoListEntry(
-            algo_id=r.name, server_id=r.server.name, status=r.status,
-            enabled=r.enabled, script_path=r.script_path, updated_at=r.updated_at,
+            algo_id=algo.name, server_id=algo.server.name, status=algo.status,
+            enabled=algo.enabled, script_path=algo.script_path, updated_at=algo.updated_at,
+            last_heartbeat=last_heartbeat,
         )
-        for r in rows
+        for algo, last_heartbeat in rows
     ]
+
+
+@router.post("/heartbeat", response_model=HeartbeatAck)
+def post_heartbeat(body: HeartbeatIn, db: Session = Depends(get_db)) -> HeartbeatAck:
+    """Appends to heartbeats history (unlike the old strategy_heartbeats
+    table, this is a log, not an upsert-one-row-per-pair table) and
+    updates algos.status + servers.last_heartbeat for fast list-view
+    reads. Deliberately does NOT touch servers.status -- that's EC2 power
+    state, a separate concern from an individual algo's health."""
+    server = _resolve_server(db, body.server_id)
+    algo = _get_or_create_algo(db, body.algo_id, server)
+
+    ts = body.timestamp or datetime.now(timezone.utc)
+
+    db.add(models.Heartbeat(
+        algo_id=algo.id, server_id=server.id, timestamp=ts, status=body.status,
+        cpu=body.cpu, memory=body.memory, pnl=body.pnl, position=body.position,
+    ))
+    algo.status = body.status
+    server.last_heartbeat = ts
+    db.commit()
+
+    return HeartbeatAck(success=True, algo_id=body.algo_id, server_id=body.server_id)
 
 
 @router.get("/logs", response_model=list[LogEntry])
