@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 try:
     import boto3
@@ -110,8 +111,20 @@ def _cli() -> int:
     algo_parser.add_argument("algo_name")
     algo_parser.add_argument("--lines", type=int, default=None)
 
-    raw_parser = subparsers.add_parser("raw", help="Run an arbitrary PowerShell command")
-    raw_parser.add_argument("powershell_command")
+    raw_parser = subparsers.add_parser("raw", help="Run an arbitrary PowerShell command or script file")
+    raw_group = raw_parser.add_mutually_exclusive_group(required=True)
+    raw_group.add_argument("powershell_command", nargs="?", default=None)
+    raw_group.add_argument(
+        "--script-file",
+        help=(
+            "Path to a local .ps1 file whose contents get sent as-is. "
+            "Prefer this over an inline command for anything beyond trivial "
+            "one-liners — inline PowerShell typed at a PowerShell prompt "
+            "goes through your shell's own quoting/interpolation before it "
+            "ever reaches this script, on top of SSM's own parameter "
+            "encoding; multi-variable scripts reliably break that way."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -124,6 +137,11 @@ def _cli() -> int:
         if not args.repo_path:
             parser.error("--repo-path is required for 'algo' mode (or set EC2_REPO_PATH)")
         commands = [build_algo_command(args.repo_path, args.command, args.algo_name, args.lines)]
+    elif args.script_file:
+        script_path = Path(args.script_file)
+        if not script_path.is_file():
+            parser.error(f"--script-file not found: {script_path}")
+        commands = script_path.read_text().splitlines()
     else:
         commands = [args.powershell_command]
 
