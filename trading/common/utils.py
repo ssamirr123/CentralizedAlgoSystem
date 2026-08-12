@@ -12,6 +12,7 @@ import os
 import signal
 import socket
 import threading
+import time
 from pathlib import Path
 from types import FrameType
 
@@ -50,6 +51,35 @@ def read_pid_file(algo_name: str) -> int | None:
 def remove_pid_file(algo_name: str) -> None:
     path = pid_file_path(algo_name)
     path.unlink(missing_ok=True)
+
+
+def stop_flag_path(algo_name: str) -> Path:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return DATA_DIR / f"{algo_name}.stop_requested"
+
+
+def request_stop(algo_name: str) -> None:
+    """Signal an algo to shut down gracefully. Cross-platform, no OS signal
+    involved — GracefulShutdown polls for this file's existence. Preferred
+    over os.kill(pid, SIGTERM/CTRL_BREAK_EVENT) sent from an unrelated
+    process, which is unreliable on Windows (console-signal delivery
+    requires session/console relationships that don't hold across
+    independent process invocations)."""
+    stop_flag_path(algo_name).write_text(_now_iso())
+
+
+def clear_stop_flag(algo_name: str) -> None:
+    stop_flag_path(algo_name).unlink(missing_ok=True)
+
+
+def is_stop_requested(algo_name: str) -> bool:
+    return stop_flag_path(algo_name).exists()
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def is_process_running(pid: int) -> bool:
@@ -93,31 +123,66 @@ def _is_process_running_windows(pid: int) -> bool:
 
 class GracefulShutdown:
     """
-    Installs SIGINT/SIGTERM handlers that set a threading.Event instead of
-    killing the process immediately, so the main loop can finish its current
-    iteration, flush state, and disconnect the broker cleanly.
+    Signals the main loop to exit cleanly (finish current iteration, flush
+    state, disconnect the broker) instead of being killed mid-operation.
+
+    Two independent trigger paths, both feeding the same stop condition:
+      1. SIGINT/SIGTERM (and SIGBREAK on Windows) — real OS signals, mainly
+         useful for interactive Ctrl+C during manual/local runs.
+      2. A stop-flag file (trading/data/<algo_name>.stop_requested) —
+         cross-process, platform-independent. This is what
+         trading_agent.py's STOP_ALGO uses: sending a real OS signal from
+         an unrelated process is unreliable on Windows (console-signal
+         delivery needs a session/console relationship that separate CLI
+         invocations don't share), so the agent writes this file instead
+         and the loop polls for it. No such fragility on POSIX either way.
+
+    Pass algo_name to enable the flag-file path; omit it to fall back to
+    signal-only behavior (e.g. a script with no agent-managed lifecycle).
 
     Usage:
-        shutdown = GracefulShutdown()
+        shutdown = GracefulShutdown(algo_name="example_strategy")
         while not shutdown.is_set():
             ...
+            shutdown.wait(loop_interval_seconds)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, algo_name: str | None = None, poll_interval: float = 0.5) -> None:
         self._stop_event = threading.Event()
+        self._algo_name = algo_name
+        self._poll_interval = poll_interval
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
-        # Windows has no real SIGTERM delivery (os.kill(pid, SIGTERM) hard-
-        # terminates instead) — CTRL_BREAK_EVENT + SIGBREAK is the closest
-        # equivalent for a clean local-dev shutdown path on that platform.
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, self._handle_signal)
 
     def _handle_signal(self, signum: int, frame: FrameType | None) -> None:
         self._stop_event.set()
 
+    def _flag_requested(self) -> bool:
+        return self._algo_name is not None and is_stop_requested(self._algo_name)
+
     def is_set(self) -> bool:
-        return self._stop_event.is_set()
+        return self._stop_event.is_set() or self._flag_requested()
 
     def wait(self, timeout: float | None = None) -> bool:
-        return self._stop_event.wait(timeout)
+        """Block until stop is signaled (event or flag file) or timeout
+        elapses. Polls in small increments so the flag file is checked
+        promptly even when timeout is large — a real signal still wakes it
+        immediately via the underlying threading.Event."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self._stop_event.is_set():
+                return True
+            if self._flag_requested():
+                self._stop_event.set()
+                return True
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                step = min(self._poll_interval, remaining)
+            else:
+                step = self._poll_interval
+            if self._stop_event.wait(step):
+                return True

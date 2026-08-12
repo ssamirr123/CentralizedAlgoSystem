@@ -46,9 +46,11 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(project_root))
 
 from trading.common.utils import (
+    clear_stop_flag,
     is_process_running,
     read_pid_file,
     remove_pid_file,
+    request_stop,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -212,15 +214,13 @@ def stop_algo(algo_name: str, timeout: float = STOP_GRACE_TIMEOUT_SECONDS) -> di
 
     _write_state(algo_name, status="STOPPING", last_command="STOP_ALGO")
 
-    graceful_signal_sent = False
-    try:
-        if IS_WINDOWS:
-            os.kill(pid, signal.CTRL_BREAK_EVENT)  # requires CREATE_NEW_PROCESS_GROUP at launch
-        else:
-            os.kill(pid, signal.SIGTERM)
-        graceful_signal_sent = True
-    except OSError:
-        pass  # process may have exited between the liveness check and here
+    # Cross-platform, cross-process graceful stop: write a flag file that
+    # GracefulShutdown polls for (see trading/common/utils.py). Deliberately
+    # NOT an OS signal (os.kill(pid, SIGTERM/CTRL_BREAK_EVENT)) — verified
+    # unreliable on Windows when sent from an unrelated process (this CLI
+    # invocation isn't the algo's parent and doesn't share its console),
+    # which silently degraded every stop to a slow force-kill.
+    request_stop(algo_name)
 
     deadline = time.monotonic() + timeout
     forced = False
@@ -228,6 +228,10 @@ def stop_algo(algo_name: str, timeout: float = STOP_GRACE_TIMEOUT_SECONDS) -> di
         time.sleep(0.5)
 
     if is_process_running(pid):
+        # Still alive after the grace period — either it's genuinely stuck
+        # (blocked in a long synchronous call, broker hang, etc.) or never
+        # got a chance to check the flag. Force-kill as the safety net so
+        # STOP_ALGO always actually stops something, even if not gracefully.
         forced = True
         try:
             if IS_WINDOWS:
@@ -241,6 +245,7 @@ def stop_algo(algo_name: str, timeout: float = STOP_GRACE_TIMEOUT_SECONDS) -> di
             time.sleep(0.2)
 
     remove_pid_file(algo_name)
+    clear_stop_flag(algo_name)
     stopped_at = _now_iso()
     _write_state(algo_name, status="STOPPED", pid=None, last_command="STOP_ALGO", stopped_at=stopped_at)
 
@@ -248,7 +253,7 @@ def stop_algo(algo_name: str, timeout: float = STOP_GRACE_TIMEOUT_SECONDS) -> di
         "algo": algo_name,
         "status": "STOPPED",
         "pid": None,
-        "graceful": graceful_signal_sent and not forced,
+        "graceful": not forced,
         "forced": forced,
         "message": "force-killed after grace timeout" if forced else "stopped gracefully",
     }

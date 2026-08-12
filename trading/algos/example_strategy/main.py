@@ -29,6 +29,7 @@ from trading.common.config import load_config
 from trading.common.logger import get_logger, log_event
 from trading.common.utils import (
     GracefulShutdown,
+    clear_stop_flag,
     get_hostname,
     get_pid,
     remove_pid_file,
@@ -81,8 +82,9 @@ def main() -> int:
         pid=get_pid(), trading_mode=config.trading_mode, broker=config.broker_name,
     )
     write_pid_file(ALGO_NAME)
+    clear_stop_flag(ALGO_NAME)  # defensive: drop any stale flag from a prior run
 
-    shutdown = GracefulShutdown()
+    shutdown = GracefulShutdown(algo_name=ALGO_NAME)
 
     broker = create_broker(config)
     try:
@@ -168,6 +170,7 @@ def main() -> int:
             log_event(logger, logging.ERROR, "BROKER_DISCONNECT_ERROR", error=str(exc))
 
         remove_pid_file(ALGO_NAME)
+        clear_stop_flag(ALGO_NAME)
         log_event(logger, logging.INFO, "ALGO_STOPPED_SAFELY")
 
     return exit_code
