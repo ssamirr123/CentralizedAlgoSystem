@@ -8,9 +8,11 @@
         "iam:CreateRole",
         "iam:GetRole",
         "iam:AttachRolePolicy",
+        "iam:ListAttachedRolePolicies",
         "iam:CreateInstanceProfile",
         "iam:AddRoleToInstanceProfile",
-        "iam:GetInstanceProfile"
+        "iam:GetInstanceProfile",
+        "iam:ListInstanceProfilesForRole"
       ],
       "Resource": [
         "arn:aws:iam::*:role/TradingEC2SSMRole",
