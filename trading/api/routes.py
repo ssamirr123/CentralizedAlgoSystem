@@ -27,8 +27,10 @@ from trading.api.deps import enforce_rate_limit, get_db, require_api_key
 from trading.api.lambda_client import LambdaInvokeError, invoke_orchestrator
 from trading.api.schemas import (
     AlgoActionRequest,
+    AlgoIn,
     AlgoListEntry,
     AlgoStatusResponse,
+    AlgoUpdate,
     CommandResponse,
     DailyPnlEntry,
     DailyPnlIn,
@@ -327,6 +329,121 @@ def delete_server(server_id: str, db: Session = Depends(get_db)) -> Response:
         db.rollback()
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Cannot delete server '{server_id}': it still has related records."
+        ) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/algos", response_model=AlgoListEntry, status_code=status.HTTP_201_CREATED)
+def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoListEntry:
+    """Registers a new strategy for viewing/management before it's ever
+    been started -- otherwise an algo only exists once a start/stop/
+    heartbeat/log call auto-creates it via _get_or_create_algo, which
+    means it's invisible on the dashboard until it first runs."""
+    server = _resolve_server(db, body.server_id)
+
+    existing = (
+        db.query(models.Algo)
+        .filter(models.Algo.name == body.algo_id, models.Algo.server_id == server.id)
+        .one_or_none()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Algo already registered: {body.algo_id} on {body.server_id}"
+        )
+
+    algo = models.Algo(
+        name=body.algo_id,
+        server_id=server.id,
+        script_path=body.script_path or f"trading/algos/{body.algo_id}/main.py",
+        status=body.status,
+        enabled=body.enabled,
+    )
+    db.add(algo)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Algo already registered: {body.algo_id} on {body.server_id}"
+        ) from None
+    db.refresh(algo)
+    return AlgoListEntry(
+        algo_id=algo.name, server_id=server.name, status=algo.status,
+        enabled=algo.enabled, script_path=algo.script_path, updated_at=algo.updated_at,
+        last_heartbeat=None,
+    )
+
+
+@router.patch("/algos/{algo_id}", response_model=AlgoListEntry)
+def patch_algo(algo_id: str, server_id: str, body: AlgoUpdate, db: Session = Depends(get_db)) -> AlgoListEntry:
+    server = _resolve_server(db, server_id)
+    algo = (
+        db.query(models.Algo)
+        .filter(models.Algo.name == algo_id, models.Algo.server_id == server.id)
+        .one_or_none()
+    )
+    if algo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown algo: {algo_id} on {server_id}")
+
+    if body.script_path is not None:
+        algo.script_path = body.script_path
+    if body.status is not None:
+        algo.status = body.status
+    if body.enabled is not None:
+        algo.enabled = body.enabled
+    db.commit()
+    db.refresh(algo)
+
+    last_heartbeat = (
+        db.query(func.max(models.Heartbeat.timestamp))
+        .filter(models.Heartbeat.algo_id == algo.id)
+        .scalar()
+    )
+    return AlgoListEntry(
+        algo_id=algo.name, server_id=server.name, status=algo.status,
+        enabled=algo.enabled, script_path=algo.script_path, updated_at=algo.updated_at,
+        last_heartbeat=last_heartbeat,
+    )
+
+
+@router.delete("/algos/{algo_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_algo(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> Response:
+    """Refuses to delete an algo that still has heartbeat/log/position/
+    trade/P&L/command/run history -- same reasoning as delete_server:
+    surface exactly what's blocking it rather than silently cascading
+    through years of trading history."""
+    server = _resolve_server(db, server_id)
+    algo = (
+        db.query(models.Algo)
+        .filter(models.Algo.name == algo_id, models.Algo.server_id == server.id)
+        .one_or_none()
+    )
+    if algo is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown algo: {algo_id} on {server_id}")
+
+    related_counts = {
+        "heartbeat(s)": db.query(models.Heartbeat).filter(models.Heartbeat.algo_id == algo.id).count(),
+        "log(s)": db.query(models.Log).filter(models.Log.algo_id == algo.id).count(),
+        "position(s)": db.query(models.Position).filter(models.Position.algo_id == algo.id).count(),
+        "trade(s)": db.query(models.Trade).filter(models.Trade.algo_id == algo.id).count(),
+        "daily P&L row(s)": db.query(models.DailyPnl).filter(models.DailyPnl.algo_id == algo.id).count(),
+        "command(s)": db.query(models.Command).filter(models.Command.algo_id == algo.id).count(),
+        "run(s)": db.query(models.AlgoRun).filter(models.AlgoRun.algo_id == algo.id).count(),
+    }
+    blocking = {label: count for label, count in related_counts.items() if count}
+    if blocking:
+        detail = ", ".join(f"{count} {label}" for label, count in blocking.items())
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Cannot delete algo '{algo_id}' on '{server_id}': still has {detail}."
+        )
+
+    db.delete(algo)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Cannot delete algo '{algo_id}': it still has related records."
         ) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

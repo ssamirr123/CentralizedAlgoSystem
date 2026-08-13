@@ -199,6 +199,33 @@ def delete_server(server_id: str) -> None:
     resp.raise_for_status()
 
 
+def create_algo(algo_id: str, server_id: str, script_path: str | None, status: str, enabled: bool) -> dict:
+    body: dict = {"algo_id": algo_id, "server_id": server_id, "status": status, "enabled": enabled}
+    if script_path:
+        body["script_path"] = script_path
+    resp = requests.post(f"{API_BASE_URL}/api/algos", json=body, headers=HEADERS, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def edit_algo(algo_id: str, server_id: str, **updates: object) -> dict:
+    # Only send fields that were actually provided -- PATCH semantics.
+    body = {k: v for k, v in updates.items() if v is not None}
+    resp = requests.patch(
+        f"{API_BASE_URL}/api/algos/{algo_id}", params={"server_id": server_id},
+        json=body, headers=HEADERS, timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def delete_algo(algo_id: str, server_id: str) -> None:
+    resp = requests.delete(
+        f"{API_BASE_URL}/api/algos/{algo_id}", params={"server_id": server_id}, headers=HEADERS, timeout=10,
+    )
+    resp.raise_for_status()
+
+
 def load_logs(algo_id: str, server_id: str, level: str, event: str, log_date, limit: int) -> list[dict]:
     params: dict[str, str | int] = {"algo_id": algo_id, "server_id": server_id, "limit": limit}
     if level and level != "All":
@@ -393,6 +420,91 @@ with st.expander(":material/dns: Manage servers (add / edit / delete)"):
                     if confirm_cols[1].button("Cancel", key=f"cancel_delete_btn_{sid}"):
                         st.session_state.pop(confirm_key, None)
                         st.rerun()
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Manage strategies -- add/edit/delete against POST, PATCH, DELETE /api/algos.
+# Placed BEFORE the "no algos yet" gate below (which calls st.stop()) so a
+# brand-new deployment with zero strategies can still register its first
+# one from here -- if this were below that gate, it would never render on
+# an empty install.
+# ---------------------------------------------------------------------------
+with st.expander(":material/precision_manufacturing: Manage strategies (add / edit / delete)"):
+    if not servers:
+        st.info("Register a server first (see 'Manage servers' above) before adding a strategy.")
+    else:
+        server_options = sorted(s["server_id"] for s in servers)
+
+        st.markdown("**Register a new strategy**")
+        with st.form("add_algo_form", clear_on_submit=True):
+            new_algo_cols = st.columns(4)
+            new_algo_id = new_algo_cols[0].text_input("Strategy ID (name)")
+            new_algo_server = new_algo_cols[1].selectbox("Server", server_options)
+            new_algo_script = new_algo_cols[2].text_input("Script path (optional)")
+            new_algo_status = new_algo_cols[3].selectbox("Status", ["STOPPED", "RUNNING", "ERROR"], index=0)
+            new_algo_enabled = st.checkbox("Enabled", value=True)
+            if st.form_submit_button(":material/add: Add strategy"):
+                if not new_algo_id:
+                    st.warning("Strategy ID is required.")
+                else:
+                    try:
+                        create_algo(new_algo_id, new_algo_server, new_algo_script or None, new_algo_status, new_algo_enabled)
+                        st.success(f"Registered strategy '{new_algo_id}' on '{new_algo_server}'.")
+                        load_algos.clear()
+                        st.rerun()
+                    except requests.exceptions.RequestException as exc:
+                        st.error(f"Could not register strategy: {exc}")
+
+        if algos:
+            st.markdown("**Existing strategies**")
+            for algo in sorted(algos, key=lambda a: (a["server_id"], a["algo_id"])):
+                aid = algo["algo_id"]
+                asid = algo["server_id"]
+                with st.expander(f"{aid} @ {asid}"):
+                    with st.form(f"edit_algo_form_{aid}_{asid}"):
+                        edit_algo_cols = st.columns(3)
+                        edit_algo_script = edit_algo_cols[0].text_input("Script path", value=algo["script_path"])
+                        edit_algo_status = edit_algo_cols[1].selectbox(
+                            "Status", ["STOPPED", "RUNNING", "ERROR"],
+                            index=["STOPPED", "RUNNING", "ERROR"].index(algo["status"])
+                            if algo["status"] in ("STOPPED", "RUNNING", "ERROR") else 0,
+                        )
+                        edit_algo_enabled = edit_algo_cols[2].checkbox("Enabled", value=algo["enabled"])
+                        if st.form_submit_button(":material/save: Save changes"):
+                            try:
+                                edit_algo(
+                                    aid, asid, script_path=edit_algo_script,
+                                    status=edit_algo_status, enabled=edit_algo_enabled,
+                                )
+                                st.success(f"Updated strategy '{aid}'.")
+                                load_algos.clear()
+                                st.rerun()
+                            except requests.exceptions.RequestException as exc:
+                                st.error(f"Could not update strategy: {exc}")
+
+                    confirm_key = f"confirm_delete_algo_{aid}_{asid}"
+                    if not st.session_state.get(confirm_key):
+                        if st.button(":material/delete: Delete strategy", key=f"delete_algo_btn_{aid}_{asid}"):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+                    else:
+                        st.warning(f"Delete '{aid}' on '{asid}'? This cannot be undone.")
+                        confirm_algo_cols = st.columns(2)
+                        if confirm_algo_cols[0].button(
+                            ":material/delete_forever: Confirm delete", key=f"confirm_delete_algo_btn_{aid}_{asid}"
+                        ):
+                            try:
+                                delete_algo(aid, asid)
+                                st.success(f"Deleted strategy '{aid}'.")
+                            except requests.exceptions.RequestException as exc:
+                                st.error(f"Could not delete strategy: {exc}")
+                            st.session_state.pop(confirm_key, None)
+                            load_algos.clear()
+                            st.rerun()
+                        if confirm_algo_cols[1].button("Cancel", key=f"cancel_delete_algo_btn_{aid}_{asid}"):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
 
 st.divider()
 
