@@ -16,6 +16,11 @@ os.environ["REPO_PATH"] = r"C:\trading-app"
 
 import orchestrator  # noqa: E402
 
+# Captured before any test below reassigns orchestrator._list_enabled_algos
+# to a MagicMock -- needed later to test the REAL filtering logic, not the
+# stubbed-out version other tests substitute for it.
+_real_list_enabled_algos = orchestrator._list_enabled_algos
+
 failures = []
 
 
@@ -135,6 +140,106 @@ check(
     result["status"] == "RUNNING" and result["pid"] == 4242,
     str(result),
 )
+
+# --- *_all_algos: missing API_BASE_URL/CONTROL_API_KEY -> error ---
+result = orchestrator.lambda_handler({"action": "start_all_algos"}, None)
+check("start_all_algos missing env vars -> error", result["success"] is False, str(result))
+
+os.environ["API_BASE_URL"] = "http://api.example.com"
+os.environ["CONTROL_API_KEY"] = "test-api-key"
+
+# --- *_all_algos: no enabled algos ---
+orchestrator._list_enabled_algos = MagicMock(return_value=[])
+result = orchestrator.lambda_handler({"action": "start_all_algos"}, None)
+check(
+    "start_all_algos no enabled algos -> success, empty results",
+    result == {"success": True, "results": [], "message": "no enabled algos found"},
+    str(result),
+)
+
+# --- *_all_algos: two enabled algos, one disabled (filtered by _list_enabled_algos itself) ---
+orchestrator._list_enabled_algos = MagicMock(return_value=[
+    {"algo_id": "algo_a", "server_id": "ec2-1", "enabled": True},
+    {"algo_id": "algo_b", "server_id": "ec2-1", "enabled": True},
+])
+orchestrator.ssm_client = MagicMock()
+orchestrator.ssm_client.send_command.side_effect = [
+    {"Command": {"CommandId": "cmd-a"}},
+    {"Command": {"CommandId": "cmd-b"}},
+]
+result = orchestrator.lambda_handler({"action": "start_all_algos"}, None)
+check("start_all_algos -> success, 2 results", result["success"] is True and len(result["results"]) == 2, str(result))
+check(
+    "start_all_algos -> each result has correct algo_id/job_id",
+    {r["algo_id"] for r in result["results"]} == {"algo_a", "algo_b"}
+    and {r["job_id"] for r in result["results"]} == {"cmd-a", "cmd-b"},
+    str(result),
+)
+check("start_all_algos -> sent one SSM command per algo", orchestrator.ssm_client.send_command.call_count == 2)
+
+# --- *_all_algos: correct single-action mapping (stop_all_algos -> STOP_ALGO) ---
+orchestrator.ssm_client.send_command.side_effect = None
+orchestrator.ssm_client.send_command.return_value = {"Command": {"CommandId": "cmd-x"}}
+orchestrator.lambda_handler({"action": "stop_all_algos"}, None)
+sent = orchestrator.ssm_client.send_command.call_args.kwargs["Parameters"]["commands"][0]
+check("stop_all_algos sends STOP_ALGO (not START_ALGO)", "STOP_ALGO" in sent, sent)
+
+# --- *_all_algos: one algo's SSM send fails -> overall success=False, other still attempted ---
+def _side_effect(*args, **kwargs):
+    commands = kwargs["Parameters"]["commands"][0]
+    if "algo_a" in commands:
+        raise orchestrator.ClientError({"Error": {"Code": "Throttling", "Message": "rate limited"}}, "SendCommand")
+    return {"Command": {"CommandId": "cmd-b"}}
+
+orchestrator._list_enabled_algos = MagicMock(return_value=[
+    {"algo_id": "algo_a", "server_id": "ec2-1", "enabled": True},
+    {"algo_id": "algo_b", "server_id": "ec2-1", "enabled": True},
+])
+orchestrator.ssm_client.send_command.side_effect = _side_effect
+result = orchestrator.lambda_handler({"action": "start_all_algos"}, None)
+check("partial failure -> overall success False", result["success"] is False, str(result))
+check(
+    "partial failure -> failed algo has success:False, other still succeeded",
+    len(result["results"]) == 2
+    and any(r["algo_id"] == "algo_a" and r["success"] is False for r in result["results"])
+    and any(r["algo_id"] == "algo_b" and r["success"] is True for r in result["results"]),
+    str(result),
+)
+
+# --- _list_enabled_algos: real filtering logic (not mocked) against a fake urlopen ---
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+import unittest.mock as mock  # noqa: E402
+
+with mock.patch("orchestrator.urllib.request.urlopen") as mock_urlopen:
+    mock_urlopen.return_value = _FakeResponse([
+        {"algo_id": "enabled_one", "enabled": True},
+        {"algo_id": "disabled_one", "enabled": False},
+    ])
+    algos = _real_list_enabled_algos("http://api.example.com", "key")
+    check(
+        "_list_enabled_algos filters out disabled algos (real logic, not mocked)",
+        algos == [{"algo_id": "enabled_one", "enabled": True}],
+        str(algos),
+    )
+    request_sent = mock_urlopen.call_args.args[0]
+    check(
+        "_list_enabled_algos calls the correct URL with X-API-Key header",
+        request_sent.full_url == "http://api.example.com/api/algos" and request_sent.headers.get("X-api-key") == "key",
+        f"url={request_sent.full_url} headers={dict(request_sent.headers)}",
+    )
 
 print()
 if failures:

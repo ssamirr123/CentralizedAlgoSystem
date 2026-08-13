@@ -8,6 +8,10 @@ Lambda duplication when a single function stays clean).
 Actions:
     start_ec2, stop_ec2                              -- EC2 power state
     start_algo, stop_algo, restart_algo, update_algo  -- async, via SSM
+    start_all_algos, stop_all_algos, update_all_algos -- Milestone 11: same as above, for every
+                                                          enabled algo (for EventBridge Scheduler --
+                                                          one static payload per schedule, not one
+                                                          rule per algo)
     get_command_status                                -- poll a job_id from the above
     get_algo_status                                   -- convenience: STATUS + short bounded wait
 
@@ -22,9 +26,21 @@ credential prompt) would otherwise either blow the Lambda timeout or hold
 an expensive invocation open pointlessly.
 
 Configuration via Lambda environment variables:
-    INSTANCE_ID   -- target EC2 instance ID (required)
-    REPO_PATH     -- path to the repo on the instance, e.g. C:\\trading-app (required for algo actions)
-    AWS_REGION    -- set automatically by the Lambda runtime; not user-configured
+    INSTANCE_ID       -- target EC2 instance ID (required)
+    REPO_PATH         -- path to the repo on the instance, e.g. C:\\trading-app (required for algo actions)
+    AWS_REGION        -- set automatically by the Lambda runtime; not user-configured
+    API_BASE_URL      -- the deployed control-center API (required for *_all_algos actions --
+                          these need to know which algos exist, which only the API/DB knows)
+    CONTROL_API_KEY   -- auth for the above (same key the dashboard uses)
+
+*_all_algos actions call GET {API_BASE_URL}/api/algos via urllib (stdlib only
+-- deliberately not the `requests` package, to keep deployment a single-file
+zip with no dependency packaging step) rather than connecting to Supabase
+directly. This Lambda's job stays "invoke SSM," not "know how to query
+Postgres" -- that's already the API layer's responsibility (Milestone 6),
+and duplicating it here would mean bundling SQLAlchemy/psycopg2 into a
+Lambda package, which is real packaging complexity for no architectural
+benefit when the API already exposes exactly this list.
 """
 from __future__ import annotations
 
@@ -32,6 +48,8 @@ import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
 from typing import Any
 
 import boto3
@@ -49,6 +67,8 @@ ALGO_ACTIONS = {
     "restart_algo": "RESTART_ALGO",
     "update_algo": "UPDATE",
 }
+
+ALL_ALGOS_ACTIONS = {"start_all_algos", "stop_all_algos", "update_all_algos"}
 
 # get_algo_status polls briefly since STATUS is a fast local check on the
 # instance (no network calls, no download) — unlike start/stop/update,
@@ -187,6 +207,52 @@ def _action_algo_command(action: str, instance_id: str, repo_path: str, event: d
     }
 
 
+class AlgoListError(RuntimeError):
+    pass
+
+
+def _list_enabled_algos(api_base_url: str, api_key: str) -> list[dict]:
+    request = urllib.request.Request(
+        f"{api_base_url.rstrip('/')}/api/algos",
+        headers={"X-API-Key": api_key},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            algos = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
+        raise AlgoListError(f"could not fetch algo list from {api_base_url}/api/algos: {exc}") from exc
+
+    return [a for a in algos if a.get("enabled")]
+
+
+def _action_all_algos_command(action: str, instance_id: str, repo_path: str, event: dict) -> dict:
+    """Same underlying SSM command as _action_algo_command, applied to
+    every enabled algo instead of one named in the event -- for
+    EventBridge Scheduler, which passes a single static payload per rule
+    rather than one rule per algo."""
+    api_base_url = _get_env("API_BASE_URL")
+    api_key = _get_env("CONTROL_API_KEY")
+    if not api_base_url or not api_key:
+        return _error("API_BASE_URL and CONTROL_API_KEY environment variables are required for *_all_algos actions")
+
+    try:
+        algos = _list_enabled_algos(api_base_url, api_key)
+    except AlgoListError as exc:
+        return _error(str(exc))
+
+    if not algos:
+        _log_event("ALL_ALGOS_NONE_ENABLED", action=action)
+        return {"success": True, "results": [], "message": "no enabled algos found"}
+
+    single_action = action.removesuffix("_all_algos") + "_algo"  # e.g. start_all_algos -> start_algo
+    results = [
+        _action_algo_command(single_action, instance_id, repo_path, {"algo_id": algo["algo_id"]})
+        for algo in algos
+    ]
+    _log_event("ALL_ALGOS_COMMAND_SENT", action=action, algo_count=len(results))
+    return {"success": all(r.get("success") for r in results), "results": results}
+
+
 def _action_get_command_status(instance_id: str, event: dict) -> dict:
     command_id = event.get("job_id") or event.get("command_id")
     if not command_id:
@@ -284,6 +350,11 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if not repo_path:
             return _error("REPO_PATH environment variable is not set")
         result = _action_algo_command(action, instance_id, repo_path, event)
+    elif action in ALL_ALGOS_ACTIONS:
+        repo_path = _get_env("REPO_PATH")
+        if not repo_path:
+            return _error("REPO_PATH environment variable is not set")
+        result = _action_all_algos_command(action, instance_id, repo_path, event)
     elif action == "get_command_status":
         result = _action_get_command_status(instance_id, event)
     elif action == "get_algo_status":

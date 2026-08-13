@@ -55,9 +55,14 @@ aws lambda create-function `
   --role arn:aws:iam::471112713822:role/TradingLambdaExecutionRole `
   --zip-file fileb://orchestrator.zip `
   --timeout 30 `
-  --environment "Variables={INSTANCE_ID=i-0f60543b5534c332f,REPO_PATH=C:\trading-app}" `
+  --environment "Variables={INSTANCE_ID=i-0f60543b5534c332f,REPO_PATH=C:\trading-app,API_BASE_URL=<your-vercel-api-url>,CONTROL_API_KEY=<your-control-api-key>}" `
   --region ap-south-1
 ```
+
+`API_BASE_URL`/`CONTROL_API_KEY` are only used by Milestone 11's
+`start_all_algos`/`stop_all_algos`/`update_all_algos` actions (they call
+the deployed API to list enabled algos) — harmless to set now even before
+setting up scheduling.
 
 Expect a JSON blob with `"State": "Active"` (or `"Pending"` — wait a few
 seconds and `get-function` to confirm it becomes Active).

@@ -48,6 +48,37 @@
       }
     },
     {
+      "Sid": "SchedulerRoleSetup",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::*:role/TradingSchedulerRole"
+    },
+    {
+      "Sid": "PassRoleToScheduler",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/TradingSchedulerRole",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "scheduler.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "SchedulerManage",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:CreateSchedule",
+        "scheduler:GetSchedule",
+        "scheduler:UpdateSchedule",
+        "scheduler:DeleteSchedule",
+        "scheduler:ListSchedules"
+      ],
+      "Resource": "arn:aws:scheduler:ap-south-1:471112713822:schedule/default/TradingSchedule-*"
+    },
+    {
       "Sid": "AttachProfileToInstance",
       "Effect": "Allow",
       "Action": [
