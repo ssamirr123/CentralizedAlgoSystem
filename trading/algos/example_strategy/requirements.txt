@@ -1,0 +1,8 @@
+requests>=2.32.0
+psutil>=6.0.0
+
+# Uncomment the SDK for whichever broker you configure via BROKER=:
+# kiteconnect>=5.0.0        # BROKER=zerodha
+# smartapi-python>=1.5.5    # BROKER=angelone
+# pyotp>=2.9.0              # BROKER=angelone (TOTP login)
+# breeze-connect>=1.0.55    # BROKER=icici_breeze

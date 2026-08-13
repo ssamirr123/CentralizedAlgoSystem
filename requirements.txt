@@ -5,6 +5,7 @@ pydantic>=2.8.0
 sqlalchemy>=2.0.32
 httpx>=0.27.0
 psycopg2-binary>=2.9.0
+boto3>=1.34.0
 
 # Dashboard (Streamlit Cloud)
 streamlit>=1.37.0
