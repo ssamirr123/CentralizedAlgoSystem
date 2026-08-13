@@ -163,6 +163,18 @@ def load_logs(algo_id: str, server_id: str, level: str, event: str, log_date, li
     return resp.json()
 
 
+@st.cache_data(ttl=15)
+def load_positions(algo_id: str, server_id: str) -> list[dict]:
+    resp = requests.get(
+        f"{API_BASE_URL}/api/positions",
+        params={"algo_id": algo_id, "server_id": server_id},
+        headers=HEADERS,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
@@ -260,6 +272,54 @@ for algo in algos:
                 st.error(f"Failed to reach the API to start {algo_id}: {exc}")
 
 st.caption("Auto-refreshes every 30s. Status/P&L come from the last known DB state, not a live check on every load.")
+
+# ---------------------------------------------------------------------------
+# Positions -- current holdings per algo/server. A closed position (qty 0)
+# has no row at all (see POST /api/positions), not a zero-quantity one, so
+# "no positions" genuinely means flat, not "data hasn't arrived yet" vs.
+# "was open and closed" ambiguity.
+#
+# Note: "Max loss" / "Stop loss" from the master prompt's Risk section
+# aren't shown here -- there's no schema field for a strategy's configured
+# risk limits (that's a per-strategy config concern, not yet implemented),
+# and fabricating placeholder numbers would be worse than omitting them.
+# ---------------------------------------------------------------------------
+st.divider()
+st.subheader(":material/account_balance_wallet: Positions")
+
+pos_cols = st.columns(2)
+p_algo = pos_cols[0].selectbox("Strategy", algo_names, key="pos_algo")
+p_server = pos_cols[1].selectbox("Server", server_names, key="pos_server")
+
+try:
+    positions = load_positions(p_algo, p_server)
+except requests.exceptions.RequestException as exc:
+    st.error(f":material/wifi_off: Could not load positions: {exc}")
+    positions = []
+
+if not positions:
+    st.info(":material/hourglass_empty: No open positions for this strategy/server.", icon=":material/info:")
+else:
+    st.dataframe(
+        [
+            {
+                "Symbol": p["symbol"],
+                "Quantity": p["quantity"],
+                "Avg Price (₹)": p["average_price"],
+                "Last Price (₹)": p.get("last_price"),
+                "P&L (₹)": p.get("pnl"),
+                "Updated": p["updated_at"],
+            }
+            for p in positions
+        ],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Avg Price (₹)": st.column_config.NumberColumn(format="₹%.2f"),
+            "Last Price (₹)": st.column_config.NumberColumn(format="₹%.2f"),
+            "P&L (₹)": st.column_config.NumberColumn(format="₹%.2f"),
+        },
+    )
 
 # ---------------------------------------------------------------------------
 # Trading logs -- filterable by algo, server, date, level, event type, per

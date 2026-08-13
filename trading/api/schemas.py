@@ -110,3 +110,56 @@ class ServerListEntry(BaseModel):
     region: str
     status: str
     last_heartbeat: datetime | None
+
+
+class PositionIn(BaseModel):
+    algo_id: str  # algo NAME
+    server_id: str  # server NAME
+    symbol: str
+    quantity: int
+    average_price: float
+    last_price: float | None = None
+    pnl: float | None = None
+
+
+class PositionAck(BaseModel):
+    success: bool
+    closed: bool = False  # True if quantity==0 caused the position row to be deleted
+
+
+class TradeIn(BaseModel):
+    algo_id: str  # algo NAME
+    server_id: str  # server NAME
+    symbol: str
+    side: str  # BUY / SELL
+    quantity: int
+    price: float
+    order_id: str | None = None
+    executed_at: datetime | None = None  # server sets to now if omitted
+
+
+class TradeAck(BaseModel):
+    success: bool
+
+
+class TradeEntry(BaseModel):
+    symbol: str
+    side: str
+    quantity: int
+    price: float
+    executed_at: datetime
+    order_id: str | None = None
+
+
+class DailyPnlIn(BaseModel):
+    algo_id: str  # algo NAME
+    server_id: str  # server NAME
+    pnl: float
+    trade_count: int = 0
+    # Named pnl_date, NOT date -- a field named the same as its own `date`
+    # type annotation self-shadows during Pydantic's postponed-annotation
+    # evaluation (`date | None` fails with "unsupported operand type(s) for
+    # |: 'NoneType' and 'NoneType'" because by eval time the class already
+    # bound `date` to its own default value, None). Same reasoning as
+    # LogIn's log_date field.
+    pnl_date: date | None = None  # server sets to today (UTC) if omitted

@@ -29,6 +29,7 @@ from trading.common.config import load_config
 from trading.common.heartbeat import ControlCenterHeartbeatAgent
 from trading.common.log_shipper import LogShipper
 from trading.common.logger import attach_shipper, get_logger, log_event
+from trading.common.reporting import report_daily_pnl
 from trading.common.utils import (
     GracefulShutdown,
     clear_stop_flag,
@@ -178,6 +179,11 @@ def main() -> int:
 
     log_event(logger, logging.INFO, "ALGO_RUNNING")
 
+    # Throttled to roughly the same cadence as the control-center heartbeat
+    # rather than every tick -- reuses that interval instead of adding a
+    # third background thread just for this.
+    last_pnl_report_monotonic = 0.0
+
     exit_code = 0
     try:
         while not shutdown.is_set():
@@ -188,6 +194,14 @@ def main() -> int:
                 )
                 if control_center_agent is not None:
                     control_center_agent.update_metrics(status=status, pnl=day_pnl)
+
+                    now = time.monotonic()
+                    if now - last_pnl_report_monotonic >= config.control_heartbeat_interval_seconds:
+                        report_daily_pnl(
+                            config.api_base_url, config.control_api_key, config.strategy_name,
+                            server_name, pnl=day_pnl, trade_count=trade_count,
+                        )
+                        last_pnl_report_monotonic = now
             except Exception as exc:  # noqa: BLE001
                 # A single bad tick should not crash the whole process —
                 # log it, report ERROR status via heartbeat, keep looping.
@@ -219,6 +233,10 @@ def main() -> int:
         if control_center_agent is not None:
             control_center_agent.update_metrics(status="STOPPED", pnl=strategy.day_pnl)
             control_center_agent.stop()
+            report_daily_pnl(
+                config.api_base_url, config.control_api_key, config.strategy_name,
+                server_name, pnl=strategy.day_pnl, trade_count=strategy.trade_count,
+            )
 
         log_event(logger, logging.INFO, "STOP")  # shippable per the project's own event list
 

@@ -28,14 +28,20 @@ from trading.api.schemas import (
     AlgoStatusResponse,
     CommandResponse,
     DailyPnlEntry,
+    DailyPnlIn,
     HeartbeatAck,
     HeartbeatIn,
     LogAck,
     LogEntry,
     LogIn,
+    PositionAck,
     PositionEntry,
+    PositionIn,
     ServerListEntry,
     ServerStatusResponse,
+    TradeAck,
+    TradeEntry,
+    TradeIn,
 )
 from trading.database import models
 
@@ -330,3 +336,113 @@ def get_positions(algo_id: str, server_id: str, db: Session = Depends(get_db)) -
         )
         for r in rows
     ]
+
+
+@router.post("/positions", response_model=PositionAck)
+def post_position(body: PositionIn, db: Session = Depends(get_db)) -> PositionAck:
+    """Upserts current holdings (unlike trades, which are insert-only
+    history) -- a position row represents what's held RIGHT NOW. A
+    quantity of 0 means the position closed, so the row is deleted rather
+    than kept at zero; "no row" is the correct representation of "no
+    position," not a zero-quantity row sitting around forever."""
+    server = _resolve_server(db, body.server_id)
+    algo = _get_or_create_algo(db, body.algo_id, server)
+
+    existing = (
+        db.query(models.Position)
+        .filter(
+            models.Position.algo_id == algo.id,
+            models.Position.server_id == server.id,
+            models.Position.symbol == body.symbol,
+        )
+        .one_or_none()
+    )
+
+    if body.quantity == 0:
+        if existing is not None:
+            db.delete(existing)
+            db.commit()
+        return PositionAck(success=True, closed=True)
+
+    if existing is not None:
+        existing.quantity = body.quantity
+        existing.average_price = body.average_price
+        existing.last_price = body.last_price
+        existing.pnl = body.pnl
+    else:
+        db.add(models.Position(
+            algo_id=algo.id, server_id=server.id, symbol=body.symbol,
+            quantity=body.quantity, average_price=body.average_price,
+            last_price=body.last_price, pnl=body.pnl,
+        ))
+    db.commit()
+    return PositionAck(success=True, closed=False)
+
+
+@router.get("/trades", response_model=list[TradeEntry])
+def get_trades(algo_id: str, server_id: str, limit: int = 100, db: Session = Depends(get_db)) -> list[TradeEntry]:
+    server = _resolve_server(db, server_id)
+    algo = _get_or_create_algo(db, algo_id, server)
+    db.commit()
+
+    rows = (
+        db.query(models.Trade)
+        .filter(models.Trade.algo_id == algo.id)
+        .order_by(models.Trade.executed_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        TradeEntry(
+            symbol=r.symbol, side=r.side, quantity=r.quantity, price=r.price,
+            executed_at=r.executed_at, order_id=r.order_id,
+        )
+        for r in rows
+    ]
+
+
+@router.post("/trades", response_model=TradeAck)
+def post_trade(body: TradeIn, db: Session = Depends(get_db)) -> TradeAck:
+    """Insert-only -- every fill is its own permanent record, never
+    updated or deleted (unlike positions, which reflect current state)."""
+    server = _resolve_server(db, body.server_id)
+    algo = _get_or_create_algo(db, body.algo_id, server)
+
+    db.add(models.Trade(
+        algo_id=algo.id, server_id=server.id, symbol=body.symbol, side=body.side.upper(),
+        quantity=body.quantity, price=body.price,
+        executed_at=body.executed_at or datetime.now(timezone.utc),
+        order_id=body.order_id,
+    ))
+    db.commit()
+    return TradeAck(success=True)
+
+
+@router.post("/pnl", response_model=DailyPnlEntry)
+def post_pnl(body: DailyPnlIn, db: Session = Depends(get_db)) -> DailyPnlEntry:
+    """Upserts today's (or the given date's) rollup -- one row per
+    algo/server/day, overwritten as the strategy's own running total
+    changes through the day, not accumulated server-side."""
+    server = _resolve_server(db, body.server_id)
+    algo = _get_or_create_algo(db, body.algo_id, server)
+    target_date = body.pnl_date or datetime.now(timezone.utc).date()
+
+    existing = (
+        db.query(models.DailyPnl)
+        .filter(
+            models.DailyPnl.algo_id == algo.id,
+            models.DailyPnl.server_id == server.id,
+            models.DailyPnl.date == target_date,
+        )
+        .one_or_none()
+    )
+    if existing is not None:
+        existing.pnl = body.pnl
+        existing.trade_count = body.trade_count
+    else:
+        db.add(models.DailyPnl(
+            algo_id=algo.id, server_id=server.id, date=target_date,
+            pnl=body.pnl, trade_count=body.trade_count,
+        ))
+    db.commit()
+    return DailyPnlEntry(date=target_date, pnl=body.pnl, trade_count=body.trade_count)
