@@ -169,6 +169,36 @@ def post_action(action: str, algo_id: str, server_id: str) -> dict:
     return resp.json()
 
 
+def create_server(server_id: str, ec2_instance_id: str, region: str, status: str) -> dict:
+    resp = requests.post(
+        f"{API_BASE_URL}/api/servers",
+        json={"server_id": server_id, "ec2_instance_id": ec2_instance_id, "region": region, "status": status},
+        headers=HEADERS,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def update_server(current_server_id: str, **updates: str) -> dict:
+    # Only send fields that actually changed -- PATCH semantics, an
+    # omitted field must leave that column untouched server-side.
+    body = {k: v for k, v in updates.items() if v}
+    resp = requests.patch(
+        f"{API_BASE_URL}/api/servers/{current_server_id}",
+        json=body,
+        headers=HEADERS,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def delete_server(server_id: str) -> None:
+    resp = requests.delete(f"{API_BASE_URL}/api/servers/{server_id}", headers=HEADERS, timeout=10)
+    resp.raise_for_status()
+
+
 def load_logs(algo_id: str, server_id: str, level: str, event: str, log_date, limit: int) -> list[dict]:
     params: dict[str, str | int] = {"algo_id": algo_id, "server_id": server_id, "limit": limit}
     if level and level != "All":
@@ -284,6 +314,85 @@ else:
         health_cols[3].write(f":material/dns: `{srv['ec2_instance_id']}` ({srv['region']})")
 
 st.caption("EC2/SSM health is a live check (Lambda -> AWS), cached 30s -- everything else on this page is DB state.")
+
+# ---------------------------------------------------------------------------
+# Manage servers -- add/edit/delete against POST, PATCH, DELETE /api/servers.
+# Delete is refused server-side while algos are still registered against a
+# server, so no client-side cascade check is needed here -- just surface
+# whatever the API says went wrong.
+# ---------------------------------------------------------------------------
+with st.expander(":material/dns: Manage servers (add / edit / delete)"):
+    st.markdown("**Register a new server**")
+    with st.form("add_server_form", clear_on_submit=True):
+        new_cols = st.columns(4)
+        new_server_id = new_cols[0].text_input("Server ID (name)")
+        new_ec2_id = new_cols[1].text_input("EC2 instance ID")
+        new_region = new_cols[2].text_input("Region", value="ap-south-1")
+        new_status = new_cols[3].selectbox(
+            "Status", ["UNKNOWN", "RUNNING", "STOPPED"], index=0
+        )
+        if st.form_submit_button(":material/add: Add server"):
+            if not new_server_id or not new_ec2_id or not new_region:
+                st.warning("Server ID, EC2 instance ID, and region are all required.")
+            else:
+                try:
+                    create_server(new_server_id, new_ec2_id, new_region, new_status)
+                    st.success(f"Registered server '{new_server_id}'.")
+                    load_servers.clear()
+                    st.rerun()
+                except requests.exceptions.RequestException as exc:
+                    st.error(f"Could not register server: {exc}")
+
+    if servers:
+        st.markdown("**Existing servers**")
+        for srv in sorted(servers, key=lambda s: s["server_id"]):
+            sid = srv["server_id"]
+            with st.expander(f"{sid}"):
+                with st.form(f"edit_server_form_{sid}"):
+                    edit_cols = st.columns(4)
+                    edit_server_id = edit_cols[0].text_input("Server ID (name)", value=sid)
+                    edit_ec2_id = edit_cols[1].text_input("EC2 instance ID", value=srv["ec2_instance_id"])
+                    edit_region = edit_cols[2].text_input("Region", value=srv["region"])
+                    edit_status = edit_cols[3].selectbox(
+                        "Status", ["UNKNOWN", "RUNNING", "STOPPED"],
+                        index=["UNKNOWN", "RUNNING", "STOPPED"].index(srv["status"])
+                        if srv["status"] in ("UNKNOWN", "RUNNING", "STOPPED") else 0,
+                    )
+                    if st.form_submit_button(":material/save: Save changes"):
+                        try:
+                            update_server(
+                                sid,
+                                server_id=edit_server_id if edit_server_id != sid else "",
+                                ec2_instance_id=edit_ec2_id,
+                                region=edit_region,
+                                status=edit_status,
+                            )
+                            st.success(f"Updated server '{sid}'.")
+                            load_servers.clear()
+                            st.rerun()
+                        except requests.exceptions.RequestException as exc:
+                            st.error(f"Could not update server: {exc}")
+
+                confirm_key = f"confirm_delete_{sid}"
+                if not st.session_state.get(confirm_key):
+                    if st.button(":material/delete: Delete server", key=f"delete_btn_{sid}"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+                else:
+                    st.warning(f"Delete '{sid}'? This cannot be undone.")
+                    confirm_cols = st.columns(2)
+                    if confirm_cols[0].button(":material/delete_forever: Confirm delete", key=f"confirm_delete_btn_{sid}"):
+                        try:
+                            delete_server(sid)
+                            st.success(f"Deleted server '{sid}'.")
+                        except requests.exceptions.RequestException as exc:
+                            st.error(f"Could not delete server: {exc}")
+                        st.session_state.pop(confirm_key, None)
+                        load_servers.clear()
+                        st.rerun()
+                    if confirm_cols[1].button("Cancel", key=f"cancel_delete_btn_{sid}"):
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
 
 st.divider()
 

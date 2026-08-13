@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -43,6 +43,7 @@ from trading.api.schemas import (
     ServerIn,
     ServerListEntry,
     ServerStatusResponse,
+    ServerUpdate,
     TradeAck,
     TradeEntry,
     TradeIn,
@@ -275,6 +276,59 @@ def list_servers(db: Session = Depends(get_db)) -> list[ServerListEntry]:
         )
         for r in rows
     ]
+
+
+@router.patch("/servers/{server_id}", response_model=ServerListEntry)
+def update_server(server_id: str, body: ServerUpdate, db: Session = Depends(get_db)) -> ServerListEntry:
+    server = _resolve_server(db, server_id)
+
+    if body.server_id is not None:
+        server.name = body.server_id
+    if body.ec2_instance_id is not None:
+        server.ec2_instance_id = body.ec2_instance_id
+    if body.region is not None:
+        server.region = body.region
+    if body.status is not None:
+        server.status = body.status
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Server already registered: {body.server_id}"
+        ) from None
+    db.refresh(server)
+    return ServerListEntry(
+        server_id=server.name, ec2_instance_id=server.ec2_instance_id,
+        region=server.region, status=server.status, last_heartbeat=server.last_heartbeat,
+    )
+
+
+@router.delete("/servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_server(server_id: str, db: Session = Depends(get_db)) -> Response:
+    """Refuses to delete a server that still has algos registered against
+    it -- the caller has to remove/reassign those first, rather than this
+    endpoint silently cascading through heartbeats/logs/positions/trades/
+    commands for every algo that ever ran there."""
+    server = _resolve_server(db, server_id)
+
+    algo_count = db.query(models.Algo).filter(models.Algo.server_id == server.id).count()
+    if algo_count:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Cannot delete server '{server_id}': {algo_count} algo(s) still registered against it.",
+        )
+
+    db.delete(server)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Cannot delete server '{server_id}': it still has related records."
+        ) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/algos", response_model=list[AlgoListEntry])
