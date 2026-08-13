@@ -40,6 +40,7 @@ from trading.api.schemas import (
     PositionAck,
     PositionEntry,
     PositionIn,
+    ServerIn,
     ServerListEntry,
     ServerStatusResponse,
     TradeAck,
@@ -236,6 +237,31 @@ def server_status(server_id: str, live: bool = False, db: Session = Depends(get_
         last_heartbeat=server.last_heartbeat,
         ssm_status=ssm_status,
         live_check_healthy=live_check_healthy,
+    )
+
+
+@router.post("/servers", response_model=ServerListEntry, status_code=status.HTTP_201_CREATED)
+def register_server(body: ServerIn, db: Session = Depends(get_db)) -> ServerListEntry:
+    """Registers a new EC2 trading server. There's no auto-registration
+    path (heartbeats/logs/etc. all require the server to already exist,
+    via _resolve_server) -- this is the one place a servers row gets
+    created, meant to be called once per EC2 instance during setup."""
+    server = models.Server(
+        name=body.server_id, ec2_instance_id=body.ec2_instance_id,
+        region=body.region, status=body.status,
+    )
+    db.add(server)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Server already registered: {body.server_id}"
+        ) from None
+    db.refresh(server)
+    return ServerListEntry(
+        server_id=server.name, ec2_instance_id=server.ec2_instance_id,
+        region=server.region, status=server.status, last_heartbeat=server.last_heartbeat,
     )
 
 

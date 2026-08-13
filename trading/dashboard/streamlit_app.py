@@ -135,6 +135,13 @@ def load_algos() -> list[dict]:
 
 
 @st.cache_data(ttl=15)
+def load_servers() -> list[dict]:
+    resp = requests.get(f"{API_BASE_URL}/api/servers", headers=HEADERS, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@st.cache_data(ttl=15)
 def load_today_pnl(algo_id: str, server_id: str) -> float:
     resp = requests.get(
         f"{API_BASE_URL}/api/pnl",
@@ -247,11 +254,17 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.subheader(":material/health_and_safety: System Health")
 
-server_names_for_health = sorted({a["server_id"] for a in algos}) if algos else []
-if not server_names_for_health:
+try:
+    servers = load_servers()
+except requests.exceptions.RequestException as exc:
+    st.error(f":material/wifi_off: Could not load registered servers: {exc}")
+    servers = []
+
+if not servers:
     st.info(":material/hourglass_empty: No servers registered yet.", icon=":material/info:")
 else:
-    for sid in server_names_for_health:
+    for srv in sorted(servers, key=lambda s: s["server_id"]):
+        sid = srv["server_id"]
         try:
             health = load_server_health(sid)
         except requests.exceptions.RequestException as exc:
@@ -264,10 +277,11 @@ else:
         ssm_label = health.get("ssm_status") or "UNKNOWN"
         ssm_icon = "🟢" if ssm_ok else ("🔴" if health.get("ssm_status") else "❓")
 
-        health_cols = st.columns([2, 2, 2])
+        health_cols = st.columns([2, 2, 2, 2])
         health_cols[0].write(f"**{sid}**")
         health_cols[1].write(f"{ec2_icon} EC2: {health['status']}")
         health_cols[2].write(f"{ssm_icon} SSM Agent: {ssm_label}")
+        health_cols[3].write(f":material/dns: `{srv['ec2_instance_id']}` ({srv['region']})")
 
 st.caption("EC2/SSM health is a live check (Lambda -> AWS), cached 30s -- everything else on this page is DB state.")
 

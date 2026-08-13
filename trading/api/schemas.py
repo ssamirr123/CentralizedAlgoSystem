@@ -116,6 +116,13 @@ class ServerListEntry(BaseModel):
     last_heartbeat: datetime | None
 
 
+class ServerIn(BaseModel):
+    server_id: str  # server NAME (servers.name) -- must be unique
+    ec2_instance_id: str
+    region: str
+    status: str = "UNKNOWN"
+
+
 class PositionIn(BaseModel):
     algo_id: str  # algo NAME
     server_id: str  # server NAME
