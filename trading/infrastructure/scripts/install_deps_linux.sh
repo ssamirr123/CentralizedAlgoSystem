@@ -47,4 +47,17 @@ echo "=== Verifying ==="
 git --version
 python3 --version
 pip3 --version
+
+echo "=== Setting up venv (AL2023's pip-managed requests/urllib3 conflict with"
+echo "    RPM-installed ones, so app deps go in a venv, not system site-packages) ==="
+REPO_DIR="$HOME/trading-app"
+if [ ! -d "$REPO_DIR" ]; then
+    echo "ERROR: $REPO_DIR not found -- run clone_repo.sh first"
+    exit 1
+fi
+cd "$REPO_DIR"
+python3 -m venv venv
+venv/bin/pip install --upgrade pip
+venv/bin/pip install -r requirements.txt
+venv/bin/pip install -r trading/algos/example_strategy/requirements.txt
 echo "Done."

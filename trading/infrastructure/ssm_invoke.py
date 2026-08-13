@@ -125,9 +125,11 @@ def check_command(instance_id: str, region: str, command_id: str) -> dict:
 
 def build_algo_command(repo_path: str, command: str, algo_name: str, lines: int | None, os_name: str) -> str:
     """Build the one-liner that invokes trading_agent.py on the instance.
-    python3 on Linux (python often doesn't exist or is Python 2 on older
-    AMIs), python on Windows (matches how it was installed there)."""
-    python_bin = "python3" if os_name == "linux" else "python"
+    Linux uses the repo-local venv (install_deps_linux.sh creates it) since
+    AL2023's RPM-installed requests/urllib3 conflict with pip-managed ones
+    in system site-packages. Windows uses the bare system python (matches
+    how it was installed there -- no such conflict on that AMI)."""
+    python_bin = "venv/bin/python3" if os_name == "linux" else "python"
     agent_path = "trading/agent/trading_agent.py" if os_name == "linux" else "trading\\agent\\trading_agent.py"
     parts = [
         f'cd "{repo_path}";',
@@ -164,10 +166,10 @@ def _cli() -> int:
     check_parser.add_argument("command_id")
 
     raw_parser = subparsers.add_parser("raw", help="Run an arbitrary shell/PowerShell command or script file")
-    raw_group = raw_parser.add_mutually_exclusive_group(required=True)
-    raw_group.add_argument("shell_command", nargs="?", default=None)
-    raw_group.add_argument(
+    raw_parser.add_argument("shell_command", nargs="?", default=None)
+    raw_parser.add_argument(
         "--script-file",
+        default=None,
         help=(
             "Path to a local .ps1 (Windows) or .sh (Linux) file whose contents "
             "get sent as-is. Prefer this over an inline command for anything "
@@ -196,6 +198,8 @@ def _cli() -> int:
         if not args.repo_path:
             parser.error("--repo-path is required for 'algo' mode (or set EC2_REPO_PATH)")
         commands = [build_algo_command(args.repo_path, args.command, args.algo_name, args.lines, args.os_name)]
+    elif args.mode == "raw" and bool(args.script_file) == bool(args.shell_command):
+        parser.error("raw mode requires exactly one of: shell_command, --script-file")
     elif args.script_file:
         script_path = Path(args.script_file)
         if not script_path.is_file():
