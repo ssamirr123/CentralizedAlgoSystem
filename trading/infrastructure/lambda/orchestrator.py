@@ -167,7 +167,8 @@ def _action_check_ec2_health(instance_id: str, event: dict) -> dict:
         last_ping = None
     else:
         ssm_status = instances[0].get("PingStatus", "UNKNOWN")
-        last_ping = instances[0].get("LastPingDateTime")
+        last_ping_dt = instances[0].get("LastPingDateTime")
+        last_ping = last_ping_dt.isoformat() if last_ping_dt else None
 
     healthy = ec2_status == "running" and ssm_status == "Online"
     return {
