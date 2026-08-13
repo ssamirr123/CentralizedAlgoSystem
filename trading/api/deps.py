@@ -18,6 +18,7 @@ import os
 from datetime import datetime, timezone
 
 from fastapi import Header, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from trading.database import models
@@ -48,11 +49,15 @@ def enforce_rate_limit(x_api_key: str | None = Header(default=None)) -> None:
     ever queries the DB.
 
     Fixed-window, not sliding-window or token-bucket: simplest correct
-    option for a single shared key at current traffic levels (heartbeats
-    every ~10s, dashboard polls every ~30s). Not perfectly atomic under
-    heavy concurrent write races (read-then-write, not a single atomic
-    UPSERT) -- acceptable at this traffic volume; would need a dialect-
-    specific ON CONFLICT DO UPDATE to close that gap if traffic grows.
+    option for a single shared key. The insert-if-missing path below is a
+    read-then-write, not a single atomic UPSERT, so it races when two
+    requests hit the same brand-new window at once -- this is NOT a
+    theoretical concern: a single algo process alone runs the control-
+    center heartbeat, log shipper, and P&L reporter concurrently, and hit
+    this exact race (an unhandled 500 from a UNIQUE constraint violation)
+    during Milestone 12's own integration testing. Handled below by
+    catching the constraint violation and falling back to the update path
+    -- correct without needing a dialect-specific ON CONFLICT DO UPDATE.
     """
     if not x_api_key:
         return  # require_api_key (runs first) already rejects this request
@@ -73,9 +78,23 @@ def enforce_rate_limit(x_api_key: str | None = Header(default=None)) -> None:
             .one_or_none()
         )
         if row is None:
-            db.add(models.RateLimitWindow(api_key_hash=key_hash, window_start=window_start, request_count=1))
-            db.commit()
-            return
+            try:
+                db.add(models.RateLimitWindow(api_key_hash=key_hash, window_start=window_start, request_count=1))
+                db.commit()
+                return
+            except IntegrityError:
+                # Lost the race: another concurrent request inserted this
+                # window's row between our SELECT and our INSERT. Roll
+                # back and re-fetch -- it's guaranteed to exist now.
+                db.rollback()
+                row = (
+                    db.query(models.RateLimitWindow)
+                    .filter(
+                        models.RateLimitWindow.api_key_hash == key_hash,
+                        models.RateLimitWindow.window_start == window_start,
+                    )
+                    .one()
+                )
 
         if row.request_count >= RATE_LIMIT_MAX_REQUESTS:
             retry_after = RATE_LIMIT_WINDOW_SECONDS - int(now.timestamp() - window_epoch)

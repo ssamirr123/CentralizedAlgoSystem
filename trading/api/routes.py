@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
@@ -66,6 +67,11 @@ def _resolve_server(db: Session, server_name: str) -> models.Server:
 
 
 def _get_or_create_algo(db: Session, algo_name: str, server: models.Server) -> models.Algo:
+    """Every call site invokes this immediately after resolving the
+    server, before staging any other changes on the session -- the
+    rollback on a lost race below is safe precisely because of that
+    ordering. Don't call this after adding other pending objects to the
+    session without re-checking that."""
     algo = (
         db.query(models.Algo)
         .filter(models.Algo.name == algo_name, models.Algo.server_id == server.id)
@@ -79,7 +85,21 @@ def _get_or_create_algo(db: Session, algo_name: str, server: models.Server) -> m
         script_path=f"trading/algos/{algo_name}/main.py",
     )
     db.add(algo)
-    db.flush()  # assigns algo.id without committing yet
+    try:
+        db.flush()  # assigns algo.id without committing yet
+    except IntegrityError:
+        # Lost the race: a concurrent request (e.g. the heartbeat sender
+        # and log shipper both auto-registering the same brand-new algo
+        # at once -- confirmed to actually happen, not hypothetical)
+        # already inserted this (name, server_id) row between our SELECT
+        # and our INSERT. Roll back and re-fetch -- it's guaranteed to
+        # exist now.
+        db.rollback()
+        algo = (
+            db.query(models.Algo)
+            .filter(models.Algo.name == algo_name, models.Algo.server_id == server.id)
+            .one()
+        )
     return algo
 
 
