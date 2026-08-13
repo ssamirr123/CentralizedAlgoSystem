@@ -89,6 +89,15 @@
       "Resource": "*"
     },
     {
+      "Sid": "NetworkDiagnostics",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeRouteTables"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SSMControl",
       "Effect": "Allow",
       "Action": [
