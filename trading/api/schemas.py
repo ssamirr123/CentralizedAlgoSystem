@@ -91,6 +91,25 @@ class AlgoListEntry(BaseModel):
     last_heartbeat: datetime | None = None
 
 
+class AlgoIn(BaseModel):
+    algo_id: str  # algo NAME -- unique per server, not globally
+    server_id: str  # server NAME (servers.name) -- must already be registered
+    script_path: str | None = None  # defaults to trading/algos/{algo_id}/main.py if omitted
+    status: str = "STOPPED"
+    enabled: bool = True
+
+
+class AlgoUpdate(BaseModel):
+    # All optional -- PATCH semantics, only provided fields are changed.
+    # Renaming isn't supported here (unlike servers) -- algo identity is
+    # (name, server_id), and start/stop/heartbeat all address an algo by
+    # that pair, so a rename would silently orphan every future call
+    # still using the old name.
+    script_path: str | None = None
+    status: str | None = None
+    enabled: bool | None = None
+
+
 class HeartbeatIn(BaseModel):
     algo_id: str  # algo NAME
     server_id: str  # server NAME
