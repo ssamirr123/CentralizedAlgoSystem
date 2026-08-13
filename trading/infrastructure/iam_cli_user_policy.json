@@ -93,7 +93,9 @@
       "Effect": "Allow",
       "Action": [
         "ec2:DescribeSecurityGroups",
-        "ec2:DescribeRouteTables"
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeVpcAttribute",
+        "ec2:GetConsoleOutput"
       ],
       "Resource": "*"
     },
