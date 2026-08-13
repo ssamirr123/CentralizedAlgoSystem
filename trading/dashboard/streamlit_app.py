@@ -101,6 +101,18 @@ def effective_status(stored_status: str, last_heartbeat_iso: str | None) -> str:
     return "OFFLINE"
 
 
+def format_ist(iso_str: str | None) -> str:
+    """Converts a UTC ISO timestamp from the API/DB to an IST display
+    string -- the DB and API always deal in UTC (per the project's own
+    spec), but every user-facing display must show IST, never raw UTC."""
+    if not iso_str:
+        return "—"
+    dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST).strftime("%d %b %Y, %H:%M:%S IST")
+
+
 def is_market_open(now: datetime | None = None) -> bool:
     """NSE regular session: 09:15-15:30 IST, Mon-Fri. Does not account for
     market holidays -- a documented simplification, not a real calendar."""
@@ -361,7 +373,7 @@ else:
                 "Avg Price (₹)": p["average_price"],
                 "Last Price (₹)": p.get("last_price"),
                 "P&L (₹)": p.get("pnl"),
-                "Updated": p["updated_at"],
+                "Updated (IST)": format_ist(p["updated_at"]),
             }
             for p in positions
         ],
@@ -410,7 +422,7 @@ else:
     st.dataframe(
         [
             {
-                "Time (UTC)": row["timestamp"],
+                "Time (IST)": format_ist(row["timestamp"]),
                 "Level": row["level"],
                 "Event": row["event"],
                 "Details": row.get("details") or {},
