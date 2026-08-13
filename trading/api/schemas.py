@@ -123,6 +123,14 @@ class ServerIn(BaseModel):
     status: str = "UNKNOWN"
 
 
+class ServerUpdate(BaseModel):
+    # All optional -- PATCH semantics, only provided fields are changed.
+    server_id: str | None = None  # rename (servers.name); new value must stay unique
+    ec2_instance_id: str | None = None
+    region: str | None = None
+    status: str | None = None
+
+
 class PositionIn(BaseModel):
     algo_id: str  # algo NAME
     server_id: str  # server NAME
