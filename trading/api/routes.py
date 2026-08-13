@@ -14,13 +14,15 @@ Milestones 8-10 wire up ingestion, which is expected at this milestone.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from trading.api.deps import get_db, require_api_key
+from alerts.telegram import alert_service
+from trading.api.deps import enforce_rate_limit, get_db, require_api_key
 from trading.api.lambda_client import LambdaInvokeError, invoke_orchestrator
 from trading.api.schemas import (
     AlgoActionRequest,
@@ -45,7 +47,8 @@ from trading.api.schemas import (
 )
 from trading.database import models
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter(dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)])
+logger = logging.getLogger("trading.api")
 
 _ACTION_TO_AGENT_COMMAND = {
     "start": "START_ALGO",
@@ -186,14 +189,33 @@ def algo_status(algo_id: str, server_id: str) -> AlgoStatusResponse:
 
 
 @router.get("/server/status", response_model=ServerStatusResponse)
-def server_status(server_id: str, db: Session = Depends(get_db)) -> ServerStatusResponse:
+def server_status(server_id: str, live: bool = False, db: Session = Depends(get_db)) -> ServerStatusResponse:
     server = _resolve_server(db, server_id)
+
+    ssm_status = None
+    live_check_healthy = None
+    if live:
+        try:
+            result = invoke_orchestrator("check_ec2_health")
+            if result.get("success"):
+                server.status = result.get("ec2_status", server.status)
+                ssm_status = result.get("ssm_status")
+                live_check_healthy = result.get("healthy")
+                db.commit()
+        except LambdaInvokeError as exc:
+            # A failed live check degrades to the cached DB value rather
+            # than failing the whole request -- "can't verify right now"
+            # is not the same as "definitely unhealthy."
+            logger.warning("check_ec2_health failed for %s: %s", server_id, exc)
+
     return ServerStatusResponse(
         name=server.name,
         ec2_instance_id=server.ec2_instance_id,
         region=server.region,
         status=server.status,
         last_heartbeat=server.last_heartbeat,
+        ssm_status=ssm_status,
+        live_check_healthy=live_check_healthy,
     )
 
 
@@ -243,9 +265,34 @@ def post_heartbeat(body: HeartbeatIn, db: Session = Depends(get_db)) -> Heartbea
     table, this is a log, not an upsert-one-row-per-pair table) and
     updates algos.status + servers.last_heartbeat for fast list-view
     reads. Deliberately does NOT touch servers.status -- that's EC2 power
-    state, a separate concern from an individual algo's health."""
+    state, a separate concern from an individual algo's health.
+
+    Milestone 12: fires the existing, already-tested Telegram alert_service
+    on status transitions -- the old backend/main.py has this for the old
+    schema; the new one (Milestone 8+) had none until now. Only fires on
+    a CHANGE (or a brand-new algo's first heartbeat), not every heartbeat,
+    same dedup principle as the old path. Note what this can't cover:
+    Vercel serverless has no background process to notice SILENCE (an algo
+    that stops heartbeating entirely rather than reporting ERROR) --
+    that's the dashboard's client-side staleness detection (Milestone 8),
+    not a server-side alert. Catching that server-side would need a
+    scheduled check (extending Milestone 11), not this endpoint.
+    """
     server = _resolve_server(db, body.server_id)
-    algo = _get_or_create_algo(db, body.algo_id, server)
+
+    # Explicit existence check BEFORE _get_or_create_algo, which would
+    # otherwise mask "brand new" -- a freshly-created Algo row already
+    # has status="STOPPED" (the column's Python-level default) by the
+    # time _get_or_create_algo returns, so checking algo.status alone
+    # afterward can never distinguish "new" from "existing and STOPPED."
+    existing_algo = (
+        db.query(models.Algo)
+        .filter(models.Algo.name == body.algo_id, models.Algo.server_id == server.id)
+        .one_or_none()
+    )
+    is_new_algo = existing_algo is None
+    previous_status = existing_algo.status if existing_algo is not None else None
+    algo = existing_algo if existing_algo is not None else _get_or_create_algo(db, body.algo_id, server)
 
     ts = body.timestamp or datetime.now(timezone.utc)
 
@@ -256,6 +303,19 @@ def post_heartbeat(body: HeartbeatIn, db: Session = Depends(get_db)) -> Heartbea
     algo.status = body.status
     server.last_heartbeat = ts
     db.commit()
+
+    if is_new_algo:
+        if body.status == "RUNNING":
+            alert_service.strategy_started(body.algo_id, body.server_id)
+        elif body.status == "ERROR":
+            alert_service.strategy_crashed(body.algo_id, body.server_id, reason="Initial status ERROR")
+    elif previous_status != body.status:
+        if body.status == "RUNNING":
+            alert_service.strategy_recovered(body.algo_id, body.server_id)
+        elif body.status == "STOPPED":
+            alert_service.strategy_stopped(body.algo_id, body.server_id)
+        elif body.status == "ERROR":
+            alert_service.strategy_crashed(body.algo_id, body.server_id, reason="Status changed to ERROR")
 
     return HeartbeatAck(success=True, algo_id=body.algo_id, server_id=body.server_id)
 

@@ -7,6 +7,10 @@ Lambda duplication when a single function stays clean).
 
 Actions:
     start_ec2, stop_ec2                              -- EC2 power state
+    check_ec2_health                                  -- Milestone 12: EC2 power state AND SSM Agent
+                                                          responsiveness, which start_ec2/stop_ec2 alone
+                                                          never distinguish (an instance can be power-
+                                                          state RUNNING with a dead/unregistered SSM Agent)
     start_algo, stop_algo, restart_algo, update_algo  -- async, via SSM
     start_all_algos, stop_all_algos, update_all_algos -- Milestone 11: same as above, for every
                                                           enabled algo (for EventBridge Scheduler --
@@ -134,6 +138,47 @@ def _parse_agent_output(stdout: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
+
+def _action_check_ec2_health(instance_id: str, event: dict) -> dict:
+    """Milestone 12: distinguishes "EC2 power state" (describe_instances,
+    already used by start_ec2/stop_ec2 above) from "is the SSM Agent on
+    the instance actually responsive" (describe_instance_information) --
+    an instance can be power-state RUNNING while SSM control is dead
+    (agent crashed, network ACL change, IAM role detached), which the
+    power-state check alone would never catch. This is exactly the gap
+    that motivated this action: nothing before Milestone 12 distinguished
+    these two failure modes."""
+    try:
+        power_state = ec2_client.describe_instances(InstanceIds=[instance_id])
+        ec2_status = power_state["Reservations"][0]["Instances"][0]["State"]["Name"]
+    except (ClientError, IndexError, KeyError) as exc:
+        return _error(f"could not describe instance: {exc}", server_id=instance_id)
+
+    try:
+        ssm_info = ssm_client.describe_instance_information(
+            Filters=[{"Key": "InstanceIds", "Values": [instance_id]}],
+        )
+        instances = ssm_info.get("InstanceInformationList", [])
+    except (ClientError, BotoCoreError) as exc:
+        return _error(f"describe_instance_information failed: {exc}", server_id=instance_id, ec2_status=ec2_status)
+
+    if not instances:
+        ssm_status = "NOT_REGISTERED"
+        last_ping = None
+    else:
+        ssm_status = instances[0].get("PingStatus", "UNKNOWN")
+        last_ping = instances[0].get("LastPingDateTime")
+
+    healthy = ec2_status == "running" and ssm_status == "Online"
+    return {
+        "success": True,
+        "server_id": instance_id,
+        "ec2_status": ec2_status.upper(),
+        "ssm_status": ssm_status.upper(),
+        "last_ping": last_ping,
+        "healthy": healthy,
+    }
+
 
 def _action_start_ec2(instance_id: str, event: dict) -> dict:
     try:
@@ -345,6 +390,8 @@ def lambda_handler(event: dict, context: Any) -> dict:
         result = _action_start_ec2(instance_id, event)
     elif action == "stop_ec2":
         result = _action_stop_ec2(instance_id, event)
+    elif action == "check_ec2_health":
+        result = _action_check_ec2_health(instance_id, event)
     elif action in ALGO_ACTIONS:
         repo_path = _get_env("REPO_PATH")
         if not repo_path:

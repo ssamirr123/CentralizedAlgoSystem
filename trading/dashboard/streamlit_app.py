@@ -175,6 +175,23 @@ def load_positions(algo_id: str, server_id: str) -> list[dict]:
     return resp.json()
 
 
+@st.cache_data(ttl=30)
+def load_server_health(server_id: str) -> dict:
+    """live=true triggers a real check_ec2_health Lambda call (Milestone
+    12) -- distinguishes EC2 power state from SSM Agent responsiveness,
+    which the cached DB status alone can't. Cached client-side for 30s so
+    this doesn't fire a Lambda invocation on every 30s auto-refresh tick
+    for every server."""
+    resp = requests.get(
+        f"{API_BASE_URL}/api/server/status",
+        params={"server_id": server_id, "live": "true"},
+        headers=HEADERS,
+        timeout=20,  # live check chains through Lambda+SSM, slower than a plain DB read
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
@@ -205,6 +222,42 @@ with st.container(horizontal=True):
         f"₹{today_total_pnl:,.2f}",
         border=True,
     )
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# System Health -- master prompt's literal Milestone 12 deliverable.
+# Reaching this point at all already proves Vercel + the API + Supabase
+# are up (the page wouldn't have loaded otherwise), so those aren't
+# re-shown as separate rows -- would just be theater. What's NOT implied
+# by the page loading: whether the EC2 instance and its SSM Agent are
+# actually reachable, which is what the live check below actually verifies.
+# ---------------------------------------------------------------------------
+st.subheader(":material/health_and_safety: System Health")
+
+server_names_for_health = sorted({a["server_id"] for a in algos}) if algos else []
+if not server_names_for_health:
+    st.info(":material/hourglass_empty: No servers registered yet.", icon=":material/info:")
+else:
+    for sid in server_names_for_health:
+        try:
+            health = load_server_health(sid)
+        except requests.exceptions.RequestException as exc:
+            st.write(f":material/error: **{sid}**: could not reach the API to check ({exc})")
+            continue
+
+        ec2_ok = health["status"] == "RUNNING"
+        ssm_ok = health.get("live_check_healthy") is True
+        ec2_icon = "🟢" if ec2_ok else "🔴"
+        ssm_label = health.get("ssm_status") or "UNKNOWN"
+        ssm_icon = "🟢" if ssm_ok else ("🔴" if health.get("ssm_status") else "❓")
+
+        health_cols = st.columns([2, 2, 2])
+        health_cols[0].write(f"**{sid}**")
+        health_cols[1].write(f"{ec2_icon} EC2: {health['status']}")
+        health_cols[2].write(f"{ssm_icon} SSM Agent: {ssm_label}")
+
+st.caption("EC2/SSM health is a live check (Lambda -> AWS), cached 30s -- everything else on this page is DB state.")
 
 st.divider()
 

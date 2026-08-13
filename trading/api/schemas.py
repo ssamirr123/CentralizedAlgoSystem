@@ -29,8 +29,12 @@ class ServerStatusResponse(BaseModel):
     name: str
     ec2_instance_id: str
     region: str
-    status: str
+    status: str  # DB-cached value; only refreshed on live=true
     last_heartbeat: datetime | None
+    # Populated only when ?live=true triggers a real check_ec2_health call
+    # (Milestone 12) -- None otherwise, not a stale/fabricated default.
+    ssm_status: str | None = None
+    live_check_healthy: bool | None = None
 
 
 class AlgoStatusResponse(BaseModel):

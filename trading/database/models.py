@@ -179,3 +179,21 @@ class Command(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class RateLimitWindow(Base):
+    """Milestone 12: fixed-window request counter per API key. DB-backed
+    (not in-memory) because Vercel serverless functions share no memory
+    between invocations -- an in-memory counter would silently reset on
+    every cold start and never actually limit anything. Stores a hash of
+    the key, never the key itself, even though there's currently only one
+    shared key -- no reason to add a second place a real secret could leak
+    from."""
+
+    __tablename__ = "rate_limit_windows"
+    __table_args__ = (UniqueConstraint("api_key_hash", "window_start", name="uq_rate_limit_key_window"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    api_key_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

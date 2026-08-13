@@ -23,7 +23,10 @@
     {
       "Sid": "SSMReadResult",
       "Effect": "Allow",
-      "Action": "ssm:GetCommandInvocation",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:DescribeInstanceInformation"
+      ],
       "Resource": "*"
     },
     {

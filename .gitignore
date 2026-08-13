@@ -1,0 +1,45 @@
+# Secrets -- never commit real credentials. .env.example files are
+# intentionally NOT ignored (they're templates with blank values).
+.env
+*.env
+!*.env.example
+.streamlit/secrets.toml
+
+# AWS / cloud credential files, in case any tool ever writes one locally
+.aws/
+*.pem
+*.p12
+*.pfx
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv*/
+*.venv*/
+
+# Local databases (SQLite fallbacks used for dev/testing only)
+*.db
+*.sqlite3
+
+# Trading runtime local state (PID files, stop flags, per-run logs) --
+# these are process-local, regenerated on every run, and were never meant
+# to be tracked; trading/data/.gitkeep and trading/logs/.gitkeep keep the
+# directories themselves in git.
+trading/data/*.pid
+trading/data/*.state.json
+trading/data/*.stop_requested
+trading/logs/*.log
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Packaging artifacts
+*.zip
+build/
+dist/
