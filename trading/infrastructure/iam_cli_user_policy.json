@@ -122,6 +122,17 @@
         "lambda:InvokeFunction"
       ],
       "Resource": "arn:aws:lambda:ap-south-1:471112713822:function:TradingOrchestrator"
+    },
+    {
+      "Sid": "LambdaLogsRead",
+      "Effect": "Allow",
+      "Action": [
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": "arn:aws:logs:ap-south-1:471112713822:log-group:/aws/lambda/TradingOrchestrator:*"
     }
   ]
 }
