@@ -269,7 +269,8 @@ def load_server_health(server_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Header
+# Header -- market status/P&L stay above the tabs since they're page-level
+# summary, not tied to either the Dashboard or Config view specifically.
 # ---------------------------------------------------------------------------
 st.title(":material/monitoring: Algo Trading Control Center")
 
@@ -279,6 +280,12 @@ try:
 except requests.exceptions.RequestException as exc:
     st.error(f":material/wifi_off: Cannot reach the control-center API: {exc}")
     st.stop()
+
+try:
+    servers = load_servers()
+except requests.exceptions.RequestException as exc:
+    st.error(f":material/wifi_off: Could not load registered servers: {exc}")
+    servers = []
 
 today_total_pnl = 0.0
 for a in algos:
@@ -301,54 +308,233 @@ with st.container(horizontal=True):
 
 st.divider()
 
-# ---------------------------------------------------------------------------
-# System Health -- master prompt's literal Milestone 12 deliverable.
-# Reaching this point at all already proves Vercel + the API + Supabase
-# are up (the page wouldn't have loaded otherwise), so those aren't
-# re-shown as separate rows -- would just be theater. What's NOT implied
-# by the page loading: whether the EC2 instance and its SSM Agent are
-# actually reachable, which is what the live check below actually verifies.
-# ---------------------------------------------------------------------------
-st.subheader(":material/health_and_safety: System Health")
+tab_dashboard, tab_config = st.tabs([
+    ":material/monitoring: Dashboard",
+    ":material/settings: Config",
+])
 
-try:
-    servers = load_servers()
-except requests.exceptions.RequestException as exc:
-    st.error(f":material/wifi_off: Could not load registered servers: {exc}")
-    servers = []
+# =============================================================================
+# Dashboard tab -- read-only status: System Health, strategy control table
+# (start/stop actions against already-registered strategies, not CRUD on the
+# registration itself), Positions, Trading Logs.
+# =============================================================================
+with tab_dashboard:
+    # -------------------------------------------------------------------
+    # System Health -- master prompt's literal Milestone 12 deliverable.
+    # Reaching this point at all already proves Vercel + the API + Supabase
+    # are up (the page wouldn't have loaded otherwise), so those aren't
+    # re-shown as separate rows -- would just be theater. What's NOT
+    # implied by the page loading: whether the EC2 instance and its SSM
+    # Agent are actually reachable, which is what the live check verifies.
+    # -------------------------------------------------------------------
+    st.subheader(":material/health_and_safety: System Health")
 
-if not servers:
-    st.info(":material/hourglass_empty: No servers registered yet.", icon=":material/info:")
-else:
-    for srv in sorted(servers, key=lambda s: s["server_id"]):
-        sid = srv["server_id"]
+    if not servers:
+        st.info(":material/hourglass_empty: No servers registered yet. Add one in the Config tab.", icon=":material/info:")
+    else:
+        for srv in sorted(servers, key=lambda s: s["server_id"]):
+            sid = srv["server_id"]
+            try:
+                health = load_server_health(sid)
+            except requests.exceptions.RequestException as exc:
+                st.write(f":material/error: **{sid}**: could not reach the API to check ({exc})")
+                continue
+
+            ec2_ok = health["status"] == "RUNNING"
+            ssm_ok = health.get("live_check_healthy") is True
+            ec2_icon = "🟢" if ec2_ok else "🔴"
+            ssm_label = health.get("ssm_status") or "UNKNOWN"
+            ssm_icon = "🟢" if ssm_ok else ("🔴" if health.get("ssm_status") else "❓")
+
+            health_cols = st.columns([2, 2, 2, 2])
+            health_cols[0].write(f"**{sid}**")
+            health_cols[1].write(f"{ec2_icon} EC2: {health['status']}")
+            health_cols[2].write(f"{ssm_icon} SSM Agent: {ssm_label}")
+            health_cols[3].write(f":material/dns: `{srv['ec2_instance_id']}` ({srv['region']})")
+
+        st.caption("EC2/SSM health is a live check (Lambda -> AWS), cached 30s -- everything else on this page is DB state.")
+
+    st.divider()
+
+    # -------------------------------------------------------------------
+    # Strategy control table, Positions, and Trading Logs -- all gated on
+    # `algos` being non-empty. Deliberately an `if` here, not `st.stop()`:
+    # stopping would also prevent the Config tab (rendered after this in
+    # the script) from ever showing up on a brand-new install with zero
+    # strategies -- exactly when Config is needed most, to register one.
+    # -------------------------------------------------------------------
+    st.subheader(":material/list_alt: Strategies")
+
+    if not algos:
+        st.info(
+            ":material/hourglass_empty: No strategies registered yet. Add one in the Config tab.",
+            icon=":material/info:",
+        )
+    else:
+        algo_names = sorted({a["algo_id"] for a in algos})
+        server_names = sorted({a["server_id"] for a in algos})
+
+        header_cols = st.columns([2, 2, 2, 2, 2])
+        for col, label in zip(header_cols, ["Strategy", "Server", "Status", "Day P&L (₹)", "Action"]):
+            col.markdown(f"**{label}**")
+
+        for algo in algos:
+            algo_id = algo["algo_id"]
+            server_id = algo["server_id"]
+            raw_status = algo["status"]
+            display_status = effective_status(raw_status, algo.get("last_heartbeat"))
+
+            try:
+                pnl = load_today_pnl(algo_id, server_id)
+            except requests.exceptions.RequestException:
+                pnl = None
+
+            row_cols = st.columns([2, 2, 2, 2, 2])
+            row_cols[0].write(algo_id)
+            row_cols[1].write(server_id)
+            row_cols[2].write(status_label(display_status))
+            row_cols[3].write("—" if pnl is None else f"₹{pnl:,.2f}")
+
+            # Action availability follows the RAW stored status (what the
+            # backend actually tracks), not the heartbeat-derived display
+            # status -- a STALE/OFFLINE algo still marked RUNNING should
+            # still offer a STOP button, since the underlying process may
+            # genuinely be running and just not heartbeating.
+            action_col = row_cols[4]
+            if raw_status in IN_FLIGHT_STATUSES:
+                action_col.button(status_label(raw_status), key=f"noop-{algo_id}-{server_id}", disabled=True)
+            elif raw_status == "RUNNING":
+                if action_col.button("STOP", key=f"stop-{algo_id}-{server_id}"):
+                    try:
+                        result = post_action("stop", algo_id, server_id)
+                        if not result.get("success"):
+                            st.error(f"Stop request for {algo_id} failed: {result.get('message') or 'unknown error'}")
+                        else:
+                            st.cache_data.clear()
+                            st.rerun()
+                    except requests.exceptions.RequestException as exc:
+                        st.error(f"Failed to reach the API to stop {algo_id}: {exc}")
+            else:
+                if action_col.button("START", key=f"start-{algo_id}-{server_id}"):
+                    try:
+                        result = post_action("start", algo_id, server_id)
+                        if not result.get("success"):
+                            st.error(f"Start request for {algo_id} failed: {result.get('message') or 'unknown error'}")
+                        else:
+                            st.cache_data.clear()
+                            st.rerun()
+                    except requests.exceptions.RequestException as exc:
+                        st.error(f"Failed to reach the API to start {algo_id}: {exc}")
+
+        st.caption("Auto-refreshes every 30s. Status/P&L come from the last known DB state, not a live check on every load.")
+
+        # -----------------------------------------------------------
+        # Positions -- current holdings per algo/server. A closed
+        # position (qty 0) has no row at all (see POST /api/positions),
+        # not a zero-quantity one, so "no positions" genuinely means
+        # flat, not "data hasn't arrived yet" vs. "was open and closed"
+        # ambiguity.
+        #
+        # Note: "Max loss" / "Stop loss" from the master prompt's Risk
+        # section aren't shown here -- there's no schema field for a
+        # strategy's configured risk limits (a per-strategy config
+        # concern, not yet implemented), and fabricating placeholder
+        # numbers would be worse than omitting them.
+        # -----------------------------------------------------------
+        st.divider()
+        st.subheader(":material/account_balance_wallet: Positions")
+
+        pos_cols = st.columns(2)
+        p_algo = pos_cols[0].selectbox("Strategy", algo_names, key="pos_algo")
+        p_server = pos_cols[1].selectbox("Server", server_names, key="pos_server")
+
         try:
-            health = load_server_health(sid)
+            positions = load_positions(p_algo, p_server)
         except requests.exceptions.RequestException as exc:
-            st.write(f":material/error: **{sid}**: could not reach the API to check ({exc})")
-            continue
+            st.error(f":material/wifi_off: Could not load positions: {exc}")
+            positions = []
 
-        ec2_ok = health["status"] == "RUNNING"
-        ssm_ok = health.get("live_check_healthy") is True
-        ec2_icon = "🟢" if ec2_ok else "🔴"
-        ssm_label = health.get("ssm_status") or "UNKNOWN"
-        ssm_icon = "🟢" if ssm_ok else ("🔴" if health.get("ssm_status") else "❓")
+        if not positions:
+            st.info(":material/hourglass_empty: No open positions for this strategy/server.", icon=":material/info:")
+        else:
+            st.dataframe(
+                [
+                    {
+                        "Symbol": p["symbol"],
+                        "Quantity": p["quantity"],
+                        "Avg Price (₹)": p["average_price"],
+                        "Last Price (₹)": p.get("last_price"),
+                        "P&L (₹)": p.get("pnl"),
+                        "Updated (IST)": format_ist(p["updated_at"]),
+                    }
+                    for p in positions
+                ],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Avg Price (₹)": st.column_config.NumberColumn(format="₹%.2f"),
+                    "Last Price (₹)": st.column_config.NumberColumn(format="₹%.2f"),
+                    "P&L (₹)": st.column_config.NumberColumn(format="₹%.2f"),
+                },
+            )
 
-        health_cols = st.columns([2, 2, 2, 2])
-        health_cols[0].write(f"**{sid}**")
-        health_cols[1].write(f"{ec2_icon} EC2: {health['status']}")
-        health_cols[2].write(f"{ssm_icon} SSM Agent: {ssm_label}")
-        health_cols[3].write(f":material/dns: `{srv['ec2_instance_id']}` ({srv['region']})")
+        # -----------------------------------------------------------
+        # Trading logs -- filterable by algo, server, date, level,
+        # event type, per the project's own spec. Only shows curated
+        # trading-significant events + WARNING/ERROR (see
+        # trading/common/log_shipper.py) -- not every line the local
+        # structured logger emits.
+        # -----------------------------------------------------------
+        st.divider()
+        st.subheader(":material/receipt_long: Trading Logs")
 
-st.caption("EC2/SSM health is a live check (Lambda -> AWS), cached 30s -- everything else on this page is DB state.")
+        filter_cols = st.columns(5)
+        f_algo = filter_cols[0].selectbox("Strategy", algo_names, key="log_algo")
+        f_server = filter_cols[1].selectbox("Server", server_names, key="log_server")
+        f_level = filter_cols[2].selectbox("Level", ["All", "INFO", "WARNING", "ERROR", "CRITICAL"])
+        f_event = filter_cols[3].text_input("Event (exact match)", placeholder="e.g. ENTRY")
+        f_date = filter_cols[4].date_input("Date", value=None)
 
-# ---------------------------------------------------------------------------
-# Manage servers -- add/edit/delete against POST, PATCH, DELETE /api/servers.
-# Delete is refused server-side while algos are still registered against a
-# server, so no client-side cascade check is needed here -- just surface
-# whatever the API says went wrong.
-# ---------------------------------------------------------------------------
-with st.expander(":material/dns: Manage servers (add / edit / delete)"):
+        try:
+            log_rows = load_logs(f_algo, f_server, f_level, f_event.strip(), f_date, limit=200)
+        except requests.exceptions.RequestException as exc:
+            st.error(f":material/wifi_off: Could not load logs: {exc}")
+            log_rows = []
+
+        if not log_rows:
+            st.info(
+                ":material/hourglass_empty: No matching log events. Only curated trading events "
+                "(START/STOP/ENTRY/EXIT/SL/RE-ENTRY/SQUARE_OFF) and WARNING+ get shipped here -- "
+                "everything else stays in the instance's local log files.",
+                icon=":material/info:",
+            )
+        else:
+            st.dataframe(
+                [
+                    {
+                        "Time (IST)": format_ist(row["timestamp"]),
+                        "Level": row["level"],
+                        "Event": row["event"],
+                        "Details": row.get("details") or {},
+                    }
+                    for row in log_rows
+                ],
+                hide_index=True,
+                use_container_width=True,
+            )
+
+# =============================================================================
+# Config tab -- all CRUD: register/edit/delete servers and strategies.
+# =============================================================================
+with tab_config:
+    # -------------------------------------------------------------------
+    # Manage servers -- add/edit/delete against POST, PATCH, DELETE
+    # /api/servers. Delete is refused server-side while algos are still
+    # registered against a server, so no client-side cascade check is
+    # needed here -- just surface whatever the API says went wrong.
+    # -------------------------------------------------------------------
+    st.subheader(":material/dns: Servers")
+
     st.markdown("**Register a new server**")
     with st.form("add_server_form", clear_on_submit=True):
         new_cols = st.columns(4)
@@ -421,18 +607,16 @@ with st.expander(":material/dns: Manage servers (add / edit / delete)"):
                         st.session_state.pop(confirm_key, None)
                         st.rerun()
 
-st.divider()
+    st.divider()
 
-# ---------------------------------------------------------------------------
-# Manage strategies -- add/edit/delete against POST, PATCH, DELETE /api/algos.
-# Placed BEFORE the "no algos yet" gate below (which calls st.stop()) so a
-# brand-new deployment with zero strategies can still register its first
-# one from here -- if this were below that gate, it would never render on
-# an empty install.
-# ---------------------------------------------------------------------------
-with st.expander(":material/precision_manufacturing: Manage strategies (add / edit / delete)"):
+    # -------------------------------------------------------------------
+    # Manage strategies -- add/edit/delete against POST, PATCH, DELETE
+    # /api/algos.
+    # -------------------------------------------------------------------
+    st.subheader(":material/precision_manufacturing: Strategies")
+
     if not servers:
-        st.info("Register a server first (see 'Manage servers' above) before adding a strategy.")
+        st.info("Register a server first before adding a strategy.")
     else:
         server_options = sorted(s["server_id"] for s in servers)
 
@@ -505,165 +689,3 @@ with st.expander(":material/precision_manufacturing: Manage strategies (add / ed
                         if confirm_algo_cols[1].button("Cancel", key=f"cancel_delete_algo_btn_{aid}_{asid}"):
                             st.session_state.pop(confirm_key, None)
                             st.rerun()
-
-st.divider()
-
-# ---------------------------------------------------------------------------
-# Strategy control table
-# ---------------------------------------------------------------------------
-if not algos:
-    st.info(
-        ":material/hourglass_empty: No algos registered yet. They appear here once a "
-        "start/stop/restart/update action has been issued for them via the API.",
-        icon=":material/info:",
-    )
-    st.stop()
-
-header_cols = st.columns([2, 2, 2, 2, 2])
-for col, label in zip(header_cols, ["Strategy", "Server", "Status", "Day P&L (₹)", "Action"]):
-    col.markdown(f"**{label}**")
-
-for algo in algos:
-    algo_id = algo["algo_id"]
-    server_id = algo["server_id"]
-    raw_status = algo["status"]
-    display_status = effective_status(raw_status, algo.get("last_heartbeat"))
-
-    try:
-        pnl = load_today_pnl(algo_id, server_id)
-    except requests.exceptions.RequestException:
-        pnl = None
-
-    row_cols = st.columns([2, 2, 2, 2, 2])
-    row_cols[0].write(algo_id)
-    row_cols[1].write(server_id)
-    row_cols[2].write(status_label(display_status))
-    row_cols[3].write("—" if pnl is None else f"₹{pnl:,.2f}")
-
-    # Action availability follows the RAW stored status (what the backend
-    # actually tracks), not the heartbeat-derived display status -- a
-    # STALE/OFFLINE algo that's still marked RUNNING should still offer a
-    # STOP button, since the underlying process may genuinely be running
-    # and just not heartbeating.
-    action_col = row_cols[4]
-    if raw_status in IN_FLIGHT_STATUSES:
-        action_col.button(status_label(raw_status), key=f"noop-{algo_id}-{server_id}", disabled=True)
-    elif raw_status == "RUNNING":
-        if action_col.button("STOP", key=f"stop-{algo_id}-{server_id}"):
-            try:
-                result = post_action("stop", algo_id, server_id)
-                if not result.get("success"):
-                    st.error(f"Stop request for {algo_id} failed: {result.get('message') or 'unknown error'}")
-                else:
-                    st.cache_data.clear()
-                    st.rerun()
-            except requests.exceptions.RequestException as exc:
-                st.error(f"Failed to reach the API to stop {algo_id}: {exc}")
-    else:
-        if action_col.button("START", key=f"start-{algo_id}-{server_id}"):
-            try:
-                result = post_action("start", algo_id, server_id)
-                if not result.get("success"):
-                    st.error(f"Start request for {algo_id} failed: {result.get('message') or 'unknown error'}")
-                else:
-                    st.cache_data.clear()
-                    st.rerun()
-            except requests.exceptions.RequestException as exc:
-                st.error(f"Failed to reach the API to start {algo_id}: {exc}")
-
-st.caption("Auto-refreshes every 30s. Status/P&L come from the last known DB state, not a live check on every load.")
-
-# ---------------------------------------------------------------------------
-# Positions -- current holdings per algo/server. A closed position (qty 0)
-# has no row at all (see POST /api/positions), not a zero-quantity one, so
-# "no positions" genuinely means flat, not "data hasn't arrived yet" vs.
-# "was open and closed" ambiguity.
-#
-# Note: "Max loss" / "Stop loss" from the master prompt's Risk section
-# aren't shown here -- there's no schema field for a strategy's configured
-# risk limits (that's a per-strategy config concern, not yet implemented),
-# and fabricating placeholder numbers would be worse than omitting them.
-# ---------------------------------------------------------------------------
-st.divider()
-st.subheader(":material/account_balance_wallet: Positions")
-
-pos_cols = st.columns(2)
-p_algo = pos_cols[0].selectbox("Strategy", algo_names, key="pos_algo")
-p_server = pos_cols[1].selectbox("Server", server_names, key="pos_server")
-
-try:
-    positions = load_positions(p_algo, p_server)
-except requests.exceptions.RequestException as exc:
-    st.error(f":material/wifi_off: Could not load positions: {exc}")
-    positions = []
-
-if not positions:
-    st.info(":material/hourglass_empty: No open positions for this strategy/server.", icon=":material/info:")
-else:
-    st.dataframe(
-        [
-            {
-                "Symbol": p["symbol"],
-                "Quantity": p["quantity"],
-                "Avg Price (₹)": p["average_price"],
-                "Last Price (₹)": p.get("last_price"),
-                "P&L (₹)": p.get("pnl"),
-                "Updated (IST)": format_ist(p["updated_at"]),
-            }
-            for p in positions
-        ],
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Avg Price (₹)": st.column_config.NumberColumn(format="₹%.2f"),
-            "Last Price (₹)": st.column_config.NumberColumn(format="₹%.2f"),
-            "P&L (₹)": st.column_config.NumberColumn(format="₹%.2f"),
-        },
-    )
-
-# ---------------------------------------------------------------------------
-# Trading logs -- filterable by algo, server, date, level, event type, per
-# the project's own spec. Only shows curated trading-significant events +
-# WARNING/ERROR (see trading/common/log_shipper.py) -- not every line the
-# local structured logger emits.
-# ---------------------------------------------------------------------------
-st.divider()
-st.subheader(":material/receipt_long: Trading Logs")
-
-algo_names = sorted({a["algo_id"] for a in algos})
-server_names = sorted({a["server_id"] for a in algos})
-
-filter_cols = st.columns(5)
-f_algo = filter_cols[0].selectbox("Strategy", algo_names)
-f_server = filter_cols[1].selectbox("Server", server_names)
-f_level = filter_cols[2].selectbox("Level", ["All", "INFO", "WARNING", "ERROR", "CRITICAL"])
-f_event = filter_cols[3].text_input("Event (exact match)", placeholder="e.g. ENTRY")
-f_date = filter_cols[4].date_input("Date", value=None)
-
-try:
-    log_rows = load_logs(f_algo, f_server, f_level, f_event.strip(), f_date, limit=200)
-except requests.exceptions.RequestException as exc:
-    st.error(f":material/wifi_off: Could not load logs: {exc}")
-    log_rows = []
-
-if not log_rows:
-    st.info(
-        ":material/hourglass_empty: No matching log events. Only curated trading events "
-        "(START/STOP/ENTRY/EXIT/SL/RE-ENTRY/SQUARE_OFF) and WARNING+ get shipped here -- "
-        "everything else stays in the instance's local log files.",
-        icon=":material/info:",
-    )
-else:
-    st.dataframe(
-        [
-            {
-                "Time (IST)": format_ist(row["timestamp"]),
-                "Level": row["level"],
-                "Event": row["event"],
-                "Details": row.get("details") or {},
-            }
-            for row in log_rows
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
