@@ -4,22 +4,34 @@ Lambda function calling the same SSM API). Sends a command to an EC2
 instance via AWS Systems Manager and prints the result — no SSH, no open
 inbound ports, just the SSM Agent + an IAM instance role.
 
-Targets Windows instances (AWS-RunPowerShellScript document) since that's
-what this project's EC2 instance actually runs.
+Supports both Windows (AWS-RunPowerShellScript) and Linux
+(AWS-RunShellScript) targets via --os -- this project's original EC2
+instance is Windows, a second instance is Linux, both run the same
+Python codebase.
 
 Usage:
     python trading/infrastructure/ssm_invoke.py \
-        --instance-id i-0123456789abcdef0 --region ap-south-1 \
+        --instance-id i-0123456789abcdef0 --region ap-south-1 --os windows \
         --repo-path "C:\\trading-app" \
         algo START_ALGO example_strategy
 
     python trading/infrastructure/ssm_invoke.py \
-        --instance-id i-0123456789abcdef0 --region ap-south-1 \
+        --instance-id i-0abcdef0123456789 --region ap-south-1 --os linux \
+        --repo-path "/home/ec2-user/trading-app" \
+        algo START_ALGO example_strategy
+
+    python trading/infrastructure/ssm_invoke.py \
+        --instance-id i-0123456789abcdef0 --region ap-south-1 --os windows \
         raw "Get-Service AmazonSSMAgent"
+
+    python trading/infrastructure/ssm_invoke.py \
+        --instance-id i-0abcdef0123456789 --region ap-south-1 --os linux \
+        raw "systemctl status amazon-ssm-agent"
 
 Instance ID, region, and repo path are deliberately required arguments
 (or env vars) rather than hard-coded — see EC2_INSTANCE_ID / AWS_REGION /
-EC2_REPO_PATH below.
+EC2_REPO_PATH below. --os defaults to "windows" to preserve existing
+scripts/docs written before Linux support was added.
 """
 from __future__ import annotations
 
@@ -37,11 +49,17 @@ except ImportError:
     print("Missing dependency: pip install boto3", file=sys.stderr)
     sys.exit(1)
 
+DOCUMENT_BY_OS = {
+    "windows": "AWS-RunPowerShellScript",
+    "linux": "AWS-RunShellScript",
+}
 
-def send_powershell_command(
+
+def send_command(
     instance_id: str,
     region: str,
     commands: list[str],
+    document_name: str,
     timeout_seconds: int = 60,
 ) -> dict:
     """Send a command via SSM SendCommand and block until it completes
@@ -51,7 +69,7 @@ def send_powershell_command(
 
     response = client.send_command(
         InstanceIds=[instance_id],
-        DocumentName="AWS-RunPowerShellScript",
+        DocumentName=document_name,
         Parameters={"commands": commands},
         TimeoutSeconds=timeout_seconds,
     )
@@ -105,11 +123,16 @@ def check_command(instance_id: str, region: str, command_id: str) -> dict:
     }
 
 
-def build_algo_command(repo_path: str, command: str, algo_name: str, lines: int | None) -> str:
-    """Build the PowerShell one-liner that invokes trading_agent.py on the instance."""
+def build_algo_command(repo_path: str, command: str, algo_name: str, lines: int | None, os_name: str) -> str:
+    """Build the one-liner that invokes trading_agent.py on the instance.
+    python3 on Linux (python often doesn't exist or is Python 2 on older
+    AMIs), python on Windows (matches how it was installed there)."""
+    python_bin = "python3" if os_name == "linux" else "python"
+    agent_path = "trading/agent/trading_agent.py" if os_name == "linux" else "trading\\agent\\trading_agent.py"
     parts = [
         f'cd "{repo_path}";',
-        "python trading\\agent\\trading_agent.py",
+        python_bin,
+        agent_path,
         command,
         algo_name,
     ]
@@ -119,10 +142,15 @@ def build_algo_command(repo_path: str, command: str, algo_name: str, lines: int 
 
 
 def _cli() -> int:
-    parser = argparse.ArgumentParser(description="Send commands to the trading EC2 instance via SSM.")
+    parser = argparse.ArgumentParser(description="Send commands to a trading EC2 instance via SSM.")
     parser.add_argument("--instance-id", default=os.environ.get("EC2_INSTANCE_ID"), required=False)
     parser.add_argument("--region", default=os.environ.get("AWS_REGION"), required=False)
     parser.add_argument("--repo-path", default=os.environ.get("EC2_REPO_PATH"), required=False)
+    parser.add_argument(
+        "--os", dest="os_name", choices=["windows", "linux"],
+        default=os.environ.get("EC2_OS", "windows"),
+        help="Target instance OS -- selects the SSM document and command syntax. Default: windows.",
+    )
     parser.add_argument("--timeout", type=int, default=60)
 
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -135,17 +163,17 @@ def _cli() -> int:
     check_parser = subparsers.add_parser("check", help="Look up an already-sent command by its CommandId")
     check_parser.add_argument("command_id")
 
-    raw_parser = subparsers.add_parser("raw", help="Run an arbitrary PowerShell command or script file")
+    raw_parser = subparsers.add_parser("raw", help="Run an arbitrary shell/PowerShell command or script file")
     raw_group = raw_parser.add_mutually_exclusive_group(required=True)
-    raw_group.add_argument("powershell_command", nargs="?", default=None)
+    raw_group.add_argument("shell_command", nargs="?", default=None)
     raw_group.add_argument(
         "--script-file",
         help=(
-            "Path to a local .ps1 file whose contents get sent as-is. "
-            "Prefer this over an inline command for anything beyond trivial "
-            "one-liners — inline PowerShell typed at a PowerShell prompt "
-            "goes through your shell's own quoting/interpolation before it "
-            "ever reaches this script, on top of SSM's own parameter "
+            "Path to a local .ps1 (Windows) or .sh (Linux) file whose contents "
+            "get sent as-is. Prefer this over an inline command for anything "
+            "beyond trivial one-liners — inline commands typed at a shell "
+            "prompt go through your own shell's quoting/interpolation before "
+            "ever reaching this script, on top of SSM's own parameter "
             "encoding; multi-variable scripts reliably break that way."
         ),
     )
@@ -157,6 +185,8 @@ def _cli() -> int:
     if not args.region:
         parser.error("--region is required (or set AWS_REGION)")
 
+    document_name = DOCUMENT_BY_OS[args.os_name]
+
     if args.mode == "check":
         result = check_command(args.instance_id, args.region, args.command_id)
         print(json.dumps(result, indent=2, default=str))
@@ -165,16 +195,16 @@ def _cli() -> int:
     if args.mode == "algo":
         if not args.repo_path:
             parser.error("--repo-path is required for 'algo' mode (or set EC2_REPO_PATH)")
-        commands = [build_algo_command(args.repo_path, args.command, args.algo_name, args.lines)]
+        commands = [build_algo_command(args.repo_path, args.command, args.algo_name, args.lines, args.os_name)]
     elif args.script_file:
         script_path = Path(args.script_file)
         if not script_path.is_file():
             parser.error(f"--script-file not found: {script_path}")
         commands = script_path.read_text().splitlines()
     else:
-        commands = [args.powershell_command]
+        commands = [args.shell_command]
 
-    result = send_powershell_command(args.instance_id, args.region, commands, args.timeout)
+    result = send_command(args.instance_id, args.region, commands, document_name, args.timeout)
     print(json.dumps(result, indent=2, default=str))
     return 0 if result.get("Status") == "Success" else 1
 
