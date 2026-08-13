@@ -73,10 +73,15 @@
         "scheduler:CreateSchedule",
         "scheduler:GetSchedule",
         "scheduler:UpdateSchedule",
-        "scheduler:DeleteSchedule",
-        "scheduler:ListSchedules"
+        "scheduler:DeleteSchedule"
       ],
       "Resource": "arn:aws:scheduler:ap-south-1:471112713822:schedule/default/TradingSchedule-*"
+    },
+    {
+      "Sid": "SchedulerList",
+      "Effect": "Allow",
+      "Action": "scheduler:ListSchedules",
+      "Resource": "*"
     },
     {
       "Sid": "AttachProfileToInstance",
