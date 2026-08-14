@@ -681,8 +681,21 @@ def _action_provision_server(instance_id: str, os_name: str, repo_path: str, ser
             f'pip install -r trading/algos/example_strategy/requirements.txt'
         )
     else:
+        # A fresh EC2 instance may not have git/python3 preinstalled at all
+        # (discovered provisioning samir_linux -- a minimal AMI with neither,
+        # unlike Linux-server which had both from manual setup) -- installed
+        # here via whichever of yum/apt is present rather than assuming a
+        # specific distro, since new servers can be added from any base AMI.
+        install_prereqs = (
+            'if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then '
+            'if command -v yum >/dev/null 2>&1; then sudo yum install -y git python3 python3-pip; '
+            'elif command -v apt-get >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y git python3 python3-pip python3-venv; '
+            'fi; fi'
+        )
         setup_command = (
-            f'if [ ! -d "{repo_path}" ]; then git clone --branch {branch} {repo_url} "{repo_path}"; fi; '
+            f'{install_prereqs}; '
+            f'if [ ! -d "{repo_path}" ]; then sudo git clone --branch {branch} {repo_url} "{repo_path}"; fi; '
+            f'sudo chown -R $(whoami) "{repo_path}"; '
             f'cd "{repo_path}"; python3 -m venv venv; '
             f'venv/bin/pip install --upgrade pip; '
             f'venv/bin/pip install -r requirements.txt; '
