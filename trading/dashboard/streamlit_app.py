@@ -222,10 +222,19 @@ def post_action(action: str, algo_id: str, server_id: str) -> dict:
     return result
 
 
-def create_server(server_id: str, ec2_instance_id: str, region: str, status: str) -> dict:
+def create_server(
+    server_id: str, ec2_instance_id: str, region: str, status: str,
+    os_name: str, repo_path: str, auto_provision: bool,
+) -> dict:
+    # Longer timeout isn't needed here even though auto_provision kicks off
+    # a multi-minute bootstrap -- that runs async on the Lambda side
+    # (fire-and-forget), this call only waits for the DB row to commit.
     resp = requests.post(
         f"{API_BASE_URL}/api/servers",
-        json={"server_id": server_id, "ec2_instance_id": ec2_instance_id, "region": region, "status": status},
+        json={
+            "server_id": server_id, "ec2_instance_id": ec2_instance_id, "region": region, "status": status,
+            "os": os_name, "repo_path": repo_path, "auto_provision": auto_provision,
+        },
         headers=HEADERS,
         timeout=25,
     )
@@ -413,6 +422,18 @@ with tab_dashboard:
             health_cols[1].write(f"{ec2_icon} EC2: {health['status']}")
             health_cols[2].write(f"{ssm_icon} SSM Agent: {ssm_label}")
             health_cols[3].write(f":material/dns: `{srv['ec2_instance_id']}` ({srv['region']})")
+
+            # provisioning_status tracks the async provision_server Lambda
+            # action (attach IAM profile -> reboot -> wait for SSM -> clone
+            # -> install deps), not EC2/SSM live health above -- a server
+            # can be a genuine 🔴/❓ above simply because it's still mid
+            # bootstrap, which would otherwise look like an unexplained
+            # outage instead of expected in-progress state.
+            prov_status = srv.get("provisioning_status", "READY")
+            if prov_status != "READY":
+                prov_icon = {"PROVISIONING": "⏳", "FAILED": "🔴"}.get(prov_status, "❓")
+                prov_msg = srv.get("provisioning_message") or ""
+                st.caption(f"{prov_icon} **{sid}** provisioning: {prov_status} -- {prov_msg}")
 
         st.caption("EC2/SSM health is a live check (Lambda -> AWS), cached 30s -- everything else on this page is DB state.")
 
@@ -606,13 +627,29 @@ with tab_config:
         new_status = new_cols[3].selectbox(
             "Status", ["UNKNOWN", "RUNNING", "STOPPED"], index=0
         )
+        new_cols2 = st.columns(3)
+        new_os = new_cols2[0].selectbox("OS", ["linux", "windows"], index=0)
+        new_repo_path = new_cols2[1].text_input("Repo path", value="/trading-app")
+        new_auto_provision = new_cols2[2].checkbox(
+            "Auto-provision (attach IAM, clone repo, install deps)", value=True,
+            help="Uncheck for a server you've already set up by hand.",
+        )
         if st.form_submit_button(":material/add: Add server"):
             if not new_server_id or not new_ec2_id or not new_region:
                 st.warning("Server ID, EC2 instance ID, and region are all required.")
             else:
                 try:
-                    create_server(new_server_id, new_ec2_id, new_region, new_status)
-                    st.success(f"Registered server '{new_server_id}'.")
+                    create_server(
+                        new_server_id, new_ec2_id, new_region, new_status,
+                        new_os, new_repo_path, new_auto_provision,
+                    )
+                    if new_auto_provision:
+                        st.success(
+                            f"Registered server '{new_server_id}'. Auto-provisioning started -- "
+                            "check System Health for progress (can take several minutes)."
+                        )
+                    else:
+                        st.success(f"Registered server '{new_server_id}'.")
                     load_servers.clear()
                     st.rerun()
                 except requests.exceptions.RequestException as exc:
@@ -623,6 +660,10 @@ with tab_config:
         for srv in sorted(servers, key=lambda s: s["server_id"]):
             sid = srv["server_id"]
             with st.expander(f"{sid}"):
+                prov_status = srv.get("provisioning_status", "READY")
+                if prov_status != "READY":
+                    prov_icon = {"PROVISIONING": "⏳", "FAILED": "🔴"}.get(prov_status, "❓")
+                    st.caption(f"{prov_icon} Provisioning: **{prov_status}** -- {srv.get('provisioning_message') or ''}")
                 with st.form(f"edit_server_form_{sid}"):
                     edit_cols = st.columns(4)
                     edit_server_id = edit_cols[0].text_input("Server ID (name)", value=sid)
@@ -633,6 +674,13 @@ with tab_config:
                         index=["UNKNOWN", "RUNNING", "STOPPED"].index(srv["status"])
                         if srv["status"] in ("UNKNOWN", "RUNNING", "STOPPED") else 0,
                     )
+                    edit_cols2 = st.columns(2)
+                    edit_os = edit_cols2[0].selectbox(
+                        "OS", ["linux", "windows"],
+                        index=["linux", "windows"].index(srv.get("os", "linux"))
+                        if srv.get("os") in ("linux", "windows") else 0,
+                    )
+                    edit_repo_path = edit_cols2[1].text_input("Repo path", value=srv.get("repo_path", "/trading-app"))
                     if st.form_submit_button(":material/save: Save changes"):
                         try:
                             update_server(
@@ -641,6 +689,8 @@ with tab_config:
                                 ec2_instance_id=edit_ec2_id,
                                 region=edit_region,
                                 status=edit_status,
+                                os=edit_os,
+                                repo_path=edit_repo_path,
                             )
                             st.success(f"Updated server '{sid}'.")
                             load_servers.clear()

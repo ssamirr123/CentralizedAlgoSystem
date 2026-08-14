@@ -146,6 +146,10 @@ class ServerListEntry(BaseModel):
     ec2_instance_id: str
     region: str
     status: str
+    os: str
+    repo_path: str
+    provisioning_status: str
+    provisioning_message: str | None = None
     last_heartbeat: datetime | None
 
 
@@ -154,6 +158,13 @@ class ServerIn(BaseModel):
     ec2_instance_id: str
     region: str
     status: str = "UNKNOWN"
+    os: str = "linux"  # "windows" or "linux" -- selects SSM document + command syntax
+    repo_path: str = "/trading-app"
+    # If True, kicks off the async provision_server Lambda action right
+    # after the DB row commits (attach IAM profile, reboot if needed,
+    # wait for SSM, clone repo, install deps) -- set False for a server
+    # you've already set up by hand (e.g. Linux-server today).
+    auto_provision: bool = True
 
 
 class ServerUpdate(BaseModel):
@@ -162,6 +173,10 @@ class ServerUpdate(BaseModel):
     ec2_instance_id: str | None = None
     region: str | None = None
     status: str | None = None
+    os: str | None = None
+    repo_path: str | None = None
+    provisioning_status: str | None = None
+    provisioning_message: str | None = None
 
 
 class PositionIn(BaseModel):

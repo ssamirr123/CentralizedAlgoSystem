@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
 from trading.api.deps import enforce_rate_limit, get_db, require_api_key
-from trading.api.lambda_client import LambdaInvokeError, invoke_orchestrator
+from trading.api.lambda_client import LambdaInvokeError, invoke_orchestrator, invoke_orchestrator_async
 from trading.api.schemas import (
     AlgoActionRequest,
     AlgoIn,
@@ -125,7 +125,10 @@ def _run_algo_action(action: str, body: AlgoActionRequest, db: Session) -> Comma
 
     try:
         lambda_action = {"start": "start_algo", "stop": "stop_algo", "restart": "restart_algo", "update": "update_algo"}[action]
-        result = invoke_orchestrator(lambda_action, algo_id=body.algo_id)
+        result = invoke_orchestrator(
+            lambda_action, algo_id=body.algo_id, instance_id=server.ec2_instance_id,
+            repo_path=server.repo_path, os_name=server.os, server_name=server.name,
+        )
     except LambdaInvokeError as exc:
         command_row.status = "FAILED"
         command_row.error = str(exc)
@@ -175,8 +178,17 @@ def get_command(command_id: int, db: Session = Depends(get_db)) -> CommandRespon
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown command_id: {command_id}")
 
     if command_row.status in ("PENDING", "STARTING", "STOPPING", "RESTARTING", "UPDATING") and command_row.job_id:
+        # command_row.server_id is the FK (int PK), not the server's
+        # name -- resolve it to get the real instance_id this specific
+        # command was actually sent to (per-server routing means the
+        # Lambda can no longer assume a single fixed target).
+        command_server = db.query(models.Server).filter(models.Server.id == command_row.server_id).one_or_none()
+        if command_server is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Server for command {command_id} no longer exists")
         try:
-            result = invoke_orchestrator("get_command_status", job_id=command_row.job_id)
+            result = invoke_orchestrator(
+                "get_command_status", job_id=command_row.job_id, instance_id=command_server.ec2_instance_id,
+            )
         except LambdaInvokeError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Could not reach Lambda: {exc}") from exc
 
@@ -210,9 +222,13 @@ def get_command(command_id: int, db: Session = Depends(get_db)) -> CommandRespon
 
 
 @router.get("/algo/status", response_model=AlgoStatusResponse)
-def algo_status(algo_id: str, server_id: str) -> AlgoStatusResponse:
+def algo_status(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> AlgoStatusResponse:
+    server = _resolve_server(db, server_id)
     try:
-        result = invoke_orchestrator("get_algo_status", algo_id=algo_id)
+        result = invoke_orchestrator(
+            "get_algo_status", algo_id=algo_id, instance_id=server.ec2_instance_id,
+            repo_path=server.repo_path, os_name=server.os,
+        )
     except LambdaInvokeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Could not reach Lambda: {exc}") from exc
 
@@ -234,7 +250,7 @@ def server_status(server_id: str, live: bool = False, db: Session = Depends(get_
     live_check_healthy = None
     if live:
         try:
-            result = invoke_orchestrator("check_ec2_health")
+            result = invoke_orchestrator("check_ec2_health", instance_id=server.ec2_instance_id)
             if result.get("success"):
                 server.status = result.get("ec2_status", server.status)
                 ssm_status = result.get("ssm_status")
@@ -257,15 +273,35 @@ def server_status(server_id: str, live: bool = False, db: Session = Depends(get_
     )
 
 
+def _server_entry(server: models.Server) -> ServerListEntry:
+    return ServerListEntry(
+        server_id=server.name, ec2_instance_id=server.ec2_instance_id,
+        region=server.region, status=server.status, os=server.os, repo_path=server.repo_path,
+        provisioning_status=server.provisioning_status, provisioning_message=server.provisioning_message,
+        last_heartbeat=server.last_heartbeat,
+    )
+
+
 @router.post("/servers", response_model=ServerListEntry, status_code=status.HTTP_201_CREATED)
 def register_server(body: ServerIn, db: Session = Depends(get_db)) -> ServerListEntry:
     """Registers a new EC2 trading server. There's no auto-registration
     path (heartbeats/logs/etc. all require the server to already exist,
     via _resolve_server) -- this is the one place a servers row gets
-    created, meant to be called once per EC2 instance during setup."""
+    created, meant to be called once per EC2 instance during setup.
+
+    auto_provision=True (the default) kicks off the async provision_server
+    Lambda action right after commit -- attach the IAM instance profile,
+    reboot if SSM isn't already registered, wait for it to come online,
+    clone the repo, install deps. That's a multi-minute process (a reboot
+    alone can take a minute-plus), which is exactly why it's fired async
+    (InvocationType=Event) instead of the synchronous pattern every other
+    Lambda action here uses -- a single Vercel request can't wait that
+    long. The Lambda reports its own progress back via PATCH on this same
+    server once it's done, not this request."""
     server = models.Server(
         name=body.server_id, ec2_instance_id=body.ec2_instance_id,
-        region=body.region, status=body.status,
+        region=body.region, status=body.status, os=body.os, repo_path=body.repo_path,
+        provisioning_status="PROVISIONING" if body.auto_provision else "READY",
     )
     db.add(server)
     try:
@@ -276,22 +312,25 @@ def register_server(body: ServerIn, db: Session = Depends(get_db)) -> ServerList
             status.HTTP_409_CONFLICT, f"Server already registered: {body.server_id}"
         ) from None
     db.refresh(server)
-    return ServerListEntry(
-        server_id=server.name, ec2_instance_id=server.ec2_instance_id,
-        region=server.region, status=server.status, last_heartbeat=server.last_heartbeat,
-    )
+
+    if body.auto_provision:
+        try:
+            invoke_orchestrator_async(
+                "provision_server", instance_id=server.ec2_instance_id,
+                os_name=server.os, repo_path=server.repo_path, server_name=server.name,
+            )
+        except LambdaInvokeError as exc:
+            server.provisioning_status = "FAILED"
+            server.provisioning_message = f"Could not start provisioning: {exc}"
+            db.commit()
+
+    return _server_entry(server)
 
 
 @router.get("/servers", response_model=list[ServerListEntry])
 def list_servers(db: Session = Depends(get_db)) -> list[ServerListEntry]:
     rows = db.query(models.Server).order_by(models.Server.name).all()
-    return [
-        ServerListEntry(
-            server_id=r.name, ec2_instance_id=r.ec2_instance_id, region=r.region,
-            status=r.status, last_heartbeat=r.last_heartbeat,
-        )
-        for r in rows
-    ]
+    return [_server_entry(r) for r in rows]
 
 
 @router.patch("/servers/{server_id}", response_model=ServerListEntry)
@@ -306,6 +345,14 @@ def update_server(server_id: str, body: ServerUpdate, db: Session = Depends(get_
         server.region = body.region
     if body.status is not None:
         server.status = body.status
+    if body.os is not None:
+        server.os = body.os
+    if body.repo_path is not None:
+        server.repo_path = body.repo_path
+    if body.provisioning_status is not None:
+        server.provisioning_status = body.provisioning_status
+    if body.provisioning_message is not None:
+        server.provisioning_message = body.provisioning_message
 
     try:
         db.commit()
@@ -315,10 +362,7 @@ def update_server(server_id: str, body: ServerUpdate, db: Session = Depends(get_
             status.HTTP_409_CONFLICT, f"Server already registered: {body.server_id}"
         ) from None
     db.refresh(server)
-    return ServerListEntry(
-        server_id=server.name, ec2_instance_id=server.ec2_instance_id,
-        region=server.region, status=server.status, last_heartbeat=server.last_heartbeat,
-    )
+    return _server_entry(server)
 
 
 @router.delete("/servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -362,11 +406,8 @@ def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoRegisterRe
     back to the caller so the dashboard can surface it, but the DB row
     (the source of truth for "this strategy exists") stands regardless.
 
-    NOTE: sync_repo currently targets the single hardcoded EC2 instance
-    the orchestrator Lambda is configured for (see orchestrator.py's
-    module docstring) -- not necessarily body.server_id's actual
-    instance. Same "quick repoint, not real per-server routing yet"
-    limitation as the start/stop/restart actions."""
+    Targets body.server_id's own instance_id/repo_path/os -- per-server
+    routing, not a single shared target."""
     server = _resolve_server(db, body.server_id)
 
     existing = (
@@ -405,7 +446,9 @@ def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoRegisterRe
     sync_success = None
     sync_message = None
     try:
-        sync_result = invoke_orchestrator("sync_repo")
+        sync_result = invoke_orchestrator(
+            "sync_repo", instance_id=server.ec2_instance_id, repo_path=server.repo_path, os_name=server.os,
+        )
         sync_success = bool(sync_result.get("success"))
         sync_message = sync_result.get("output") or sync_result.get("error") or sync_result.get("message")
     except LambdaInvokeError as exc:
