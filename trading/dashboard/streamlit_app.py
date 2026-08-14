@@ -15,6 +15,7 @@ updated once a command resolves via Milestone 6's polling).
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -166,7 +167,30 @@ def post_action(action: str, algo_id: str, server_id: str) -> dict:
         timeout=15,
     )
     resp.raise_for_status()
-    return resp.json()
+    result = resp.json()
+
+    # The response above is just "the SSM command was accepted" (status
+    # STARTING/STOPPING/etc.), not the real outcome -- and nothing else
+    # would ever call GET /api/command/{id} to resolve it, which is also
+    # the only place that syncs the verified result back onto algos.status.
+    # Without polling here, the Action button would keep showing STOP for
+    # an algo that has already actually stopped (algos.status stuck at
+    # whatever the last heartbeat said, since a stopped process sends no
+    # further heartbeats to ever correct it).
+    command_id = result.get("command_id")
+    if command_id is not None:
+        deadline = time.monotonic() + 20
+        with st.spinner(f"Waiting for {algo_id} on {server_id} to finish {action}ing..."):
+            while result.get("status") in IN_FLIGHT_STATUSES and time.monotonic() < deadline:
+                time.sleep(1.5)
+                try:
+                    poll_resp = requests.get(f"{API_BASE_URL}/api/command/{command_id}", headers=HEADERS, timeout=15)
+                    poll_resp.raise_for_status()
+                    result = poll_resp.json()
+                except requests.exceptions.RequestException:
+                    break  # keep the last known result rather than raising mid-poll
+
+    return result
 
 
 def create_server(server_id: str, ec2_instance_id: str, region: str, status: str) -> dict:

@@ -184,6 +184,19 @@ def get_command(command_id: int, db: Session = Depends(get_db)) -> CommandRespon
             command_row.result = result
             if not result.get("success"):
                 command_row.error = result.get("error") or result.get("message")
+
+            # Sync the real, verified outcome back onto the algo itself --
+            # without this, algos.status stays stuck at whatever the last
+            # heartbeat said (typically RUNNING) forever after a stop,
+            # since a stopped process sends no further heartbeats to ever
+            # correct it. This is trading_agent.py's own reported status
+            # (process-liveness checked), the most authoritative source
+            # available, not a guess derived from the command type.
+            if command_row.algo_id is not None and result.get("status"):
+                algo_row = db.query(models.Algo).filter(models.Algo.id == command_row.algo_id).one_or_none()
+                if algo_row is not None:
+                    algo_row.status = result["status"]
+
             db.commit()
 
     return CommandResponse(
