@@ -1,4 +1,5 @@
 {
+  "//": "Applied to TradingLambdaExecutionRole as TWO separate inline policies (not one) -- the base grants below (SSMSendCommand's old instance ARN, EC2PowerControl's old instance ARN) predate the quick-repoint to the Linux instance i-0b0c8bb83adeb716b, and trading-control-cli only has iam:PutRolePolicy on this role, not Get/List, so the original inline policy's exact name couldn't be looked up and safely overwritten in place. The current, actually-active Linux-instance grants (SendCommand on i-0b0c8bb83adeb716b + AWS-RunShellScript, StartInstances/StopInstances on i-0b0c8bb83adeb716b) were applied as a second additive inline policy named TradingOrchestratorSSMExtra -- see lambda_ssm_extra_policy.json in this same directory. This file documents the original/base grant; the extra file documents what's actually needed for the current target.",
   "Version": "2012-10-17",
   "Statement": [
     {
