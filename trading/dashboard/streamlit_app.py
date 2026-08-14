@@ -137,14 +137,14 @@ def is_market_open(now: datetime | None = None) -> bool:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=45)
 def load_algos() -> list[dict]:
-    resp = requests.get(f"{API_BASE_URL}/api/algos", headers=HEADERS, timeout=10)
+    resp = requests.get(f"{API_BASE_URL}/api/algos", headers=HEADERS, timeout=25)
     resp.raise_for_status()
     return resp.json()
 
 
 @st.cache_data(ttl=45)
 def load_servers() -> list[dict]:
-    resp = requests.get(f"{API_BASE_URL}/api/servers", headers=HEADERS, timeout=10)
+    resp = requests.get(f"{API_BASE_URL}/api/servers", headers=HEADERS, timeout=25)
     resp.raise_for_status()
     return resp.json()
 
@@ -162,7 +162,7 @@ def load_today_pnl_bulk() -> dict[str, float]:
         f"{API_BASE_URL}/api/pnl/today",
         params={"pnl_date": datetime.now(IST).date().isoformat()},
         headers=HEADERS,
-        timeout=10,
+        timeout=25,
     )
     resp.raise_for_status()
     return resp.json()
@@ -227,7 +227,7 @@ def create_server(server_id: str, ec2_instance_id: str, region: str, status: str
         f"{API_BASE_URL}/api/servers",
         json={"server_id": server_id, "ec2_instance_id": ec2_instance_id, "region": region, "status": status},
         headers=HEADERS,
-        timeout=10,
+        timeout=25,
     )
     resp.raise_for_status()
     return resp.json()
@@ -241,14 +241,19 @@ def update_server(current_server_id: str, **updates: str) -> dict:
         f"{API_BASE_URL}/api/servers/{current_server_id}",
         json=body,
         headers=HEADERS,
-        timeout=10,
+        timeout=25,
     )
     resp.raise_for_status()
     return resp.json()
 
 
 def delete_server(server_id: str) -> None:
-    resp = requests.delete(f"{API_BASE_URL}/api/servers/{server_id}", headers=HEADERS, timeout=10)
+    # 25s not 10s -- individual requests currently run ~4-7s against this
+    # project's Postgres/NullPool tradeoff (sometimes more on a cold
+    # request), and a client-side timeout after the delete already
+    # reached the server looks identical to "delete failed" even though
+    # it succeeded -- this was mistaken for instability more than once.
+    resp = requests.delete(f"{API_BASE_URL}/api/servers/{server_id}", headers=HEADERS, timeout=25)
     resp.raise_for_status()
 
 
@@ -269,7 +274,7 @@ def edit_algo(algo_id: str, server_id: str, **updates: object) -> dict:
     body = {k: v for k, v in updates.items() if v is not None}
     resp = requests.patch(
         f"{API_BASE_URL}/api/algos/{algo_id}", params={"server_id": server_id},
-        json=body, headers=HEADERS, timeout=10,
+        json=body, headers=HEADERS, timeout=25,
     )
     resp.raise_for_status()
     return resp.json()
@@ -277,7 +282,7 @@ def edit_algo(algo_id: str, server_id: str, **updates: object) -> dict:
 
 def delete_algo(algo_id: str, server_id: str) -> None:
     resp = requests.delete(
-        f"{API_BASE_URL}/api/algos/{algo_id}", params={"server_id": server_id}, headers=HEADERS, timeout=10,
+        f"{API_BASE_URL}/api/algos/{algo_id}", params={"server_id": server_id}, headers=HEADERS, timeout=25,
     )
     resp.raise_for_status()
 
@@ -290,7 +295,7 @@ def load_logs(algo_id: str, server_id: str, level: str, event: str, log_date, li
         params["event"] = event
     if log_date:
         params["log_date"] = log_date.isoformat()
-    resp = requests.get(f"{API_BASE_URL}/api/logs", params=params, headers=HEADERS, timeout=10)
+    resp = requests.get(f"{API_BASE_URL}/api/logs", params=params, headers=HEADERS, timeout=25)
     resp.raise_for_status()
     return resp.json()
 
@@ -301,7 +306,7 @@ def load_positions(algo_id: str, server_id: str) -> list[dict]:
         f"{API_BASE_URL}/api/positions",
         params={"algo_id": algo_id, "server_id": server_id},
         headers=HEADERS,
-        timeout=10,
+        timeout=25,
     )
     resp.raise_for_status()
     return resp.json()
@@ -653,7 +658,8 @@ with tab_config:
                     confirm_cols = st.columns(2)
                     if confirm_cols[0].button(":material/delete_forever: Confirm delete", key=f"confirm_delete_btn_{sid}"):
                         try:
-                            delete_server(sid)
+                            with st.spinner(f"Deleting '{sid}'..."):
+                                delete_server(sid)
                             st.success(f"Deleted server '{sid}'.")
                         except requests.exceptions.RequestException as exc:
                             st.error(f"Could not delete server: {api_error_detail(exc)}")
@@ -751,7 +757,8 @@ with tab_config:
                             ":material/delete_forever: Confirm delete", key=f"confirm_delete_algo_btn_{aid}_{asid}"
                         ):
                             try:
-                                delete_algo(aid, asid)
+                                with st.spinner(f"Deleting '{aid}'..."):
+                                    delete_algo(aid, asid)
                                 st.success(f"Deleted strategy '{aid}'.")
                             except requests.exceptions.RequestException as exc:
                                 st.error(f"Could not delete strategy: {api_error_detail(exc)}")
