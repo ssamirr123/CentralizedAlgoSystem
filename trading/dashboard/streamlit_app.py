@@ -127,36 +127,45 @@ def is_market_open(now: datetime | None = None) -> bool:
 
 # ---------------------------------------------------------------------------
 # Data loading
+#
+# Cache TTLs are set ABOVE the 30s auto-refresh interval (not below it) --
+# ttl=15 against a 30s refresh guarantees a cache miss on literally every
+# tick (Streamlit shows a "Running load_x(...)" indicator, and each call
+# currently costs ~4-5s against this project's Postgres/NullPool tradeoff),
+# so the page was blocking on a fresh, visible network call every single
+# refresh instead of actually benefiting from the cache in between.
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=45)
 def load_algos() -> list[dict]:
     resp = requests.get(f"{API_BASE_URL}/api/algos", headers=HEADERS, timeout=10)
     resp.raise_for_status()
     return resp.json()
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=45)
 def load_servers() -> list[dict]:
     resp = requests.get(f"{API_BASE_URL}/api/servers", headers=HEADERS, timeout=10)
     resp.raise_for_status()
     return resp.json()
 
 
-@st.cache_data(ttl=15)
-def load_today_pnl(algo_id: str, server_id: str) -> float:
+@st.cache_data(ttl=45)
+def load_today_pnl_bulk() -> dict[str, float]:
+    """One request for every algo's today P&L, instead of the dashboard
+    looping over each algo and firing GET /api/pnl individually -- with
+    several strategies registered, that meant several sequential ~4-5s
+    blocking calls (each showing its own "Running load_today_pnl(...)"
+    indicator) before the page could even finish rendering. Keyed by
+    "algo_id|server_id" to match GET /api/pnl/today (algo names are only
+    unique per server, not globally)."""
     resp = requests.get(
-        f"{API_BASE_URL}/api/pnl",
-        params={"algo_id": algo_id, "server_id": server_id},
+        f"{API_BASE_URL}/api/pnl/today",
+        params={"pnl_date": datetime.now(IST).date().isoformat()},
         headers=HEADERS,
         timeout=10,
     )
     resp.raise_for_status()
-    rows = resp.json()
-    today = datetime.now(IST).date().isoformat()
-    for row in rows:
-        if row["date"] == today:
-            return float(row["pnl"])
-    return 0.0
+    return resp.json()
 
 
 def post_action(action: str, algo_id: str, server_id: str) -> dict:
@@ -266,7 +275,7 @@ def load_logs(algo_id: str, server_id: str, level: str, event: str, log_date, li
     return resp.json()
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=45)
 def load_positions(algo_id: str, server_id: str) -> list[dict]:
     resp = requests.get(
         f"{API_BASE_URL}/api/positions",
@@ -278,13 +287,14 @@ def load_positions(algo_id: str, server_id: str) -> list[dict]:
     return resp.json()
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=45)
 def load_server_health(server_id: str) -> dict:
     """live=true triggers a real check_ec2_health Lambda call (Milestone
     12) -- distinguishes EC2 power state from SSM Agent responsiveness,
-    which the cached DB status alone can't. Cached client-side for 30s so
-    this doesn't fire a Lambda invocation on every 30s auto-refresh tick
-    for every server."""
+    which the cached DB status alone can't. Cached client-side above the
+    30s auto-refresh interval (was exactly ttl=30, which could still race
+    and miss right on the tick) so this doesn't fire a Lambda invocation
+    on every single auto-refresh for every server."""
     resp = requests.get(
         f"{API_BASE_URL}/api/server/status",
         params={"server_id": server_id, "live": "true"},
@@ -314,12 +324,12 @@ except requests.exceptions.RequestException as exc:
     st.error(f":material/wifi_off: Could not load registered servers: {exc}")
     servers = []
 
-today_total_pnl = 0.0
-for a in algos:
-    try:
-        today_total_pnl += load_today_pnl(a["algo_id"], a["server_id"])
-    except requests.exceptions.RequestException:
-        pass  # a single algo's P&L fetch failing shouldn't blank the whole page
+try:
+    pnl_by_algo = load_today_pnl_bulk()
+except requests.exceptions.RequestException:
+    pnl_by_algo = {}  # a P&L fetch failing shouldn't blank the whole page
+
+today_total_pnl = sum(pnl_by_algo.get(f"{a['algo_id']}|{a['server_id']}", 0.0) for a in algos)
 
 with st.container(horizontal=True):
     st.metric(
@@ -410,11 +420,11 @@ with tab_dashboard:
             server_id = algo["server_id"]
             raw_status = algo["status"]
             display_status = effective_status(raw_status, algo.get("last_heartbeat"))
-
-            try:
-                pnl = load_today_pnl(algo_id, server_id)
-            except requests.exceptions.RequestException:
-                pnl = None
+            # Matches load_today_pnl's old per-algo default exactly -- 0.0
+            # for "no P&L row yet today", not None/"--" (that's reserved
+            # for the P&L *fetch itself* failing, handled by pnl_by_algo
+            # already defaulting to {} above).
+            pnl = pnl_by_algo.get(f"{algo_id}|{server_id}", 0.0)
 
             row_cols = st.columns([2, 2, 2, 2, 2])
             row_cols[0].write(algo_id)

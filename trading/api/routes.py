@@ -627,6 +627,41 @@ def post_log(body: LogIn, db: Session = Depends(get_db)) -> LogAck:
     return LogAck(success=True)
 
 
+@router.get("/pnl/today", response_model=dict[str, float])
+def get_today_pnl_bulk(pnl_date: str | None = None, db: Session = Depends(get_db)) -> dict[str, float]:
+    """Bulk equivalent of GET /pnl, filtered to one calendar day -- one
+    query instead of one HTTP round trip per algo. The dashboard's header
+    P&L total and per-row P&L column both used to loop over every algo
+    calling GET /pnl individually; against this project's current
+    per-request latency (~4-5s, see the NullPool tradeoff), N algos meant
+    N sequential blocking calls before the page could even render.
+
+    pnl_date defaults to today in UTC (matching POST /api/pnl's own
+    default) -- pass it explicitly (YYYY-MM-DD) for IST "today", since
+    DailyPnl.date is a plain Date with no stored timezone and the caller
+    is in the best position to know which calendar day it actually means.
+
+    Keyed by "algo_id|server_id", not algo_id alone -- algo names are
+    only unique per server (uq_algo_name_server), not globally.
+    """
+    if pnl_date:
+        try:
+            target_date = datetime.strptime(pnl_date, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"pnl_date must be YYYY-MM-DD: {exc}") from exc
+    else:
+        target_date = datetime.now(timezone.utc).date()
+
+    rows = (
+        db.query(models.DailyPnl, models.Algo.name, models.Server.name)
+        .join(models.Algo, models.DailyPnl.algo_id == models.Algo.id)
+        .join(models.Server, models.DailyPnl.server_id == models.Server.id)
+        .filter(models.DailyPnl.date == target_date)
+        .all()
+    )
+    return {f"{algo_name}|{server_name}": pnl_row.pnl for pnl_row, algo_name, server_name in rows}
+
+
 @router.get("/pnl", response_model=list[DailyPnlEntry])
 def get_pnl(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> list[DailyPnlEntry]:
     server = _resolve_server(db, server_id)
