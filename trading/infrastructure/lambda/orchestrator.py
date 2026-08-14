@@ -99,12 +99,33 @@ def _get_env(name: str) -> str | None:
     return os.environ.get(name)
 
 
-def _build_algo_shell_command(repo_path: str, agent_command: str, algo_name: str, lines: int | None) -> str:
+def _build_algo_shell_command(
+    repo_path: str, agent_command: str, algo_name: str, lines: int | None,
+    server_name: str | None = None, api_base_url: str | None = None, control_api_key: str | None = None,
+) -> str:
     """Targets a Linux instance -- venv/bin/python3 (not bare python3),
     since AL2023's RPM-installed requests/urllib3 conflict with pip's in
     system site-packages (see install_deps_linux.sh), matching the
-    identical pattern already used by ssm_invoke.py's manual CLI tool."""
-    parts = [f'cd "{repo_path}";', "venv/bin/python3 trading/agent/trading_agent.py", agent_command, algo_name]
+    identical pattern already used by ssm_invoke.py's manual CLI tool.
+
+    Exports STRATEGY_NAME/SERVER_NAME/API_BASE_URL/CONTROL_API_KEY inline
+    on START_ALGO/RESTART_ALGO -- each SSM send_command runs in a fresh,
+    non-persistent shell session with no login-shell profile sourcing, so
+    there's nowhere on the instance these could otherwise reliably live.
+    Without them, main.py's heartbeat sender / log shipper silently
+    no-op (config.control_api_key falsy -> CONTROL_CENTER_HEARTBEAT_SKIPPED)
+    -- the process runs, but the control center never hears from it. The
+    exports land in the trading_agent.py process's own environment, which
+    Python's subprocess.Popen inherits into the detached strategy process
+    by default (no explicit env= is passed), so this reaches the actual
+    long-running child too, not just the short-lived launcher."""
+    parts = []
+    if agent_command in ("START_ALGO", "RESTART_ALGO") and server_name and api_base_url and control_api_key:
+        parts.append(
+            f'export STRATEGY_NAME="{algo_name}" SERVER_NAME="{server_name}" '
+            f'API_BASE_URL="{api_base_url}" CONTROL_API_KEY="{control_api_key}";'
+        )
+    parts += [f'cd "{repo_path}";', "venv/bin/python3 trading/agent/trading_agent.py", agent_command, algo_name]
     if agent_command == "LOGS" and lines is not None:
         parts.append(f"--lines {lines}")
     return " ".join(parts)
@@ -238,7 +259,11 @@ def _action_algo_command(action: str, instance_id: str, repo_path: str, event: d
 
     agent_command = ALGO_ACTIONS[action]
     lines = event.get("lines")
-    shell_command = _build_algo_shell_command(repo_path, agent_command, algo_name, lines)
+    shell_command = _build_algo_shell_command(
+        repo_path, agent_command, algo_name, lines,
+        server_name=_get_env("SERVER_NAME"), api_base_url=_get_env("API_BASE_URL"),
+        control_api_key=_get_env("CONTROL_API_KEY"),
+    )
 
     try:
         command_id = _send_ssm_command(instance_id, shell_command)
