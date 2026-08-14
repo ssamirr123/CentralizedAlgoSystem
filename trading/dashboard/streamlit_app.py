@@ -168,6 +168,26 @@ def load_today_pnl_bulk() -> dict[str, float]:
     return resp.json()
 
 
+def api_error_detail(exc: requests.exceptions.RequestException) -> str:
+    """Extracts FastAPI's {"detail": "..."} message from an HTTPError's
+    response body when present. resp.raise_for_status()'s own exception
+    text is just "409 Client Error: Conflict for url: ..." -- it drops
+    the actual, useful reason the API went out of its way to report
+    (e.g. "Cannot delete algo 'x' on 'y': still has 64 heartbeat(s)...",
+    or "Server already registered: Linux-server"), which made correctly
+    -rejected requests look like unexplained failures instead of the
+    validation working as designed."""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            detail = response.json().get("detail")
+        except (ValueError, AttributeError):
+            detail = None
+        if detail:
+            return str(detail)
+    return str(exc)
+
+
 def post_action(action: str, algo_id: str, server_id: str) -> dict:
     resp = requests.post(
         f"{API_BASE_URL}/api/algo/{action}",
@@ -315,13 +335,13 @@ market_open = is_market_open()
 try:
     algos = load_algos()
 except requests.exceptions.RequestException as exc:
-    st.error(f":material/wifi_off: Cannot reach the control-center API: {exc}")
+    st.error(f":material/wifi_off: Cannot reach the control-center API: {api_error_detail(exc)}")
     st.stop()
 
 try:
     servers = load_servers()
 except requests.exceptions.RequestException as exc:
-    st.error(f":material/wifi_off: Could not load registered servers: {exc}")
+    st.error(f":material/wifi_off: Could not load registered servers: {api_error_detail(exc)}")
     servers = []
 
 try:
@@ -374,7 +394,7 @@ with tab_dashboard:
             try:
                 health = load_server_health(sid)
             except requests.exceptions.RequestException as exc:
-                st.write(f":material/error: **{sid}**: could not reach the API to check ({exc})")
+                st.write(f":material/error: **{sid}**: could not reach the API to check ({api_error_detail(exc)})")
                 continue
 
             ec2_ok = health["status"] == "RUNNING"
@@ -450,7 +470,7 @@ with tab_dashboard:
                             st.cache_data.clear()
                             st.rerun()
                     except requests.exceptions.RequestException as exc:
-                        st.error(f"Failed to reach the API to stop {algo_id}: {exc}")
+                        st.error(f"Failed to reach the API to stop {algo_id}: {api_error_detail(exc)}")
             else:
                 if action_col.button("START", key=f"start-{algo_id}-{server_id}"):
                     try:
@@ -461,7 +481,7 @@ with tab_dashboard:
                             st.cache_data.clear()
                             st.rerun()
                     except requests.exceptions.RequestException as exc:
-                        st.error(f"Failed to reach the API to start {algo_id}: {exc}")
+                        st.error(f"Failed to reach the API to start {algo_id}: {api_error_detail(exc)}")
 
         st.caption("Auto-refreshes every 30s. Status/P&L come from the last known DB state, not a live check on every load.")
 
@@ -488,7 +508,7 @@ with tab_dashboard:
         try:
             positions = load_positions(p_algo, p_server)
         except requests.exceptions.RequestException as exc:
-            st.error(f":material/wifi_off: Could not load positions: {exc}")
+            st.error(f":material/wifi_off: Could not load positions: {api_error_detail(exc)}")
             positions = []
 
         if not positions:
@@ -535,7 +555,7 @@ with tab_dashboard:
         try:
             log_rows = load_logs(f_algo, f_server, f_level, f_event.strip(), f_date, limit=200)
         except requests.exceptions.RequestException as exc:
-            st.error(f":material/wifi_off: Could not load logs: {exc}")
+            st.error(f":material/wifi_off: Could not load logs: {api_error_detail(exc)}")
             log_rows = []
 
         if not log_rows:
@@ -591,7 +611,7 @@ with tab_config:
                     load_servers.clear()
                     st.rerun()
                 except requests.exceptions.RequestException as exc:
-                    st.error(f"Could not register server: {exc}")
+                    st.error(f"Could not register server: {api_error_detail(exc)}")
 
     if servers:
         st.markdown("**Existing servers**")
@@ -621,7 +641,7 @@ with tab_config:
                             load_servers.clear()
                             st.rerun()
                         except requests.exceptions.RequestException as exc:
-                            st.error(f"Could not update server: {exc}")
+                            st.error(f"Could not update server: {api_error_detail(exc)}")
 
                 confirm_key = f"confirm_delete_{sid}"
                 if not st.session_state.get(confirm_key):
@@ -636,7 +656,7 @@ with tab_config:
                             delete_server(sid)
                             st.success(f"Deleted server '{sid}'.")
                         except requests.exceptions.RequestException as exc:
-                            st.error(f"Could not delete server: {exc}")
+                            st.error(f"Could not delete server: {api_error_detail(exc)}")
                         st.session_state.pop(confirm_key, None)
                         load_servers.clear()
                         st.rerun()
@@ -690,7 +710,7 @@ with tab_config:
                         load_algos.clear()
                         st.rerun()
                     except requests.exceptions.RequestException as exc:
-                        st.error(f"Could not register strategy: {exc}")
+                        st.error(f"Could not register strategy: {api_error_detail(exc)}")
 
         if algos:
             st.markdown("**Existing strategies**")
@@ -717,7 +737,7 @@ with tab_config:
                                 load_algos.clear()
                                 st.rerun()
                             except requests.exceptions.RequestException as exc:
-                                st.error(f"Could not update strategy: {exc}")
+                                st.error(f"Could not update strategy: {api_error_detail(exc)}")
 
                     confirm_key = f"confirm_delete_algo_{aid}_{asid}"
                     if not st.session_state.get(confirm_key):
@@ -734,7 +754,7 @@ with tab_config:
                                 delete_algo(aid, asid)
                                 st.success(f"Deleted strategy '{aid}'.")
                             except requests.exceptions.RequestException as exc:
-                                st.error(f"Could not delete strategy: {exc}")
+                                st.error(f"Could not delete strategy: {api_error_detail(exc)}")
                             st.session_state.pop(confirm_key, None)
                             load_algos.clear()
                             st.rerun()
