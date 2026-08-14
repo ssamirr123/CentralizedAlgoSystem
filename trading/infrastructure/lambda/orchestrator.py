@@ -18,6 +18,12 @@ Actions:
                                                           rule per algo)
     get_command_status                                -- poll a job_id from the above
     get_algo_status                                   -- convenience: STATUS + short bounded wait
+    sync_repo                                         -- `git pull --ff-only` in REPO_PATH, short bounded
+                                                          wait (like get_algo_status, not fire-and-forget --
+                                                          called synchronously right after a new strategy is
+                                                          registered via POST /api/algos, so the instance
+                                                          actually has the code for whatever algo_name was
+                                                          just added; a DB row alone puts no file on disk)
 
 IMPORTANT — matches this project's own safety principle: algo-control
 actions do NOT wait for the algo to actually be running before returning.
@@ -85,6 +91,14 @@ ALL_ALGOS_ACTIONS = {"start_all_algos", "stop_all_algos", "update_all_algos"}
 # which can legitimately take a while and should stay fully async.
 STATUS_POLL_TIMEOUT_SECONDS = 10
 STATUS_POLL_INTERVAL_SECONDS = 1
+
+# sync_repo is called synchronously from POST /api/algos (a Vercel
+# serverless function with its own timeout, no maxDuration configured --
+# likely a ~10-15s default), so this budget has to leave headroom for
+# Lambda invoke overhead + the API's own DB round trip, not use the
+# whole thing itself. A small git pull normally resolves in 1-3s anyway.
+SYNC_REPO_POLL_TIMEOUT_SECONDS = 8
+SYNC_REPO_POLL_INTERVAL_SECONDS = 1
 
 
 def _log_event(event_name: str, **details: Any) -> None:
@@ -407,6 +421,58 @@ def _action_get_algo_status(instance_id: str, repo_path: str, event: dict) -> di
     }
 
 
+def _action_sync_repo(instance_id: str, repo_path: str, event: dict) -> dict:
+    """`git pull --ff-only` in repo_path -- deliberately NOT routed through
+    trading_agent.py's own UPDATE command, which pre-checks the target
+    algo already exists on disk (_algo_main_path) BEFORE pulling. That's
+    backwards for this action's actual purpose: making a brand-new
+    algo_name (which by definition doesn't exist on disk yet) show up on
+    the instance in the first place. A plain repo-wide pull has no such
+    precondition -- it just brings in whatever's new, including a
+    strategy folder that's never existed there before.
+
+    Not parsed as trading_agent.py JSON output (unlike the other algo
+    actions) -- git's own stdout/stderr is passed back close to verbatim
+    instead of being forced into that shape."""
+    shell_command = f'cd "{repo_path}"; git pull --ff-only 2>&1'
+    try:
+        command_id = _send_ssm_command(instance_id, shell_command)
+    except (ClientError, BotoCoreError) as exc:
+        return _error(f"send_command failed: {exc}", server_id=instance_id)
+
+    deadline = time.monotonic() + SYNC_REPO_POLL_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            result = _get_command_result(command_id, instance_id)
+        except (ClientError, BotoCoreError) as exc:
+            return _error(f"get_command_invocation failed: {exc}", job_id=command_id)
+
+        ssm_status = result.get("Status", "Pending")
+        if ssm_status in ("Success", "Failed", "Cancelled", "TimedOut"):
+            output = result.get("StandardOutputContent", "").strip() or result.get("StandardErrorContent", "").strip()
+            _log_event("SYNC_REPO_DONE", server_id=instance_id, ssm_status=ssm_status, job_id=command_id)
+            return {
+                "success": ssm_status == "Success",
+                "job_id": command_id,
+                "ssm_status": ssm_status,
+                "server_id": instance_id,
+                "output": output,
+            }
+        time.sleep(SYNC_REPO_POLL_INTERVAL_SECONDS)
+
+    # Didn't finish within the short bounded wait -- the pull is still
+    # running on the instance (slow network, large diff). Report that
+    # rather than blocking the caller (a synchronous API request) longer.
+    _log_event("SYNC_REPO_POLL_TIMED_OUT", server_id=instance_id, job_id=command_id)
+    return {
+        "success": True,
+        "job_id": command_id,
+        "server_id": instance_id,
+        "status": "PENDING",
+        "message": "sync still running — poll get_command_status with this job_id",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -445,6 +511,11 @@ def lambda_handler(event: dict, context: Any) -> dict:
         if not repo_path:
             return _error("REPO_PATH environment variable is not set")
         result = _action_get_algo_status(instance_id, repo_path, event)
+    elif action == "sync_repo":
+        repo_path = _get_env("REPO_PATH")
+        if not repo_path:
+            return _error("REPO_PATH environment variable is not set")
+        result = _action_sync_repo(instance_id, repo_path, event)
     else:
         result = _error(f"unknown action: {action}")
 
