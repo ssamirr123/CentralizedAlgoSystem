@@ -110,6 +110,20 @@ class AlgoUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class AlgoRegisterResponse(BaseModel):
+    algo: AlgoListEntry
+    # Best-effort code sync to the (currently single, hardcoded) target
+    # EC2 instance, attempted right after registration -- sync_attempted
+    # is False only if the Lambda itself couldn't be reached at all; a
+    # git pull that ran but failed (merge conflict, network blip) still
+    # sets sync_attempted=True, sync_success=False. Registration always
+    # succeeds regardless of sync outcome -- the DB row is the source of
+    # truth, code deployment is a separate, retriable concern.
+    sync_attempted: bool
+    sync_success: bool | None = None
+    sync_message: str | None = None
+
+
 class HeartbeatIn(BaseModel):
     algo_id: str  # algo NAME
     server_id: str  # server NAME

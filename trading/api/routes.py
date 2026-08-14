@@ -29,6 +29,7 @@ from trading.api.schemas import (
     AlgoActionRequest,
     AlgoIn,
     AlgoListEntry,
+    AlgoRegisterResponse,
     AlgoStatusResponse,
     AlgoUpdate,
     CommandResponse,
@@ -346,12 +347,26 @@ def delete_server(server_id: str, db: Session = Depends(get_db)) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/algos", response_model=AlgoListEntry, status_code=status.HTTP_201_CREATED)
-def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoListEntry:
+@router.post("/algos", response_model=AlgoRegisterResponse, status_code=status.HTTP_201_CREATED)
+def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoRegisterResponse:
     """Registers a new strategy for viewing/management before it's ever
     been started -- otherwise an algo only exists once a start/stop/
     heartbeat/log call auto-creates it via _get_or_create_algo, which
-    means it's invisible on the dashboard until it first runs."""
+    means it's invisible on the dashboard until it first runs.
+
+    Also triggers a best-effort code sync (git pull) on the target EC2
+    instance right after registering -- a DB row alone puts no file on
+    disk, so without this, START would fail with AlgoNotFoundError for
+    any strategy whose code hasn't been separately deployed by hand.
+    Sync failure doesn't fail registration or roll it back; it's reported
+    back to the caller so the dashboard can surface it, but the DB row
+    (the source of truth for "this strategy exists") stands regardless.
+
+    NOTE: sync_repo currently targets the single hardcoded EC2 instance
+    the orchestrator Lambda is configured for (see orchestrator.py's
+    module docstring) -- not necessarily body.server_id's actual
+    instance. Same "quick repoint, not real per-server routing yet"
+    limitation as the start/stop/restart actions."""
     server = _resolve_server(db, body.server_id)
 
     existing = (
@@ -380,10 +395,25 @@ def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoListEntry:
             status.HTTP_409_CONFLICT, f"Algo already registered: {body.algo_id} on {body.server_id}"
         ) from None
     db.refresh(algo)
-    return AlgoListEntry(
+
+    algo_entry = AlgoListEntry(
         algo_id=algo.name, server_id=server.name, status=algo.status,
         enabled=algo.enabled, script_path=algo.script_path, updated_at=algo.updated_at,
         last_heartbeat=None,
+    )
+
+    sync_success = None
+    sync_message = None
+    try:
+        sync_result = invoke_orchestrator("sync_repo")
+        sync_success = bool(sync_result.get("success"))
+        sync_message = sync_result.get("output") or sync_result.get("error") or sync_result.get("message")
+    except LambdaInvokeError as exc:
+        sync_success = False
+        sync_message = str(exc)
+
+    return AlgoRegisterResponse(
+        algo=algo_entry, sync_attempted=True, sync_success=sync_success, sync_message=sync_message,
     )
 
 
