@@ -13,17 +13,25 @@ Actions:
                                                           state RUNNING with a dead/unregistered SSM Agent)
     start_algo, stop_algo, restart_algo, update_algo  -- async, via SSM
     start_all_algos, stop_all_algos, update_all_algos -- Milestone 11: same as above, for every
-                                                          enabled algo (for EventBridge Scheduler --
-                                                          one static payload per schedule, not one
-                                                          rule per algo)
+                                                          enabled algo on every server (for EventBridge
+                                                          Scheduler -- one static payload per schedule,
+                                                          not one rule per algo or per server)
     get_command_status                                -- poll a job_id from the above
     get_algo_status                                   -- convenience: STATUS + short bounded wait
-    sync_repo                                         -- `git pull --ff-only` in REPO_PATH, short bounded
+    sync_repo                                         -- `git pull --ff-only` in repo_path, short bounded
                                                           wait (like get_algo_status, not fire-and-forget --
                                                           called synchronously right after a new strategy is
                                                           registered via POST /api/algos, so the instance
                                                           actually has the code for whatever algo_name was
                                                           just added; a DB row alone puts no file on disk)
+    provision_server                                  -- fire-and-forget (InvocationType=Event), called
+                                                          right after POST /api/servers commits a new row:
+                                                          attach the IAM instance profile if not already
+                                                          associated, reboot + wait for SSM if the agent
+                                                          isn't already online, clone the repo, install
+                                                          deps. Reports its own progress back via
+                                                          PATCH /api/servers/{name} since nothing is left
+                                                          synchronously waiting on this Lambda's result.
 
 IMPORTANT — matches this project's own safety principle: algo-control
 actions do NOT wait for the algo to actually be running before returning.
@@ -35,28 +43,34 @@ slow remote operation (we've seen a plain git clone hang for minutes on a
 credential prompt) would otherwise either blow the Lambda timeout or hold
 an expensive invocation open pointlessly.
 
+Per-server routing: every action that targets a specific instance accepts
+instance_id/repo_path/os_name directly in the event payload (the API
+resolves these from the servers table row for whichever server_id was
+actually selected). Lambda environment variables (INSTANCE_ID/REPO_PATH/
+SERVER_OS) are kept ONLY as a fallback default for callers that don't
+pass them -- there is no longer a single "the" target instance.
+
 Configuration via Lambda environment variables:
-    INSTANCE_ID       -- target EC2 instance ID (required). Currently a single
-                          hardcoded target -- this Lambda has no per-server
-                          routing yet, so it always controls whichever one
-                          instance this points at.
-    REPO_PATH         -- path to the repo on the instance, e.g. /root/trading-app
-                          (required for algo actions). Algo commands assume a
-                          Linux target (AWS-RunShellScript, venv/bin/python3) --
-                          see _build_algo_shell_command.
+    INSTANCE_ID, REPO_PATH, SERVER_OS  -- fallback defaults, not the primary
+                                          routing mechanism anymore (see above)
+    EC2_INSTANCE_PROFILE_NAME          -- IAM instance profile provision_server attaches
+                                          (default: TradingEC2SSMProfile)
+    REPO_CLONE_URL, REPO_BRANCH        -- what provision_server clones
+                                          (defaults: this project's repo, web-base-algo-trading-control)
     AWS_REGION        -- set automatically by the Lambda runtime; not user-configured
-    API_BASE_URL      -- the deployed control-center API (required for *_all_algos actions --
-                          these need to know which algos exist, which only the API/DB knows)
+    API_BASE_URL      -- the deployed control-center API (required for *_all_algos and
+                          provision_server -- these need to read/write the DB, which only
+                          the API layer can do)
     CONTROL_API_KEY   -- auth for the above (same key the dashboard uses)
 
-*_all_algos actions call GET {API_BASE_URL}/api/algos via urllib (stdlib only
--- deliberately not the `requests` package, to keep deployment a single-file
+*_all_algos and provision_server call the API via urllib (stdlib only --
+deliberately not the `requests` package, to keep deployment a single-file
 zip with no dependency packaging step) rather than connecting to Supabase
 directly. This Lambda's job stays "invoke SSM," not "know how to query
 Postgres" -- that's already the API layer's responsibility (Milestone 6),
 and duplicating it here would mean bundling SQLAlchemy/psycopg2 into a
 Lambda package, which is real packaging complexity for no architectural
-benefit when the API already exposes exactly this list.
+benefit when the API already exposes exactly this.
 """
 from __future__ import annotations
 
@@ -100,6 +114,17 @@ STATUS_POLL_INTERVAL_SECONDS = 1
 SYNC_REPO_POLL_TIMEOUT_SECONDS = 8
 SYNC_REPO_POLL_INTERVAL_SECONDS = 1
 
+# provision_server runs fire-and-forget (InvocationType=Event), so it can
+# use this Lambda's full timeout budget (configured to 870s -- see
+# DEPLOY.md/setup notes -- comfortably under the 900s/15min hard cap,
+# leaving ~30s of headroom for the Lambda's own overhead). A reboot +
+# SSM Agent re-registration is the slow part; repo clone/deps install is
+# normally much faster than either budget below.
+PROVISION_SSM_WAIT_TIMEOUT_SECONDS = 480
+PROVISION_SSM_WAIT_INTERVAL_SECONDS = 15
+PROVISION_SETUP_TIMEOUT_SECONDS = 300
+PROVISION_SETUP_POLL_INTERVAL_SECONDS = 5
+
 
 def _log_event(event_name: str, **details: Any) -> None:
     logger.info(json.dumps({"event": event_name, **details}, default=str))
@@ -117,10 +142,10 @@ def _build_algo_shell_command(
     repo_path: str, agent_command: str, algo_name: str, lines: int | None,
     server_name: str | None = None, api_base_url: str | None = None, control_api_key: str | None = None,
 ) -> str:
-    """Targets a Linux instance -- venv/bin/python3 (not bare python3),
-    since AL2023's RPM-installed requests/urllib3 conflict with pip's in
-    system site-packages (see install_deps_linux.sh), matching the
-    identical pattern already used by ssm_invoke.py's manual CLI tool.
+    """Linux target -- venv/bin/python3 (not bare python3), since AL2023's
+    RPM-installed requests/urllib3 conflict with pip's in system
+    site-packages (see install_deps_linux.sh), matching the identical
+    pattern already used by ssm_invoke.py's manual CLI tool.
 
     Exports STRATEGY_NAME/SERVER_NAME/API_BASE_URL/CONTROL_API_KEY inline
     on START_ALGO/RESTART_ALGO -- each SSM send_command runs in a fresh,
@@ -145,11 +170,40 @@ def _build_algo_shell_command(
     return " ".join(parts)
 
 
-def _send_ssm_command(instance_id: str, shell_command: str) -> str:
+def _build_algo_powershell_command(
+    repo_path: str, agent_command: str, algo_name: str, lines: int | None,
+    server_name: str | None = None, api_base_url: str | None = None, control_api_key: str | None = None,
+) -> str:
+    """Windows target -- bare `python` (no venv), matching how the
+    original Windows instance was set up (no AL2023-style RPM/pip
+    conflict on that AMI). Same env-export reasoning as the Linux
+    builder, PowerShell syntax instead of bash."""
+    parts = []
+    if agent_command in ("START_ALGO", "RESTART_ALGO") and server_name and api_base_url and control_api_key:
+        parts.append(
+            f'$env:STRATEGY_NAME="{algo_name}"; $env:SERVER_NAME="{server_name}"; '
+            f'$env:API_BASE_URL="{api_base_url}"; $env:CONTROL_API_KEY="{control_api_key}";'
+        )
+    parts += [f'cd "{repo_path}";', "python trading\\agent\\trading_agent.py", agent_command, algo_name]
+    if agent_command == "LOGS" and lines is not None:
+        parts.append(f"--lines {lines}")
+    return " ".join(parts)
+
+
+def _build_algo_command(
+    os_name: str, repo_path: str, agent_command: str, algo_name: str, lines: int | None,
+    server_name: str | None = None, api_base_url: str | None = None, control_api_key: str | None = None,
+) -> str:
+    builder = _build_algo_powershell_command if os_name == "windows" else _build_algo_shell_command
+    return builder(repo_path, agent_command, algo_name, lines, server_name, api_base_url, control_api_key)
+
+
+def _send_ssm_command(instance_id: str, command: str, os_name: str = "linux") -> str:
+    document = "AWS-RunPowerShellScript" if os_name == "windows" else "AWS-RunShellScript"
     response = ssm_client.send_command(
         InstanceIds=[instance_id],
-        DocumentName="AWS-RunShellScript",
-        Parameters={"commands": [shell_command]},
+        DocumentName=document,
+        Parameters={"commands": [command]},
     )
     return response["Command"]["CommandId"]
 
@@ -178,6 +232,17 @@ def _parse_agent_output(stdout: str) -> dict | None:
         return json.loads(stdout)
     except json.JSONDecodeError:
         return None
+
+
+def _api_request(method: str, path: str, api_base_url: str, api_key: str, body: dict | None = None, timeout: int = 15) -> Any:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        f"{api_base_url.rstrip('/')}{path}",
+        data=data, method=method,
+        headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -266,21 +331,21 @@ def _action_stop_ec2(instance_id: str, event: dict) -> dict:
     return {"success": True, "server_id": instance_id, "status": "STOPPING"}
 
 
-def _action_algo_command(action: str, instance_id: str, repo_path: str, event: dict) -> dict:
+def _action_algo_command(action: str, instance_id: str, repo_path: str, os_name: str, event: dict) -> dict:
     algo_name = event.get("algo_id") or event.get("algo_name")
     if not algo_name:
         return _error("algo_id (or algo_name) is required for this action")
 
     agent_command = ALGO_ACTIONS[action]
     lines = event.get("lines")
-    shell_command = _build_algo_shell_command(
-        repo_path, agent_command, algo_name, lines,
-        server_name=_get_env("SERVER_NAME"), api_base_url=_get_env("API_BASE_URL"),
-        control_api_key=_get_env("CONTROL_API_KEY"),
+    command = _build_algo_command(
+        os_name, repo_path, agent_command, algo_name, lines,
+        server_name=event.get("server_name") or _get_env("SERVER_NAME"),
+        api_base_url=_get_env("API_BASE_URL"), control_api_key=_get_env("CONTROL_API_KEY"),
     )
 
     try:
-        command_id = _send_ssm_command(instance_id, shell_command)
+        command_id = _send_ssm_command(instance_id, command, os_name)
     except (ClientError, BotoCoreError) as exc:
         return _error(f"send_command failed: {exc}", server_id=instance_id, algo_id=algo_name)
 
@@ -307,24 +372,33 @@ class AlgoListError(RuntimeError):
 
 
 def _list_enabled_algos(api_base_url: str, api_key: str) -> list[dict]:
-    request = urllib.request.Request(
-        f"{api_base_url.rstrip('/')}/api/algos",
-        headers={"X-API-Key": api_key},
-    )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            algos = json.loads(response.read().decode("utf-8"))
+        algos = _api_request("GET", "/api/algos", api_base_url, api_key, timeout=10)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
         raise AlgoListError(f"could not fetch algo list from {api_base_url}/api/algos: {exc}") from exc
-
     return [a for a in algos if a.get("enabled")]
 
 
-def _action_all_algos_command(action: str, instance_id: str, repo_path: str, event: dict) -> dict:
+def _list_servers(api_base_url: str, api_key: str) -> dict[str, dict]:
+    """Returns {server_name: server_dict}, so _action_all_algos_command
+    can look up each algo's OWN server's instance_id/repo_path/os --
+    without this, every algo would route to whichever single instance_id
+    happened to be passed into this action, wrong for any algo that
+    isn't on that one server."""
+    try:
+        servers = _api_request("GET", "/api/servers", api_base_url, api_key, timeout=10)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
+        raise AlgoListError(f"could not fetch server list from {api_base_url}/api/servers: {exc}") from exc
+    return {s["server_id"]: s for s in servers}
+
+
+def _action_all_algos_command(action: str, event: dict) -> dict:
     """Same underlying SSM command as _action_algo_command, applied to
-    every enabled algo instead of one named in the event -- for
-    EventBridge Scheduler, which passes a single static payload per rule
-    rather than one rule per algo."""
+    every enabled algo on every server instead of one named in the event
+    -- for EventBridge Scheduler, which passes a single static payload
+    per rule rather than one rule per algo or per server. Each algo is
+    routed to its OWN server's instance_id/repo_path/os (see
+    _list_servers), not a single instance_id passed into this action."""
     api_base_url = _get_env("API_BASE_URL")
     api_key = _get_env("CONTROL_API_KEY")
     if not api_base_url or not api_key:
@@ -332,6 +406,7 @@ def _action_all_algos_command(action: str, instance_id: str, repo_path: str, eve
 
     try:
         algos = _list_enabled_algos(api_base_url, api_key)
+        servers_by_name = _list_servers(api_base_url, api_key)
     except AlgoListError as exc:
         return _error(str(exc))
 
@@ -340,10 +415,18 @@ def _action_all_algos_command(action: str, instance_id: str, repo_path: str, eve
         return {"success": True, "results": [], "message": "no enabled algos found"}
 
     single_action = action.removesuffix("_all_algos") + "_algo"  # e.g. start_all_algos -> start_algo
-    results = [
-        _action_algo_command(single_action, instance_id, repo_path, {"algo_id": algo["algo_id"]})
-        for algo in algos
-    ]
+    results = []
+    for algo in algos:
+        server = servers_by_name.get(algo["server_id"])
+        if server is None:
+            results.append(_error(f"unknown server for algo: {algo['server_id']}", algo_id=algo["algo_id"]))
+            continue
+        results.append(
+            _action_algo_command(
+                single_action, server["ec2_instance_id"], server["repo_path"], server.get("os", "linux"),
+                {"algo_id": algo["algo_id"], "server_name": algo["server_id"]},
+            )
+        )
     _log_event("ALL_ALGOS_COMMAND_SENT", action=action, algo_count=len(results))
     return {"success": all(r.get("success") for r in results), "results": results}
 
@@ -390,14 +473,14 @@ def _action_get_command_status(instance_id: str, event: dict) -> dict:
     }
 
 
-def _action_get_algo_status(instance_id: str, repo_path: str, event: dict) -> dict:
+def _action_get_algo_status(instance_id: str, repo_path: str, os_name: str, event: dict) -> dict:
     algo_name = event.get("algo_id") or event.get("algo_name")
     if not algo_name:
         return _error("algo_id (or algo_name) is required for this action")
 
-    shell_command = _build_algo_shell_command(repo_path, "STATUS", algo_name, None)
+    command = _build_algo_command(os_name, repo_path, "STATUS", algo_name, None)
     try:
-        command_id = _send_ssm_command(instance_id, shell_command)
+        command_id = _send_ssm_command(instance_id, command, os_name)
     except (ClientError, BotoCoreError) as exc:
         return _error(f"send_command failed: {exc}", server_id=instance_id, algo_id=algo_name)
 
@@ -421,7 +504,7 @@ def _action_get_algo_status(instance_id: str, repo_path: str, event: dict) -> di
     }
 
 
-def _action_sync_repo(instance_id: str, repo_path: str, event: dict) -> dict:
+def _action_sync_repo(instance_id: str, repo_path: str, os_name: str, event: dict) -> dict:
     """`git pull --ff-only` in repo_path -- deliberately NOT routed through
     trading_agent.py's own UPDATE command, which pre-checks the target
     algo already exists on disk (_algo_main_path) BEFORE pulling. That's
@@ -434,9 +517,12 @@ def _action_sync_repo(instance_id: str, repo_path: str, event: dict) -> dict:
     Not parsed as trading_agent.py JSON output (unlike the other algo
     actions) -- git's own stdout/stderr is passed back close to verbatim
     instead of being forced into that shape."""
-    shell_command = f'cd "{repo_path}"; git pull --ff-only 2>&1'
+    if os_name == "windows":
+        command = f'cd "{repo_path}"; git pull --ff-only 2>&1 | Out-String'
+    else:
+        command = f'cd "{repo_path}"; git pull --ff-only 2>&1'
     try:
-        command_id = _send_ssm_command(instance_id, shell_command)
+        command_id = _send_ssm_command(instance_id, command, os_name)
     except (ClientError, BotoCoreError) as exc:
         return _error(f"send_command failed: {exc}", server_id=instance_id)
 
@@ -473,6 +559,158 @@ def _action_sync_repo(instance_id: str, repo_path: str, event: dict) -> dict:
     }
 
 
+def _wait_for_ssm_command(instance_id: str, command_id: str, timeout_seconds: int, interval_seconds: int) -> dict | None:
+    """Polls a raw SSM command (not a trading_agent.py one -- no JSON
+    output parsing) to a terminal state. Returns None on timeout so the
+    caller can report that distinctly from a real failure."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            result = _get_command_result(command_id, instance_id)
+        except (ClientError, BotoCoreError) as exc:
+            return {"Status": "Failed", "StandardErrorContent": str(exc), "StandardOutputContent": ""}
+        if result.get("Status", "Pending") in ("Success", "Failed", "Cancelled", "TimedOut"):
+            return result
+        time.sleep(interval_seconds)
+    return None
+
+
+def _action_provision_server(instance_id: str, os_name: str, repo_path: str, server_name: str, event: dict) -> dict:
+    """Bootstraps a brand-new EC2 instance so it can actually run algo
+    commands: attach the IAM instance profile if not already associated,
+    reboot + wait for the SSM Agent to come online if it isn't already
+    (the same root cause this project already hit once -- the agent gives
+    up trying to get credentials at boot if the profile wasn't attached
+    yet, and attaching it after boot doesn't retroactively fix an agent
+    that's already given up), clone the repo, install dependencies.
+
+    Reports progress via PATCH /api/servers/{server_name} at each step --
+    this runs fire-and-forget (InvocationType=Event from the API), so
+    there's no caller left waiting synchronously on this function's
+    return value by the time any of this actually happens."""
+    api_base_url = _get_env("API_BASE_URL")
+    api_key = _get_env("CONTROL_API_KEY")
+    if not api_base_url or not api_key:
+        _log_event("PROVISION_MISSING_CONFIG", server_name=server_name)
+        return _error("API_BASE_URL and CONTROL_API_KEY are required for provisioning callbacks")
+
+    def report(provisioning_status: str, message: str) -> None:
+        _log_event("PROVISION_STEP", server_name=server_name, status=provisioning_status, message=message)
+        try:
+            _api_request(
+                "PATCH", f"/api/servers/{server_name}", api_base_url, api_key,
+                body={"provisioning_status": provisioning_status, "provisioning_message": message[:2000]},
+            )
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+            _log_event("PROVISION_REPORT_FAILED", server_name=server_name, error=str(exc))
+
+    # Step 1: attach the IAM instance profile if not already associated.
+    profile_name = _get_env("EC2_INSTANCE_PROFILE_NAME") or "TradingEC2SSMProfile"
+    try:
+        assoc = ec2_client.describe_iam_instance_profile_associations(
+            Filters=[{"Name": "instance-id", "Values": [instance_id]}],
+        )
+        has_profile = any(
+            a["State"] in ("associating", "associated")
+            for a in assoc.get("IamInstanceProfileAssociations", [])
+        )
+    except (ClientError, BotoCoreError) as exc:
+        report("FAILED", f"could not check instance profile: {exc}")
+        return _error(str(exc))
+
+    attached_profile_now = False
+    if not has_profile:
+        try:
+            ec2_client.associate_iam_instance_profile(
+                IamInstanceProfile={"Name": profile_name}, InstanceId=instance_id,
+            )
+        except (ClientError, BotoCoreError) as exc:
+            report("FAILED", f"could not attach IAM instance profile '{profile_name}': {exc}")
+            return _error(str(exc))
+        report("PROVISIONING", "IAM instance profile attached; checking SSM registration")
+        attached_profile_now = True
+
+    # Step 2: make sure the SSM Agent is actually online -- reboot if not.
+    def ssm_online() -> bool:
+        try:
+            info = ssm_client.describe_instance_information(
+                Filters=[{"Key": "InstanceIds", "Values": [instance_id]}],
+            )
+        except (ClientError, BotoCoreError):
+            return False
+        instances = info.get("InstanceInformationList", [])
+        return bool(instances) and instances[0].get("PingStatus") == "Online"
+
+    if not ssm_online():
+        try:
+            ec2_client.reboot_instances(InstanceIds=[instance_id])
+        except (ClientError, BotoCoreError) as exc:
+            report("FAILED", f"could not reboot instance: {exc}")
+            return _error(str(exc))
+        report(
+            "PROVISIONING",
+            "Instance rebooting (needed for the SSM Agent to pick up credentials); waiting for it to come online"
+            if attached_profile_now else
+            "SSM Agent not responding; rebooted instance and waiting for it to come online",
+        )
+
+        deadline = time.monotonic() + PROVISION_SSM_WAIT_TIMEOUT_SECONDS
+        online = False
+        while time.monotonic() < deadline:
+            if ssm_online():
+                online = True
+                break
+            time.sleep(PROVISION_SSM_WAIT_INTERVAL_SECONDS)
+        if not online:
+            report(
+                "FAILED",
+                f"SSM Agent did not come online within {PROVISION_SSM_WAIT_TIMEOUT_SECONDS}s after reboot",
+            )
+            return _error("SSM Agent did not come online after reboot")
+
+    report("PROVISIONING", "SSM Agent online; cloning repo and installing dependencies")
+
+    # Step 3: clone the repo (idempotent -- skip if the directory already
+    # exists) and install dependencies.
+    repo_url = _get_env("REPO_CLONE_URL") or "https://github.com/ssamirr123/CentralizedAlgoSystem.git"
+    branch = _get_env("REPO_BRANCH") or "web-base-algo-trading-control"
+    if os_name == "windows":
+        setup_command = (
+            f'if (-not (Test-Path "{repo_path}")) {{ git clone --branch {branch} {repo_url} "{repo_path}" }}; '
+            f'cd "{repo_path}"; pip install -r requirements.txt; '
+            f'pip install -r trading/algos/example_strategy/requirements.txt'
+        )
+    else:
+        setup_command = (
+            f'if [ ! -d "{repo_path}" ]; then git clone --branch {branch} {repo_url} "{repo_path}"; fi; '
+            f'cd "{repo_path}"; python3 -m venv venv; '
+            f'venv/bin/pip install --upgrade pip; '
+            f'venv/bin/pip install -r requirements.txt; '
+            f'venv/bin/pip install -r trading/algos/example_strategy/requirements.txt'
+        )
+
+    try:
+        command_id = _send_ssm_command(instance_id, setup_command, os_name)
+    except (ClientError, BotoCoreError) as exc:
+        report("FAILED", f"send_command for repo setup failed: {exc}")
+        return _error(str(exc))
+
+    result = _wait_for_ssm_command(
+        instance_id, command_id, PROVISION_SETUP_TIMEOUT_SECONDS, PROVISION_SETUP_POLL_INTERVAL_SECONDS,
+    )
+    if result is None:
+        report("FAILED", f"repo setup did not complete within {PROVISION_SETUP_TIMEOUT_SECONDS}s")
+        return _error("repo setup timed out")
+
+    if result.get("Status") == "Success":
+        report("READY", "Repo cloned and dependencies installed successfully")
+        return {"success": True, "server_id": instance_id, "provisioning_status": "READY"}
+
+    detail = (result.get("StandardErrorContent") or result.get("StandardOutputContent") or "").strip()
+    report("FAILED", f"repo setup failed ({result.get('Status')}): {detail}")
+    return _error(f"repo setup failed: {result.get('Status')}")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -484,9 +722,31 @@ def lambda_handler(event: dict, context: Any) -> dict:
     if not action:
         return _error("event.action is required")
 
-    instance_id = _get_env("INSTANCE_ID")
+    # Per-server routing: prefer what the caller passed (resolved from the
+    # servers table for whichever server was actually selected), fall
+    # back to this Lambda's own env vars only for callers that don't pass
+    # them -- there's no single "the" target instance anymore.
+    instance_id = event.get("instance_id") or _get_env("INSTANCE_ID")
+    repo_path = event.get("repo_path") or _get_env("REPO_PATH")
+    os_name = event.get("os_name") or _get_env("SERVER_OS") or "linux"
+
+    if action in ALL_ALGOS_ACTIONS:
+        # Iterates every enabled algo across every server itself -- no
+        # single instance_id applies.
+        result = _action_all_algos_command(action, event)
+        _log_event("LAMBDA_RESULT", action=action, result=result)
+        return result
+
+    if action == "provision_server":
+        server_name = event.get("server_name")
+        if not instance_id or not server_name:
+            return _error("instance_id and server_name are required for provision_server")
+        result = _action_provision_server(instance_id, os_name, repo_path or "/trading-app", server_name, event)
+        _log_event("LAMBDA_RESULT", action=action, result=result)
+        return result
+
     if not instance_id:
-        return _error("INSTANCE_ID environment variable is not set")
+        return _error("instance_id is required (pass it explicitly, or set INSTANCE_ID as a fallback)")
 
     if action == "start_ec2":
         result = _action_start_ec2(instance_id, event)
@@ -495,27 +755,19 @@ def lambda_handler(event: dict, context: Any) -> dict:
     elif action == "check_ec2_health":
         result = _action_check_ec2_health(instance_id, event)
     elif action in ALGO_ACTIONS:
-        repo_path = _get_env("REPO_PATH")
         if not repo_path:
-            return _error("REPO_PATH environment variable is not set")
-        result = _action_algo_command(action, instance_id, repo_path, event)
-    elif action in ALL_ALGOS_ACTIONS:
-        repo_path = _get_env("REPO_PATH")
-        if not repo_path:
-            return _error("REPO_PATH environment variable is not set")
-        result = _action_all_algos_command(action, instance_id, repo_path, event)
+            return _error("repo_path is required for this action")
+        result = _action_algo_command(action, instance_id, repo_path, os_name, event)
     elif action == "get_command_status":
         result = _action_get_command_status(instance_id, event)
     elif action == "get_algo_status":
-        repo_path = _get_env("REPO_PATH")
         if not repo_path:
-            return _error("REPO_PATH environment variable is not set")
-        result = _action_get_algo_status(instance_id, repo_path, event)
+            return _error("repo_path is required for this action")
+        result = _action_get_algo_status(instance_id, repo_path, os_name, event)
     elif action == "sync_repo":
-        repo_path = _get_env("REPO_PATH")
         if not repo_path:
-            return _error("REPO_PATH environment variable is not set")
-        result = _action_sync_repo(instance_id, repo_path, event)
+            return _error("repo_path is required for this action")
+        result = _action_sync_repo(instance_id, repo_path, os_name, event)
     else:
         result = _error(f"unknown action: {action}")
 

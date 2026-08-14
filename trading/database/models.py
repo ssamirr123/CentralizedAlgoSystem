@@ -44,6 +44,19 @@ class Server(Base):
     ec2_instance_id: Mapped[str] = mapped_column(String(32), nullable=False)
     region: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="UNKNOWN")
+    # "windows" or "linux" -- selects the SSM document (AWS-RunPowerShellScript
+    # vs AWS-RunShellScript) and command syntax for every action the
+    # orchestrator Lambda sends to this specific server, matching
+    # ssm_invoke.py's existing --os pattern instead of the Lambda's old
+    # single hardcoded target.
+    os: Mapped[str] = mapped_column(String(20), nullable=False, default="linux")
+    repo_path: Mapped[str] = mapped_column(String(255), nullable=False, default="/trading-app")
+    # PROVISIONING while the async bootstrap Lambda action is attaching
+    # the IAM profile / rebooting / waiting for SSM / cloning / installing
+    # deps; READY once it can actually run algo commands; FAILED with
+    # provisioning_message explaining why if any step didn't complete.
+    provisioning_status: Mapped[str] = mapped_column(String(20), nullable=False, default="READY")
+    provisioning_message: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
