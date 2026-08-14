@@ -1,0 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SSMSendCommandBothInstances",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:471112713822:instance/i-0b0c8bb83adeb716b",
+        "arn:aws:ec2:ap-south-1:471112713822:instance/i-0f60543b5534c332f",
+        "arn:aws:ssm:ap-south-1::document/AWS-RunShellScript",
+        "arn:aws:ssm:ap-south-1::document/AWS-RunPowerShellScript"
+      ]
+    },
+    {
+      "Sid": "SSMCommandStatus",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommands",
+        "ssm:ListCommandInvocations"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2PowerControlLinuxInstance",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances"
+      ],
+      "Resource": "arn:aws:ec2:ap-south-1:471112713822:instance/i-0b0c8bb83adeb716b"
+    }
+  ]
+}

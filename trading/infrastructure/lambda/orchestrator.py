@@ -30,8 +30,14 @@ credential prompt) would otherwise either blow the Lambda timeout or hold
 an expensive invocation open pointlessly.
 
 Configuration via Lambda environment variables:
-    INSTANCE_ID       -- target EC2 instance ID (required)
-    REPO_PATH         -- path to the repo on the instance, e.g. C:\\trading-app (required for algo actions)
+    INSTANCE_ID       -- target EC2 instance ID (required). Currently a single
+                          hardcoded target -- this Lambda has no per-server
+                          routing yet, so it always controls whichever one
+                          instance this points at.
+    REPO_PATH         -- path to the repo on the instance, e.g. /root/trading-app
+                          (required for algo actions). Algo commands assume a
+                          Linux target (AWS-RunShellScript, venv/bin/python3) --
+                          see _build_algo_shell_command.
     AWS_REGION        -- set automatically by the Lambda runtime; not user-configured
     API_BASE_URL      -- the deployed control-center API (required for *_all_algos actions --
                           these need to know which algos exist, which only the API/DB knows)
@@ -93,18 +99,22 @@ def _get_env(name: str) -> str | None:
     return os.environ.get(name)
 
 
-def _build_algo_powershell(repo_path: str, agent_command: str, algo_name: str, lines: int | None) -> str:
-    parts = [f'cd "{repo_path}";', "python trading\\agent\\trading_agent.py", agent_command, algo_name]
+def _build_algo_shell_command(repo_path: str, agent_command: str, algo_name: str, lines: int | None) -> str:
+    """Targets a Linux instance -- venv/bin/python3 (not bare python3),
+    since AL2023's RPM-installed requests/urllib3 conflict with pip's in
+    system site-packages (see install_deps_linux.sh), matching the
+    identical pattern already used by ssm_invoke.py's manual CLI tool."""
+    parts = [f'cd "{repo_path}";', "venv/bin/python3 trading/agent/trading_agent.py", agent_command, algo_name]
     if agent_command == "LOGS" and lines is not None:
         parts.append(f"--lines {lines}")
     return " ".join(parts)
 
 
-def _send_ssm_command(instance_id: str, powershell_command: str) -> str:
+def _send_ssm_command(instance_id: str, shell_command: str) -> str:
     response = ssm_client.send_command(
         InstanceIds=[instance_id],
-        DocumentName="AWS-RunPowerShellScript",
-        Parameters={"commands": [powershell_command]},
+        DocumentName="AWS-RunShellScript",
+        Parameters={"commands": [shell_command]},
     )
     return response["Command"]["CommandId"]
 
@@ -228,10 +238,10 @@ def _action_algo_command(action: str, instance_id: str, repo_path: str, event: d
 
     agent_command = ALGO_ACTIONS[action]
     lines = event.get("lines")
-    powershell_command = _build_algo_powershell(repo_path, agent_command, algo_name, lines)
+    shell_command = _build_algo_shell_command(repo_path, agent_command, algo_name, lines)
 
     try:
-        command_id = _send_ssm_command(instance_id, powershell_command)
+        command_id = _send_ssm_command(instance_id, shell_command)
     except (ClientError, BotoCoreError) as exc:
         return _error(f"send_command failed: {exc}", server_id=instance_id, algo_id=algo_name)
 
@@ -346,9 +356,9 @@ def _action_get_algo_status(instance_id: str, repo_path: str, event: dict) -> di
     if not algo_name:
         return _error("algo_id (or algo_name) is required for this action")
 
-    powershell_command = _build_algo_powershell(repo_path, "STATUS", algo_name, None)
+    shell_command = _build_algo_shell_command(repo_path, "STATUS", algo_name, None)
     try:
-        command_id = _send_ssm_command(instance_id, powershell_command)
+        command_id = _send_ssm_command(instance_id, shell_command)
     except (ClientError, BotoCoreError) as exc:
         return _error(f"send_command failed: {exc}", server_id=instance_id, algo_id=algo_name)
 
