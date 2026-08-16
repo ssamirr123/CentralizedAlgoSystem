@@ -493,11 +493,13 @@ def patch_algo(algo_id: str, server_id: str, body: AlgoUpdate, db: Session = Dep
 
 
 @router.delete("/algos/{algo_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_algo(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> Response:
+def delete_algo(algo_id: str, server_id: str, force: bool = False, db: Session = Depends(get_db)) -> Response:
     """Refuses to delete an algo that still has heartbeat/log/position/
     trade/P&L/command/run history -- same reasoning as delete_server:
     surface exactly what's blocking it rather than silently cascading
-    through years of trading history."""
+    through years of trading history. force=true is the explicit opt-in
+    to purge that history and the algo together, for when the caller
+    really does want it gone (e.g. a test registration)."""
     server = _resolve_server(db, server_id)
     algo = (
         db.query(models.Algo)
@@ -507,21 +509,30 @@ def delete_algo(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> 
     if algo is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown algo: {algo_id} on {server_id}")
 
+    related_models = {
+        "heartbeat(s)": models.Heartbeat,
+        "log(s)": models.Log,
+        "position(s)": models.Position,
+        "trade(s)": models.Trade,
+        "daily P&L row(s)": models.DailyPnl,
+        "command(s)": models.Command,
+        "run(s)": models.AlgoRun,
+    }
     related_counts = {
-        "heartbeat(s)": db.query(models.Heartbeat).filter(models.Heartbeat.algo_id == algo.id).count(),
-        "log(s)": db.query(models.Log).filter(models.Log.algo_id == algo.id).count(),
-        "position(s)": db.query(models.Position).filter(models.Position.algo_id == algo.id).count(),
-        "trade(s)": db.query(models.Trade).filter(models.Trade.algo_id == algo.id).count(),
-        "daily P&L row(s)": db.query(models.DailyPnl).filter(models.DailyPnl.algo_id == algo.id).count(),
-        "command(s)": db.query(models.Command).filter(models.Command.algo_id == algo.id).count(),
-        "run(s)": db.query(models.AlgoRun).filter(models.AlgoRun.algo_id == algo.id).count(),
+        label: db.query(model).filter(model.algo_id == algo.id).count() for label, model in related_models.items()
     }
     blocking = {label: count for label, count in related_counts.items() if count}
-    if blocking:
+    if blocking and not force:
         detail = ", ".join(f"{count} {label}" for label, count in blocking.items())
         raise HTTPException(
-            status.HTTP_409_CONFLICT, f"Cannot delete algo '{algo_id}' on '{server_id}': still has {detail}."
+            status.HTTP_409_CONFLICT,
+            f"Cannot delete algo '{algo_id}' on '{server_id}': still has {detail}. "
+            "Retry with ?force=true to also purge this history.",
         )
+
+    if blocking:
+        for label in blocking:
+            db.query(related_models[label]).filter(related_models[label].algo_id == algo.id).delete()
 
     db.delete(algo)
     try:

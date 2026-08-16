@@ -289,9 +289,12 @@ def edit_algo(algo_id: str, server_id: str, **updates: object) -> dict:
     return resp.json()
 
 
-def delete_algo(algo_id: str, server_id: str) -> None:
+def delete_algo(algo_id: str, server_id: str, force: bool = False) -> None:
     resp = requests.delete(
-        f"{API_BASE_URL}/api/algos/{algo_id}", params={"server_id": server_id}, headers=HEADERS, timeout=25,
+        f"{API_BASE_URL}/api/algos/{algo_id}",
+        params={"server_id": server_id, "force": force},
+        headers=HEADERS,
+        timeout=25,
     )
     resp.raise_for_status()
 
@@ -796,25 +799,40 @@ with tab_config:
                                 st.error(f"Could not update strategy: {api_error_detail(exc)}")
 
                     confirm_key = f"confirm_delete_algo_{aid}_{asid}"
+                    force_key = f"force_delete_algo_{aid}_{asid}"
                     if not st.session_state.get(confirm_key):
                         if st.button(":material/delete: Delete strategy", key=f"delete_algo_btn_{aid}_{asid}"):
                             st.session_state[confirm_key] = True
                             st.rerun()
                     else:
                         st.warning(f"Delete '{aid}' on '{asid}'? This cannot be undone.")
+                        # A plain delete is blocked (409) once an algo has
+                        # any heartbeat/log/P&L/command history -- which is
+                        # true of almost any algo that has ever run. force
+                        # purges that history and the algo together, only
+                        # offered once the operator has explicitly checked
+                        # this box (not the default) so it's never a
+                        # one-click accidental data-loss path.
+                        force_delete = st.checkbox(
+                            "Also purge its trading history (heartbeats, logs, P&L, commands)",
+                            key=force_key,
+                            help="Required if this strategy has ever run -- a plain delete is blocked otherwise.",
+                        )
                         confirm_algo_cols = st.columns(2)
                         if confirm_algo_cols[0].button(
                             ":material/delete_forever: Confirm delete", key=f"confirm_delete_algo_btn_{aid}_{asid}"
                         ):
                             try:
                                 with st.spinner(f"Deleting '{aid}'..."):
-                                    delete_algo(aid, asid)
+                                    delete_algo(aid, asid, force=force_delete)
                                 st.success(f"Deleted strategy '{aid}'.")
                             except requests.exceptions.RequestException as exc:
                                 st.error(f"Could not delete strategy: {api_error_detail(exc)}")
                             st.session_state.pop(confirm_key, None)
+                            st.session_state.pop(force_key, None)
                             load_algos.clear()
                             st.rerun()
                         if confirm_algo_cols[1].button("Cancel", key=f"cancel_delete_algo_btn_{aid}_{asid}"):
                             st.session_state.pop(confirm_key, None)
+                            st.session_state.pop(force_key, None)
                             st.rerun()
