@@ -8,10 +8,7 @@ import log_setup
 log_setup.init()   # mirror all print()/stderr output to logs/<date>/app.log
 
 import sys
-import warnings, threading, token_file, connectapi, config, Websocket, rest_func, time, monitor
 from pathlib import Path
-from datetime import datetime
-warnings.filterwarnings('ignore')
 
 # trading_agent.py's START_ALGO only marks this process RUNNING once it
 # sees a self-written PID file (write_pid_file) -- without it, it always
@@ -19,12 +16,22 @@ warnings.filterwarnings('ignore')
 # after launch") no matter how healthy the actual process is. This algo
 # came from its own separate repo (not the trading/algos/example_strategy
 # template every other algo here is copied from), so it never had this
-# control-framework contract wired in.
+# control-framework contract wired in. MUST run before `import monitor`
+# below (not after) -- monitor.py's own `from trading.common.heartbeat
+# import ...` needs project_root on sys.path at IMPORT time, not just by
+# the time monitor.start() is later called; getting this backwards was a
+# real bug caught live: the import silently failed (caught by monitor.py's
+# own except ImportError), so config-center heartbeat reporting never
+# worked, elsewhere no matter how monitor.start() as called.
 _project_root = Path(__file__).resolve().parents[3]
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 from trading.common.utils import write_pid_file  # noqa: E402
 write_pid_file("CombinedVwapNifty")
+
+import warnings, threading, token_file, connectapi, config, Websocket, rest_func, time, monitor
+from datetime import datetime
+warnings.filterwarnings('ignore')
 
 # Start the Central Strategy Monitoring heartbeat agent (daemon thread).
 monitor.start()   # -> status "RUNNING"
