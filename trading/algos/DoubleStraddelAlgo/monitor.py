@@ -18,15 +18,15 @@ import time
 import atexit
 
 import config
-from strategy_agent.agent import StrategyHeartbeatAgent
 import websocket_feed as wf
 
-# Second, independent heartbeat sender feeding the *new* control-center
-# schema (POST /api/heartbeat + /api/pnl) alongside the StrategyHeartbeatAgent
-# above, which still only feeds the old, separate /update_strategy monitor --
-# that one is what's been silently failing (config.api_base_url is a
-# hardcoded, unreachable "http://127.0.0.1:8000"), and even fixed it would
-# never appear in this dashboard, since the two systems are disconnected.
+# Heartbeat sender feeding the control-center schema (POST /api/heartbeat +
+# /api/pnl) -- the only one this algo uses. Previously also ran the shared
+# strategy_agent.agent.StrategyHeartbeatAgent (old, separate /update_strategy
+# monitor), removed entirely: its config.api_base_url is a hardcoded,
+# unreachable "http://127.0.0.1:8000", nothing in this dashboard reads
+# /update_strategy's target table anyway, and it was retrying and logging
+# "Heartbeat send failed" every ~30s forever for zero benefit.
 # Uses STRATEGY_NAME/SERVER_NAME/API_BASE_URL/CONTROL_API_KEY -- the exact
 # env vars trading_agent.py's START_ALGO injects (see orchestrator.py) --
 # rather than config.strategy_name/config.server_name, which are hardcoded
@@ -50,44 +50,26 @@ _last_cc_pnl_report_monotonic = 0.0
 
 def start():
     """
-    Create + start the heartbeat agent (idempotent) and a lightweight metrics
-    refresher. Returns the agent (or None if monitoring is disabled/failed).
+    Create + start the control-center heartbeat agent (idempotent) and a
+    lightweight metrics refresher. Returns the agent (or None if monitoring
+    is disabled/failed).
     """
     if not getattr(config, "monitoring_enabled", False):
         return None
-    if config.agent is not None:
-        return config.agent
+    if _cc_agent is not None:
+        return _cc_agent
     try:
-        # NOT chained as `StrategyHeartbeatAgent(...).start()` -- `from
-        # strategy_agent.agent import StrategyHeartbeatAgent` above resolves
-        # to the SHARED repo-root strategy_agent/agent.py (project_root sits
-        # ahead of this algo's own directory on sys.path, see main.py), and
-        # that version's start() returns None, not self. Chaining silently
-        # made config.agent always None, which made every report()/stop()
-        # call downstream (both this old heartbeat AND the newer
-        # control-center one) a permanent no-op -- confirmed live: the
-        # process ran fine, but genuinely never reported anything anywhere.
-        config.agent = StrategyHeartbeatAgent(
-            strategy_name=config.strategy_name,
-            server_name=config.server_name,
-            api_base_url=config.api_base_url,
-            heartbeat_interval_seconds=30,   # keep as 30
-            request_timeout_seconds=5,
-            max_retries=5,
-        )
-        config.agent.start()
         _start_control_center_agent()
         # Report the initial RUNNING state.
         report("RUNNING")
         # Refresh live metrics in the background so pnl/mtm stay current even
         # between trades. Runs on a daemon thread -> never blocks trading.
         threading.Thread(target=_refresh_loop, daemon=True).start()
-        # Make sure a STOPPED heartbeat is sent when the process exits cleanly.
+        # Make sure a STOPPED report is sent when the process exits cleanly.
         atexit.register(lambda: stop("STOPPED"))
     except Exception as e:
         print(f"[MONITOR] failed to start agent (ignored): {e}")
-        config.agent = None
-    return config.agent
+    return _cc_agent
 
 
 def _start_control_center_agent():
@@ -126,42 +108,29 @@ def _report_control_center(status, pnl, trade_count):
 
 
 def report(status="RUNNING"):
-    """Compute fresh metrics and push them to the agent. Never raises."""
-    agent = getattr(config, "agent", None)
-    if agent is None:
+    """Compute fresh metrics and push them to the control-center agent. Never raises."""
+    if _cc_agent is None:
         return
     try:
         mtm, pnl, trade_count = compute_metrics()
-        agent.update_metrics(mtm=mtm, pnl=pnl, trade_count=trade_count, status=status)
         _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] report({status}) ignored error: {e}")
 
 
 def stop(status="STOPPED"):
-    """Send a final status (STOPPED / ERROR) to the monitoring server."""
-    agent = getattr(config, "agent", None)
-    if agent is None:
+    """Send a final status (STOPPED / ERROR) to the control-center agent."""
+    if _cc_agent is None:
         return
     try:
         mtm, pnl, trade_count = compute_metrics()
-        agent.update_metrics(mtm=mtm, pnl=pnl, trade_count=trade_count, status=status)
         _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] stop({status}) metric error (ignored): {e}")
     try:
-        # The shared strategy_agent.agent.StrategyHeartbeatAgent.stop()
-        # takes no status kwarg (unlike this algo's own unused local copy
-        # under DoubleStraddelAlgo/strategy_agent/) -- the STOPPED status
-        # is already recorded via update_metrics() just above.
-        agent.stop()
+        _cc_agent.stop()
     except Exception as e:
-        print(f"[MONITOR] stop({status}) ignored error: {e}")
-    if _cc_agent is not None:
-        try:
-            _cc_agent.stop()
-        except Exception as e:
-            print(f"[MONITOR] control-center stop ignored error: {e}")
+        print(f"[MONITOR] control-center stop ignored error: {e}")
 
 
 # --------------------------------------------------------------------------- #
