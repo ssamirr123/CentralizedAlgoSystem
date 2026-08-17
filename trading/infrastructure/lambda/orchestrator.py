@@ -535,14 +535,18 @@ def _action_sync_repo(instance_id: str, repo_path: str, os_name: str, event: dic
     # manual SSH sessions can write to it too, e.g. a strategy's own
     # state/log files) -- discovered this silently broke every git pull
     # here (the overall command still reported "success" because the
-    # trailing pip-install step still ran and set the exit code). Marking
-    # the path as safe is idempotent, so it's cheap to redo on every call
-    # rather than depending on provision_server having done it once.
+    # trailing pip-install step still ran and set the exit code).
+    # `git config --global` looked like the fix but ISN'T: SSM's shell
+    # environment has no $HOME set, so git can locate ~/.gitconfig to
+    # write the setting but not to read it back on the next command --
+    # confirmed live, `git pull` still failed with the exact same fatal
+    # error even after `git config --global --add safe.directory` had
+    # reported success. `-c safe.directory=` inline instead needs no
+    # config file or $HOME at all.
     algo_name = event.get("algo_id") or event.get("algo_name")
     if os_name == "windows":
         command = (
-            f'git config --global --add safe.directory "{repo_path}"; '
-            f'cd "{repo_path}"; git pull --ff-only 2>&1 | Out-String'
+            f'cd "{repo_path}"; git -c safe.directory="{repo_path}" pull --ff-only 2>&1 | Out-String'
         )
         if algo_name:
             command += (
@@ -551,8 +555,7 @@ def _action_sync_repo(instance_id: str, repo_path: str, os_name: str, event: dic
             )
     else:
         command = (
-            f'git config --global --add safe.directory "{repo_path}"; '
-            f'cd "{repo_path}"; git pull --ff-only 2>&1'
+            f'cd "{repo_path}"; git -c safe.directory="{repo_path}" pull --ff-only 2>&1'
         )
         if algo_name:
             command += (
@@ -713,8 +716,11 @@ def _action_provision_server(instance_id: str, os_name: str, repo_path: str, ser
     repo_url = _get_env("REPO_CLONE_URL") or "https://github.com/ssamirr123/CentralizedAlgoSystem.git"
     branch = _get_env("REPO_BRANCH") or "web-base-algo-trading-control"
     if os_name == "windows":
+        # No safe.directory config needed here -- a fresh `git clone`
+        # creates repo_path owned by whoever runs it (SSM/root), so there's
+        # no ownership mismatch yet; sync_repo's own `-c safe.directory=`
+        # covers every pull from here on, after chown below changes owner.
         setup_command = (
-            f'git config --global --add safe.directory "{repo_path}"; '
             f'if (-not (Test-Path "{repo_path}")) {{ git clone --branch {branch} {repo_url} "{repo_path}" }}; '
             f'cd "{repo_path}"; pip install -r requirements.txt; '
             # Every algo's own requirements.txt, not just example_strategy's
@@ -757,9 +763,12 @@ def _action_provision_server(instance_id: str, os_name: str, repo_path: str, ser
         # (ec2-user, ubuntu, admin, ...); ec2-user is the fallback only if
         # no /home dirs exist at all.
         chown_target = 'target_user=$(ls /home | head -1); target_user=${target_user:-ec2-user}'
+        # No safe.directory needed here -- a fresh clone is owned by
+        # whoever runs it (root, via SSM), so there's no ownership
+        # mismatch yet; sync_repo's own inline -c safe.directory= covers
+        # every pull from here on, after chown below changes the owner.
         setup_command = (
             f'{install_prereqs}; '
-            f'git config --global --add safe.directory "{repo_path}"; '
             f'if [ ! -d "{repo_path}" ]; then sudo git clone --branch {branch} {repo_url} "{repo_path}"; fi; '
             f'{chown_target}; sudo chown -R "$target_user":"$target_user" "{repo_path}"; '
             f'cd "{repo_path}"; python3 -m venv venv; '
