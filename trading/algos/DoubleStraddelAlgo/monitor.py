@@ -58,6 +58,15 @@ def start():
     if config.agent is not None:
         return config.agent
     try:
+        # NOT chained as `StrategyHeartbeatAgent(...).start()` -- `from
+        # strategy_agent.agent import StrategyHeartbeatAgent` above resolves
+        # to the SHARED repo-root strategy_agent/agent.py (project_root sits
+        # ahead of this algo's own directory on sys.path, see main.py), and
+        # that version's start() returns None, not self. Chaining silently
+        # made config.agent always None, which made every report()/stop()
+        # call downstream (both this old heartbeat AND the newer
+        # control-center one) a permanent no-op -- confirmed live: the
+        # process ran fine, but genuinely never reported anything anywhere.
         config.agent = StrategyHeartbeatAgent(
             strategy_name=config.strategy_name,
             server_name=config.server_name,
@@ -65,7 +74,8 @@ def start():
             heartbeat_interval_seconds=30,   # keep as 30
             request_timeout_seconds=5,
             max_retries=5,
-        ).start()
+        )
+        config.agent.start()
         _start_control_center_agent()
         # Report the initial RUNNING state.
         report("RUNNING")
@@ -140,7 +150,11 @@ def stop(status="STOPPED"):
     except Exception as e:
         print(f"[MONITOR] stop({status}) metric error (ignored): {e}")
     try:
-        agent.stop(status=status)
+        # The shared strategy_agent.agent.StrategyHeartbeatAgent.stop()
+        # takes no status kwarg (unlike this algo's own unused local copy
+        # under DoubleStraddelAlgo/strategy_agent/) -- the STOPPED status
+        # is already recorded via update_metrics() just above.
+        agent.stop()
     except Exception as e:
         print(f"[MONITOR] stop({status}) ignored error: {e}")
     if _cc_agent is not None:
