@@ -12,12 +12,40 @@ Metrics reported:
     status       -> str   : "RUNNING" | "STOPPED" | "ERROR"
 """
 
+import os
 import threading
 import time
 import atexit
 
 import config
 from strategy_agent.agent import StrategyHeartbeatAgent
+import websocket_feed as wf
+
+# Second, independent heartbeat sender feeding the *new* control-center
+# schema (POST /api/heartbeat + /api/pnl) alongside the StrategyHeartbeatAgent
+# above, which still only feeds the old, separate /update_strategy monitor --
+# that one is what's been silently failing (config.api_base_url is a
+# hardcoded, unreachable "http://127.0.0.1:8000"), and even fixed it would
+# never appear in this dashboard, since the two systems are disconnected.
+# Uses STRATEGY_NAME/SERVER_NAME/API_BASE_URL/CONTROL_API_KEY -- the exact
+# env vars trading_agent.py's START_ALGO injects (see orchestrator.py) --
+# rather than config.strategy_name/config.server_name, which are hardcoded
+# to values that don't match this algo's actual registered name/server.
+try:
+    from trading.common.heartbeat import ControlCenterHeartbeatAgent
+    from trading.common.reporting import report_daily_pnl
+except ImportError:
+    ControlCenterHeartbeatAgent = None
+    report_daily_pnl = None
+
+_CC_ALGO_NAME = os.environ.get("STRATEGY_NAME")
+_CC_SERVER_NAME = os.environ.get("SERVER_NAME")
+_CC_API_BASE_URL = os.environ.get("API_BASE_URL")
+_CC_API_KEY = os.environ.get("CONTROL_API_KEY")
+_CC_PNL_REPORT_INTERVAL_SECONDS = 60
+
+_cc_agent = None
+_last_cc_pnl_report_monotonic = 0.0
 
 
 def start():
@@ -38,6 +66,7 @@ def start():
             request_timeout_seconds=5,
             max_retries=5,
         ).start()
+        _start_control_center_agent()
         # Report the initial RUNNING state.
         report("RUNNING")
         # Refresh live metrics in the background so pnl/mtm stay current even
@@ -51,6 +80,41 @@ def start():
     return config.agent
 
 
+def _start_control_center_agent():
+    global _cc_agent
+    if ControlCenterHeartbeatAgent is None:
+        return  # trading.common not importable (e.g. run outside this repo's venv)
+    if not (_CC_ALGO_NAME and _CC_SERVER_NAME and _CC_API_BASE_URL and _CC_API_KEY):
+        print("[MONITOR] control-center heartbeat skipped: STRATEGY_NAME/SERVER_NAME/"
+              "API_BASE_URL/CONTROL_API_KEY not all set (not launched via trading_agent.py?)")
+        return
+    try:
+        _cc_agent = ControlCenterHeartbeatAgent(
+            algo_name=_CC_ALGO_NAME,
+            server_name=_CC_SERVER_NAME,
+            api_base_url=_CC_API_BASE_URL,
+            api_key=_CC_API_KEY,
+        )
+        _cc_agent.start()
+    except Exception as e:
+        print(f"[MONITOR] failed to start control-center agent (ignored): {e}")
+        _cc_agent = None
+
+
+def _report_control_center(status, pnl, trade_count):
+    global _last_cc_pnl_report_monotonic
+    if _cc_agent is None:
+        return
+    try:
+        _cc_agent.update_metrics(status=status, pnl=pnl)
+        now = time.monotonic()
+        if report_daily_pnl is not None and now - _last_cc_pnl_report_monotonic >= _CC_PNL_REPORT_INTERVAL_SECONDS:
+            report_daily_pnl(_CC_API_BASE_URL, _CC_API_KEY, _CC_ALGO_NAME, _CC_SERVER_NAME, pnl=pnl, trade_count=trade_count)
+            _last_cc_pnl_report_monotonic = now
+    except Exception as e:
+        print(f"[MONITOR] control-center report ignored error: {e}")
+
+
 def report(status="RUNNING"):
     """Compute fresh metrics and push them to the agent. Never raises."""
     agent = getattr(config, "agent", None)
@@ -59,6 +123,7 @@ def report(status="RUNNING"):
     try:
         mtm, pnl, trade_count = compute_metrics()
         agent.update_metrics(mtm=mtm, pnl=pnl, trade_count=trade_count, status=status)
+        _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] report({status}) ignored error: {e}")
 
@@ -71,12 +136,18 @@ def stop(status="STOPPED"):
     try:
         mtm, pnl, trade_count = compute_metrics()
         agent.update_metrics(mtm=mtm, pnl=pnl, trade_count=trade_count, status=status)
+        _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] stop({status}) metric error (ignored): {e}")
     try:
         agent.stop(status=status)
     except Exception as e:
         print(f"[MONITOR] stop({status}) ignored error: {e}")
+    if _cc_agent is not None:
+        try:
+            _cc_agent.stop()
+        except Exception as e:
+            print(f"[MONITOR] control-center stop ignored error: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +176,6 @@ def _compute_pnl_mtm_live():
     mtm = 0.0
     pnl = 0.0
     try:
-        from broker import orders
         positions = orders.refresh_positions() or []
         for p in positions:
             realised = _to_float(p.get("realised"))
@@ -123,7 +193,6 @@ def _compute_pnl_mtm_live():
 
 def _leg_pnl(leg, side, lot):
     """Return (realised, unrealised) rupee P&L for one leg. side: 'BUY' | 'SELL'."""
-    import websocket_feed as wf
 
     entry = leg.get("entry")
     if entry is None:
