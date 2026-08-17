@@ -18,12 +18,16 @@ Actions:
                                                           not one rule per algo or per server)
     get_command_status                                -- poll a job_id from the above
     get_algo_status                                   -- convenience: STATUS + short bounded wait
-    sync_repo                                         -- `git pull --ff-only` in repo_path, short bounded
+    sync_repo                                         -- `git pull --ff-only` in repo_path, then (if
+                                                          algo_id is present) that algo's own
+                                                          requirements.txt if it has one -- short bounded
                                                           wait (like get_algo_status, not fire-and-forget --
                                                           called synchronously right after a new strategy is
                                                           registered via POST /api/algos, so the instance
-                                                          actually has the code for whatever algo_name was
-                                                          just added; a DB row alone puts no file on disk)
+                                                          actually has the code AND deps for whatever
+                                                          algo_name was just added; a DB row alone puts no
+                                                          file on disk, and provision_server's dependency
+                                                          install only ever ran once, at initial server setup)
     provision_server                                  -- fire-and-forget (InvocationType=Event), called
                                                           right after POST /api/servers commits a new row:
                                                           attach the IAM instance profile if not already
@@ -516,11 +520,45 @@ def _action_sync_repo(instance_id: str, repo_path: str, os_name: str, event: dic
 
     Not parsed as trading_agent.py JSON output (unlike the other algo
     actions) -- git's own stdout/stderr is passed back close to verbatim
-    instead of being forced into that shape."""
+    instead of being forced into that shape.
+
+    Also installs the newly-registered algo's own requirements.txt (if
+    algo_id is present in the event and that file exists) -- discovered
+    that a brand-new algo pulled in here had never had its own deps
+    installed anywhere (provision_server only ran once, at initial
+    server setup, long before this algo existed), so it would start,
+    crash with ModuleNotFoundError, and land in status ERROR the first
+    time anyone hit Start."""
+    # git refuses to operate on a repo it doesn't own ("dubious ownership")
+    # once SSM (which runs commands as root/SYSTEM) touches a repo whose
+    # files are chown'd to a login user (provision_server does this so
+    # manual SSH sessions can write to it too, e.g. a strategy's own
+    # state/log files) -- discovered this silently broke every git pull
+    # here (the overall command still reported "success" because the
+    # trailing pip-install step still ran and set the exit code). Marking
+    # the path as safe is idempotent, so it's cheap to redo on every call
+    # rather than depending on provision_server having done it once.
+    algo_name = event.get("algo_id") or event.get("algo_name")
     if os_name == "windows":
-        command = f'cd "{repo_path}"; git pull --ff-only 2>&1 | Out-String'
+        command = (
+            f'git config --global --add safe.directory "{repo_path}"; '
+            f'cd "{repo_path}"; git pull --ff-only 2>&1 | Out-String'
+        )
+        if algo_name:
+            command += (
+                f'; $req = "trading\\algos\\{algo_name}\\requirements.txt"; '
+                f'if (Test-Path $req) {{ pip install -r $req 2>&1 | Out-String }}'
+            )
     else:
-        command = f'cd "{repo_path}"; git pull --ff-only 2>&1'
+        command = (
+            f'git config --global --add safe.directory "{repo_path}"; '
+            f'cd "{repo_path}"; git pull --ff-only 2>&1'
+        )
+        if algo_name:
+            command += (
+                f'; req="trading/algos/{algo_name}/requirements.txt"; '
+                f'if [ -f "$req" ]; then venv/bin/pip install -r "$req" 2>&1; fi'
+            )
     try:
         command_id = _send_ssm_command(instance_id, command, os_name)
     except (ClientError, BotoCoreError) as exc:
@@ -676,9 +714,17 @@ def _action_provision_server(instance_id: str, os_name: str, repo_path: str, ser
     branch = _get_env("REPO_BRANCH") or "web-base-algo-trading-control"
     if os_name == "windows":
         setup_command = (
+            f'git config --global --add safe.directory "{repo_path}"; '
             f'if (-not (Test-Path "{repo_path}")) {{ git clone --branch {branch} {repo_url} "{repo_path}" }}; '
             f'cd "{repo_path}"; pip install -r requirements.txt; '
-            f'pip install -r trading/algos/example_strategy/requirements.txt'
+            # Every algo's own requirements.txt, not just example_strategy's
+            # -- discovered installing DoubleStraddelAlgo (needs
+            # smartapi-python) that only example_strategy's deps were ever
+            # installed, silently leaving every other algo's own
+            # dependencies missing until started and crashing with
+            # ModuleNotFoundError.
+            f'Get-ChildItem -Path "trading\\algos" -Filter requirements.txt -Recurse '
+            f'| ForEach-Object {{ pip install -r $_.FullName }}'
         )
     else:
         # A fresh EC2 instance may not have git/python3 preinstalled at all
@@ -692,14 +738,34 @@ def _action_provision_server(instance_id: str, os_name: str, repo_path: str, ser
             'elif command -v apt-get >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y git python3 python3-pip python3-venv; '
             'fi; fi'
         )
+        # Every algo's own requirements.txt, not just example_strategy's --
+        # discovered installing DoubleStraddelAlgo (needs smartapi-python)
+        # that only example_strategy's deps were ever installed, silently
+        # leaving every other algo's own dependencies missing until
+        # started and crashing with ModuleNotFoundError. find handles a
+        # repo with zero algos yet without erroring (unlike a bare glob).
+        install_all_algo_deps = (
+            r'find trading/algos -maxdepth 2 -name requirements.txt -exec venv/bin/pip install -r {} \;'
+        )
+        # SSM runs this whole script as root, so `$(whoami)` here always
+        # evaluated to "root" -- chowning root to root, a silent no-op.
+        # Discovered this the hard way: samir_linux went through this
+        # exact automated pipeline and still ended up entirely root-owned,
+        # only surfacing once someone SSH'd in as ec2-user and hit
+        # Permission denied. /home's first (and normally only) entry is
+        # the actual EC2 login user across every common AMI convention
+        # (ec2-user, ubuntu, admin, ...); ec2-user is the fallback only if
+        # no /home dirs exist at all.
+        chown_target = 'target_user=$(ls /home | head -1); target_user=${target_user:-ec2-user}'
         setup_command = (
             f'{install_prereqs}; '
+            f'git config --global --add safe.directory "{repo_path}"; '
             f'if [ ! -d "{repo_path}" ]; then sudo git clone --branch {branch} {repo_url} "{repo_path}"; fi; '
-            f'sudo chown -R $(whoami) "{repo_path}"; '
+            f'{chown_target}; sudo chown -R "$target_user":"$target_user" "{repo_path}"; '
             f'cd "{repo_path}"; python3 -m venv venv; '
             f'venv/bin/pip install --upgrade pip; '
             f'venv/bin/pip install -r requirements.txt; '
-            f'venv/bin/pip install -r trading/algos/example_strategy/requirements.txt'
+            f'{install_all_algo_deps}'
         )
 
     try:

@@ -1,10 +1,25 @@
 import log_setup
 log_setup.init()   # mirror all print()/stderr output to logs/<date>/app.log
 
+import sys
 import warnings
 import threading
 import time
+from pathlib import Path
 warnings.filterwarnings('ignore')
+
+# trading_agent.py's START_ALGO only marks this process RUNNING once it
+# sees a self-written PID file (write_pid_file) -- without it, it always
+# times out after 2s and reports ERROR ("process exited immediately
+# after launch") no matter how healthy the actual process is. This algo
+# came from its own separate repo (not the trading/algos/example_strategy
+# template every other algo here is copied from), so it never had this
+# control-framework contract wired in.
+_project_root = Path(__file__).resolve().parents[3]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+from trading.common.utils import write_pid_file  # noqa: E402
+write_pid_file("DoubleStraddelAlgo")
 
 import config
 import connectapi
