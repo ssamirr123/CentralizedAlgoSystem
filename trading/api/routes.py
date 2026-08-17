@@ -448,6 +448,7 @@ def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoRegisterRe
     try:
         sync_result = invoke_orchestrator(
             "sync_repo", instance_id=server.ec2_instance_id, repo_path=server.repo_path, os_name=server.os,
+            algo_id=body.algo_id,
         )
         sync_success = bool(sync_result.get("success"))
         sync_message = sync_result.get("output") or sync_result.get("error") or sync_result.get("message")
