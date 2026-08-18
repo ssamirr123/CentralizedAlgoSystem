@@ -376,11 +376,34 @@ class AlgoListError(RuntimeError):
 
 
 def _list_enabled_algos(api_base_url: str, api_key: str) -> list[dict]:
-    try:
-        algos = _api_request("GET", "/api/algos", api_base_url, api_key, timeout=10)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
-        raise AlgoListError(f"could not fetch algo list from {api_base_url}/api/algos: {exc}") from exc
-    return [a for a in algos if a.get("enabled")]
+    """Fetch enabled algos from the API with retry + backoff.
+
+    Vercel serverless functions cold-start after inactivity (10-20 s) --
+    exactly what caused the 09:00/09:10 IST auto-start failures when the
+    Lambda's single 10-second request timed out before Vercel woke up.
+    3 attempts with a 25 s per-attempt timeout and 10 s back-off gives
+    Vercel up to ~85 s total to respond, which covers any realistic cold
+    start while staying well within the Lambda's configured 870 s budget.
+    """
+    _API_RETRIES = 3
+    _API_TIMEOUT = 25   # seconds per attempt (covers Vercel cold-start)
+    _API_BACKOFF = 10   # seconds to wait between attempts
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _API_RETRIES + 1):
+        try:
+            algos = _api_request("GET", "/api/algos", api_base_url, api_key, timeout=_API_TIMEOUT)
+            if attempt > 1:
+                _log_event("API_RETRY_SUCCESS", endpoint="/api/algos", attempt=attempt)
+            return [a for a in algos if a.get("enabled")]
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
+            last_exc = exc
+            if attempt < _API_RETRIES:
+                _log_event("API_RETRY", endpoint="/api/algos", attempt=attempt, error=str(exc), backoff=_API_BACKOFF)
+                time.sleep(_API_BACKOFF)
+            else:
+                _log_event("API_RETRY_EXHAUSTED", endpoint="/api/algos", attempts=_API_RETRIES, error=str(exc))
+    raise AlgoListError(f"could not fetch algo list from {api_base_url}/api/algos after {_API_RETRIES} attempts: {last_exc}") from last_exc
 
 
 def _list_servers(api_base_url: str, api_key: str) -> dict[str, dict]:
@@ -388,12 +411,30 @@ def _list_servers(api_base_url: str, api_key: str) -> dict[str, dict]:
     can look up each algo's OWN server's instance_id/repo_path/os --
     without this, every algo would route to whichever single instance_id
     happened to be passed into this action, wrong for any algo that
-    isn't on that one server."""
-    try:
-        servers = _api_request("GET", "/api/servers", api_base_url, api_key, timeout=10)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
-        raise AlgoListError(f"could not fetch server list from {api_base_url}/api/servers: {exc}") from exc
-    return {s["server_id"]: s for s in servers}
+    isn't on that one server.
+
+    Uses the same retry/backoff strategy as _list_enabled_algos to handle
+    Vercel cold-starts (see that function's docstring for rationale).
+    """
+    _API_RETRIES = 3
+    _API_TIMEOUT = 25
+    _API_BACKOFF = 10
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _API_RETRIES + 1):
+        try:
+            servers = _api_request("GET", "/api/servers", api_base_url, api_key, timeout=_API_TIMEOUT)
+            if attempt > 1:
+                _log_event("API_RETRY_SUCCESS", endpoint="/api/servers", attempt=attempt)
+            return {s["server_id"]: s for s in servers}
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
+            last_exc = exc
+            if attempt < _API_RETRIES:
+                _log_event("API_RETRY", endpoint="/api/servers", attempt=attempt, error=str(exc), backoff=_API_BACKOFF)
+                time.sleep(_API_BACKOFF)
+            else:
+                _log_event("API_RETRY_EXHAUSTED", endpoint="/api/servers", attempts=_API_RETRIES, error=str(exc))
+    raise AlgoListError(f"could not fetch server list from {api_base_url}/api/servers after {_API_RETRIES} attempts: {last_exc}") from last_exc
 
 
 def _action_all_algos_command(action: str, event: dict) -> dict:
