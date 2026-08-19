@@ -1,14 +1,21 @@
 """
-Monitoring integration glue.
+Monitoring integration glue - feeds the control-center schema (POST
+/api/heartbeat + /api/pnl), the only heartbeat system this algo uses.
+Everything here is best-effort and fully wrapped in try/except so a
+monitoring problem can never affect or stop the live strategy.
 
-This module is the *only* place the trading code talks to the heartbeat agent.
-Everything here is best-effort and fully wrapped in try/except so a monitoring
-problem can never affect or stop the live strategy.
+Previously also ran the shared strategy_agent.agent.StrategyHeartbeatAgent
+(old, separate /update_strategy monitor) -- removed: that system is
+disconnected from this dashboard, and chaining `StrategyHeartbeatAgent(...)
+.start()` into config.agent is broken anyway (see DoubleStraddelAlgo's
+monitor.py history -- the shared repo-root strategy_agent/agent.py's
+start() returns None, not self, once project_root is added to sys.path,
+which write_pid_file above requires).
 
 Metrics reported:
-    mtm          -> float : current mark-to-market (open + booked)
-    pnl          -> float : cumulative day P&L
-    trade_count  -> int   : number of completed trades today
+    mtm          -> float : current mark-to-market (sum of open legs' MTM)
+    pnl          -> float : cumulative day P&L (realized cum_loss + open MTM)
+    trade_count  -> int   : number of completed exits today
     status       -> str   : "RUNNING" | "STOPPED" | "ERROR"
 """
 
@@ -18,15 +25,7 @@ import time
 import atexit
 
 import config
-import websocket_feed as wf
 
-# Heartbeat sender feeding the control-center schema (POST /api/heartbeat +
-# /api/pnl) -- the only one this algo uses. Previously also ran the shared
-# strategy_agent.agent.StrategyHeartbeatAgent (old, separate /update_strategy
-# monitor), removed entirely: its config.api_base_url is a hardcoded,
-# unreachable "http://127.0.0.1:8000", nothing in this dashboard reads
-# /update_strategy's target table anyway, and it was retrying and logging
-# "Heartbeat send failed" every ~30s forever for zero benefit.
 # Uses STRATEGY_NAME/SERVER_NAME/API_BASE_URL/CONTROL_API_KEY -- the exact
 # env vars trading_agent.py's START_ALGO injects (see orchestrator.py) --
 # rather than config.strategy_name/config.server_name, which are hardcoded
@@ -134,94 +133,31 @@ def stop(status="STOPPED"):
 
 
 # --------------------------------------------------------------------------- #
-# Metric computation (best-effort, broker-backed)
+# Metric computation (best-effort, driven entirely by config.* globals that
+# manager.py already maintains - no extra bookkeeping needed here)
 # --------------------------------------------------------------------------- #
 def compute_metrics():
-    """
-    Return (mtm, pnl, trade_count).
-
-    Derived from the broker position book (P&L / MTM) and the cached order book
-    (trade count). Any failure falls back to safe zeros so nothing breaks.
-    """
     return _compute_pnl_mtm() + (_compute_trade_count(),)
 
 
 def _compute_pnl_mtm():
-    # Paper trading never reaches the broker (see broker/orders.py), so the
-    # broker position book is always empty in DRY_RUN - PNL has to come from
-    # the local strategy state instead.
-    if getattr(config, "DRY_RUN", False):
-        return _compute_pnl_mtm_sim()
-    return _compute_pnl_mtm_live()
-
-
-def _compute_pnl_mtm_live():
     mtm = 0.0
-    pnl = 0.0
+    realized = 0.0
     try:
-        positions = orders.refresh_positions() or []
-        for p in positions:
-            realised = _to_float(p.get("realised"))
-            unrealised = _to_float(p.get("unrealised"))
-            net = _to_float(p.get("pnl"))
-            # pnl  -> cumulative day P&L (realised + unrealised, fall back to net)
-            pnl += (realised + unrealised) if (realised or unrealised) else net
-            # mtm  -> current mark-to-market of open positions (fall back to net)
-            mtm += unrealised if unrealised else net
+        for token in (config.ce_token, config.pe_token):
+            if not token:
+                continue
+            realized -= float(config.cum_loss.get(token, 0.0))   # cum_loss is stored positive
+            if config.in_position.get(token):
+                ltp = config.last_ltp.get(token)
+                entry = config.entry_price.get(token, 0)
+                if ltp is not None:
+                    qty = int(config.qty) if str(config.qty).isdigit() else 0
+                    mtm += (entry - ltp) * qty
     except Exception as e:
         print(f"[MONITOR] pnl/mtm compute error (ignored): {e}")
         return (0.0, 0.0)
-    return (round(mtm, 2), round(pnl, 2))
-
-
-def _leg_pnl(leg, side, lot):
-    """Return (realised, unrealised) rupee P&L for one leg. side: 'BUY' | 'SELL'."""
-
-    entry = leg.get("entry")
-    if entry is None:
-        return (0.0, 0.0)
-    if leg.get("done"):
-        exit_p = leg.get("exit")
-        if exit_p is None:
-            return (0.0, 0.0)
-        pts = (entry - exit_p) if side == "SELL" else (exit_p - entry)
-        return (round(pts * lot, 2), 0.0)
-    ltp = wf.get_ltp(leg.get("tok"))
-    if ltp is None:
-        return (0.0, 0.0)
-    pts = (entry - ltp) if side == "SELL" else (ltp - entry)
-    return (0.0, round(pts * lot, 2))
-
-
-def _compute_pnl_mtm_sim():
-    """Paper-trading PNL/MTM computed from config.state (short straddle legs are
-    SELL, hedge legs are BUY) since no broker position book exists in DRY_RUN."""
-    mtm = 0.0
-    pnl = 0.0
-    try:
-        state = getattr(config, "state", None) or {}
-        lot = int(config.LOT_QTY)
-
-        for session in ("morning", "afternoon"):
-            sess = state.get(session) or {}
-            for opt in ("ce", "pe"):
-                leg = sess.get(opt)
-                if leg:
-                    realised, unrealised = _leg_pnl(leg, "SELL", lot)
-                    pnl += realised + unrealised
-                    mtm += unrealised
-
-        hedge = state.get("hedge") or {}
-        for opt in ("ce", "pe"):
-            leg = hedge.get(opt)
-            if leg and leg.get("oid") is not None:
-                realised, unrealised = _leg_pnl(leg, "BUY", lot)
-                pnl += realised + unrealised
-                mtm += unrealised
-    except Exception as e:
-        print(f"[MONITOR] pnl/mtm compute error (ignored): {e}")
-        return (0.0, 0.0)
-    return (round(mtm, 2), round(pnl, 2))
+    return (round(mtm, 2), round(realized + mtm, 2))
 
 
 def _compute_trade_count():
@@ -237,19 +173,7 @@ def _compute_trade_count():
         return 0
 
 
-def _to_float(value):
-    try:
-        if value in (None, ""):
-            return 0.0
-        return float(value)
-    except Exception:
-        return 0.0
-
-
 def _refresh_loop():
-    """Periodically push fresh metrics (RUNNING) so the server stays current."""
-    # Slightly under the 30s heartbeat so values are fresh each heartbeat.
     while True:
         time.sleep(20)
         report("RUNNING")
-

@@ -7,8 +7,8 @@ credentials, paste back real output at each step.
 
 ```
 08:30 IST  start_ec2
-09:00 IST  update_all_algos
-09:10 IST  start_all_algos
+08:50 IST  update_all_algos  <- git pull (10-min buffer before start)
+09:00 IST  start_all_algos   <- algos start at market open
 15:15 IST  stop_all_algos   <- "square-off" -- see note below
 15:30 IST  stop_all_algos   <- safety-net retry, idempotent if 15:15 already worked
 16:00 IST  stop_ec2
@@ -90,16 +90,16 @@ aws scheduler create-schedule --name TradingSchedule-StartEC2 `
   --target "{\"Arn\":\"$lambdaArn\",\"RoleArn\":\"$roleArn\",\"Input\":\"{\\\"action\\\":\\\"start_ec2\\\"}\"}"
 
 aws scheduler create-schedule --name TradingSchedule-UpdateAlgos `
-  --schedule-expression "cron(0 9 ? * MON-FRI *)" `
+  --schedule-expression "cron(50 8 ? * MON-FRI *)" `
   --schedule-expression-timezone "Asia/Kolkata" `
   --flexible-time-window '{"Mode":"OFF"}' `
   --target "{\"Arn\":\"$lambdaArn\",\"RoleArn\":\"$roleArn\",\"Input\":\"{\\\"action\\\":\\\"update_all_algos\\\"}\"}"
 
 aws scheduler create-schedule --name TradingSchedule-StartAlgos `
-  --schedule-expression "cron(10 9 ? * MON-FRI *)" `
+  --schedule-expression "cron(0 9 ? * MON-FRI *)" `
   --schedule-expression-timezone "Asia/Kolkata" `
   --flexible-time-window '{"Mode":"OFF"}' `
-  --target "{\"Arn\":\"$lambdaArn\",\"RoleArn\":\"$roleArn\",\"Input\":\"{\\\"action\\\":\\\"start_all_algos\\\"}\"}"
+  --target "{\"Arn\":\"$lambdaArn\",\"RoleArn\":\"$roleArn\",\"Input\":\"{\\\"action\\\":\\\"start_all_algos\\\"}\"}""
 
 aws scheduler create-schedule --name TradingSchedule-SquareOff `
   --schedule-expression "cron(15 15 ? * MON-FRI *)" `

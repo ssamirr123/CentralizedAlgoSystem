@@ -65,13 +65,21 @@ STATUS_DISPLAY = {
 
 IN_FLIGHT_STATUSES = {"STARTING", "STOPPING", "RESTARTING", "UPDATING", "PENDING"}
 
-# Heartbeat staleness thresholds, per the project's own spec: <20s RUNNING,
-# 20-60s STALE, >60s OFFLINE. Configurable via secrets/env, not hard-coded.
+# Heartbeat staleness thresholds. Configurable via secrets/env, not
+# hard-coded.
+#
+# Must clear load_algos()'s own cache lag, not just the heartbeat
+# interval: load_algos() is cached for 45s (deliberately above the 30s
+# auto-refresh tick -- see its docstring), so the last_heartbeat this
+# compares against can already be up to ~45s + one heartbeat interval
+# (10s) old by the time it's displayed, even for an algo heartbeating
+# perfectly fine. 20s/60s thresholds flagged those as STALE/OFFLINE on
+# every other refresh purely from cache lag, not an actual outage.
 HEARTBEAT_STALE_AFTER_SECONDS = int(
-    st.secrets.get("HEARTBEAT_STALE_AFTER_SECONDS", os.environ.get("HEARTBEAT_STALE_AFTER_SECONDS", 20))
+    st.secrets.get("HEARTBEAT_STALE_AFTER_SECONDS", os.environ.get("HEARTBEAT_STALE_AFTER_SECONDS", 75))
 )
 HEARTBEAT_OFFLINE_AFTER_SECONDS = int(
-    st.secrets.get("HEARTBEAT_OFFLINE_AFTER_SECONDS", os.environ.get("HEARTBEAT_OFFLINE_AFTER_SECONDS", 60))
+    st.secrets.get("HEARTBEAT_OFFLINE_AFTER_SECONDS", os.environ.get("HEARTBEAT_OFFLINE_AFTER_SECONDS", 150))
 )
 
 
@@ -479,7 +487,11 @@ with tab_dashboard:
             row_cols[0].write(algo_id)
             row_cols[1].write(server_id)
             row_cols[2].write(status_label(display_status))
-            row_cols[3].write("—" if pnl is None else f"₹{pnl:,.2f}")
+            if pnl is None:
+                row_cols[3].write("—")
+            else:
+                pnl_shade = "green" if pnl > 0 else "red" if pnl < 0 else "gray"
+                row_cols[3].markdown(f":{pnl_shade}[₹{pnl:,.2f}]")
 
             # Action availability follows the RAW stored status (what the
             # backend actually tracks), not the heartbeat-derived display

@@ -1,0 +1,16 @@
+# Angel One SmartAPI (provides `SmartApi` package + SmartWebSocketV2)
+smartapi-python
+
+# TOTP generation for login
+pyotp
+
+# Data handling
+pandas==2.3.3
+numpy
+
+# Technical indicators (VWAP) -- requires Python >=3.12 (PyPI dropped
+# every pandas_ta release compatible with older Python versions).
+pandas_ta
+
+# HTTP client for Telegram log forwarding
+requests

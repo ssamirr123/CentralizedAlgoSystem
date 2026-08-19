@@ -1,9 +1,15 @@
 """
-Monitoring integration glue.
+Monitoring integration glue - feeds the control-center schema (POST
+/api/heartbeat + /api/pnl), the only heartbeat system this algo uses.
+Everything here is best-effort and fully wrapped in try/except so a
+monitoring problem can never affect or stop the live strategy.
 
-This module is the *only* place the trading code talks to the heartbeat agent.
-Everything here is best-effort and fully wrapped in try/except so a monitoring
-problem can never affect or stop the live strategy.
+Previously also ran the shared strategy_agent.agent.StrategyHeartbeatAgent
+(old, separate /update_strategy monitor) -- removed: that system is
+disconnected from this dashboard, and chaining `StrategyHeartbeatAgent(...)
+.start()` into config.agent is broken anyway (the shared repo-root
+strategy_agent/agent.py's start() returns None, not self, once
+project_root is on sys.path, which write_pid_file in main.py requires).
 
 Metrics reported:
     mtm          -> float : current mark-to-market (open + booked)
@@ -18,15 +24,7 @@ import time
 import atexit
 
 import config
-import websocket_feed as wf
 
-# Heartbeat sender feeding the control-center schema (POST /api/heartbeat +
-# /api/pnl) -- the only one this algo uses. Previously also ran the shared
-# strategy_agent.agent.StrategyHeartbeatAgent (old, separate /update_strategy
-# monitor), removed entirely: its config.api_base_url is a hardcoded,
-# unreachable "http://127.0.0.1:8000", nothing in this dashboard reads
-# /update_strategy's target table anyway, and it was retrying and logging
-# "Heartbeat send failed" every ~30s forever for zero benefit.
 # Uses STRATEGY_NAME/SERVER_NAME/API_BASE_URL/CONTROL_API_KEY -- the exact
 # env vars trading_agent.py's START_ALGO injects (see orchestrator.py) --
 # rather than config.strategy_name/config.server_name, which are hardcoded
@@ -147,19 +145,14 @@ def compute_metrics():
 
 
 def _compute_pnl_mtm():
-    # Paper trading never reaches the broker (see broker/orders.py), so the
-    # broker position book is always empty in DRY_RUN - PNL has to come from
-    # the local strategy state instead.
-    if getattr(config, "DRY_RUN", False):
-        return _compute_pnl_mtm_sim()
-    return _compute_pnl_mtm_live()
-
-
-def _compute_pnl_mtm_live():
     mtm = 0.0
     pnl = 0.0
     try:
-        positions = orders.refresh_positions() or []
+        obj = getattr(config, "objconn", None)
+        if not obj or not hasattr(obj, "position"):
+            return (0.0, 0.0)
+        data = obj.position()
+        positions = (data or {}).get("data") or []
         for p in positions:
             realised = _to_float(p.get("realised"))
             unrealised = _to_float(p.get("unrealised"))
@@ -168,56 +161,6 @@ def _compute_pnl_mtm_live():
             pnl += (realised + unrealised) if (realised or unrealised) else net
             # mtm  -> current mark-to-market of open positions (fall back to net)
             mtm += unrealised if unrealised else net
-    except Exception as e:
-        print(f"[MONITOR] pnl/mtm compute error (ignored): {e}")
-        return (0.0, 0.0)
-    return (round(mtm, 2), round(pnl, 2))
-
-
-def _leg_pnl(leg, side, lot):
-    """Return (realised, unrealised) rupee P&L for one leg. side: 'BUY' | 'SELL'."""
-
-    entry = leg.get("entry")
-    if entry is None:
-        return (0.0, 0.0)
-    if leg.get("done"):
-        exit_p = leg.get("exit")
-        if exit_p is None:
-            return (0.0, 0.0)
-        pts = (entry - exit_p) if side == "SELL" else (exit_p - entry)
-        return (round(pts * lot, 2), 0.0)
-    ltp = wf.get_ltp(leg.get("tok"))
-    if ltp is None:
-        return (0.0, 0.0)
-    pts = (entry - ltp) if side == "SELL" else (ltp - entry)
-    return (0.0, round(pts * lot, 2))
-
-
-def _compute_pnl_mtm_sim():
-    """Paper-trading PNL/MTM computed from config.state (short straddle legs are
-    SELL, hedge legs are BUY) since no broker position book exists in DRY_RUN."""
-    mtm = 0.0
-    pnl = 0.0
-    try:
-        state = getattr(config, "state", None) or {}
-        lot = int(config.LOT_QTY)
-
-        for session in ("morning", "afternoon"):
-            sess = state.get(session) or {}
-            for opt in ("ce", "pe"):
-                leg = sess.get(opt)
-                if leg:
-                    realised, unrealised = _leg_pnl(leg, "SELL", lot)
-                    pnl += realised + unrealised
-                    mtm += unrealised
-
-        hedge = state.get("hedge") or {}
-        for opt in ("ce", "pe"):
-            leg = hedge.get(opt)
-            if leg and leg.get("oid") is not None:
-                realised, unrealised = _leg_pnl(leg, "BUY", lot)
-                pnl += realised + unrealised
-                mtm += unrealised
     except Exception as e:
         print(f"[MONITOR] pnl/mtm compute error (ignored): {e}")
         return (0.0, 0.0)
@@ -252,4 +195,3 @@ def _refresh_loop():
     while True:
         time.sleep(20)
         report("RUNNING")
-
