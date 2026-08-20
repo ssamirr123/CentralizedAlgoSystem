@@ -274,6 +274,18 @@ def delete_server(server_id: str) -> None:
     resp.raise_for_status()
 
 
+def create_algo(algo_id: str, server_id: str, script_path: str | None, status: str, enabled: bool) -> dict:
+    body: dict = {"algo_id": algo_id, "server_id": server_id, "status": status, "enabled": enabled}
+    if script_path:
+        body["script_path"] = script_path
+    # Longer timeout than other calls -- registration now also triggers a
+    # best-effort git pull on the target instance (Lambda-side bounded to
+    # ~8s), not just a DB write.
+    resp = requests.post(f"{API_BASE_URL}/api/algos", json=body, headers=HEADERS, timeout=25)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def edit_algo(algo_id: str, server_id: str, **updates: object) -> dict:
     # Only send fields that were actually provided -- PATCH semantics.
     body = {k: v for k, v in updates.items() if v is not None}
@@ -726,21 +738,51 @@ with tab_config:
     st.divider()
 
     # -------------------------------------------------------------------
-    # Manage strategies -- edit/delete against PATCH, DELETE /api/algos.
-    # Registration (POST) is config-driven only, not exposed here --
-    # see the comment below.
+    # Manage strategies -- add/edit/delete against POST, PATCH, DELETE
+    # /api/algos.
     # -------------------------------------------------------------------
     st.subheader(":material/precision_manufacturing: Strategies")
 
-    # Strategy registration is deliberately NOT exposed here -- POST
-    # /api/algos is config-driven only (a script/CLI call against a
-    # known algo_id + server_id), never a dashboard form. The removed
-    # form made it too easy to fat-finger a stray registration (wrong
-    # server, typo'd algo_id) that then sits around as a dead STOPPED/
-    # ₹0.00 row with no code ever synced to back it.
     if not servers:
-        st.info("Register a server first (via config) before an algo can be registered against it.")
+        st.info("Register a server first before adding a strategy.")
     else:
+        server_options = sorted(s["server_id"] for s in servers)
+
+        st.markdown("**Register a new strategy**")
+        st.caption(
+            ":material/info: Registering also triggers a code sync (git pull) -- currently always against "
+            "the single configured EC2 instance, regardless of which server you pick below."
+        )
+        with st.form("add_algo_form", clear_on_submit=True):
+            new_algo_cols = st.columns(4)
+            new_algo_id = new_algo_cols[0].text_input("Strategy ID (name)")
+            new_algo_server = new_algo_cols[1].selectbox("Server", server_options)
+            new_algo_script = new_algo_cols[2].text_input("Script path (optional)")
+            new_algo_status = new_algo_cols[3].selectbox("Status", ["STOPPED", "RUNNING", "ERROR"], index=0)
+            new_algo_enabled = st.checkbox("Enabled", value=True)
+            if st.form_submit_button(":material/add: Add strategy"):
+                if not new_algo_id:
+                    st.warning("Strategy ID is required.")
+                else:
+                    try:
+                        with st.spinner(f"Registering '{new_algo_id}' and syncing code to the server..."):
+                            result = create_algo(
+                                new_algo_id, new_algo_server, new_algo_script or None,
+                                new_algo_status, new_algo_enabled,
+                            )
+                        st.success(f"Registered strategy '{new_algo_id}' on '{new_algo_server}'.")
+                        if result.get("sync_success"):
+                            st.success(f":material/cloud_sync: Code synced to the server: {result.get('sync_message') or 'done'}")
+                        else:
+                            st.warning(
+                                f":material/cloud_off: Registered, but code sync failed: "
+                                f"{result.get('sync_message') or 'unknown error'}. You may need to sync manually."
+                            )
+                        load_algos.clear()
+                        st.rerun()
+                    except requests.exceptions.RequestException as exc:
+                        st.error(f"Could not register strategy: {api_error_detail(exc)}")
+
         if algos:
             st.markdown("**Existing strategies**")
             for algo in sorted(algos, key=lambda a: (a["server_id"], a["algo_id"])):
