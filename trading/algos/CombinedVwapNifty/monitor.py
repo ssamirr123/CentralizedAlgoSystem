@@ -32,10 +32,11 @@ import config
 # to values that don't match this algo's actual registered name/server.
 try:
     from trading.common.heartbeat import ControlCenterHeartbeatAgent
-    from trading.common.reporting import report_daily_pnl
+    from trading.common.reporting import report_daily_pnl, report_position
 except ImportError:
     ControlCenterHeartbeatAgent = None
     report_daily_pnl = None
+    report_position = None
 
 _CC_ALGO_NAME = os.environ.get("STRATEGY_NAME")
 _CC_SERVER_NAME = os.environ.get("SERVER_NAME")
@@ -115,6 +116,7 @@ def report(status="RUNNING"):
         _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] report({status}) ignored error: {e}")
+    _report_positions()
 
 
 def stop(status="STOPPED"):
@@ -160,6 +162,40 @@ def _compute_pnl_mtm():
     return (round(mtm, 2), round(realized + mtm, 2))
 
 
+def _report_positions():
+    """Push per-symbol position rows to POST /api/positions so the
+    dashboard's Positions tab has something to show -- compute_metrics()
+    above only ever sends an aggregated mtm/pnl total, never a per-symbol
+    breakdown. A flat leg (in_position False) is reported with quantity=0
+    so its row is deleted (closed) rather than left showing a stale open
+    position; safe to always call, it's a no-op server-side if there was
+    never a row for that symbol."""
+    if report_position is None or _cc_agent is None:
+        return
+    try:
+        for token, symbol in ((config.ce_token, config.ce_symbol), (config.pe_token, config.pe_symbol)):
+            if not token or not symbol:
+                continue
+            if not config.in_position.get(token):
+                report_position(
+                    _CC_API_BASE_URL, _CC_API_KEY, _CC_ALGO_NAME, _CC_SERVER_NAME,
+                    symbol=symbol, quantity=0, average_price=0.0,
+                )
+                continue
+            entry = config.entry_price.get(token, 0)
+            ltp = config.last_ltp.get(token)
+            qty = int(config.qty) if str(config.qty).isdigit() else 0
+            pnl = (entry - ltp) * qty if ltp is not None else None
+            report_position(
+                _CC_API_BASE_URL, _CC_API_KEY, _CC_ALGO_NAME, _CC_SERVER_NAME,
+                symbol=symbol, quantity=-qty, average_price=_to_float(entry),
+                last_price=_to_float(ltp) if ltp is not None else None,
+                pnl=round(pnl, 2) if pnl is not None else None,
+            )
+    except Exception as e:
+        print(f"[MONITOR] position report ignored error: {e}")
+
+
 def _compute_trade_count():
     try:
         orderbook = getattr(config, "orderbook", None) or []
@@ -171,6 +207,15 @@ def _compute_trade_count():
     except Exception as e:
         print(f"[MONITOR] trade_count compute error (ignored): {e}")
         return 0
+
+
+def _to_float(value):
+    try:
+        if value in (None, ""):
+            return 0.0
+        return float(value)
+    except Exception:
+        return 0.0
 
 
 def _refresh_loop():

@@ -31,10 +31,11 @@ import config
 # to values that don't match this algo's actual registered name/server.
 try:
     from trading.common.heartbeat import ControlCenterHeartbeatAgent
-    from trading.common.reporting import report_daily_pnl
+    from trading.common.reporting import report_daily_pnl, report_position
 except ImportError:
     ControlCenterHeartbeatAgent = None
     report_daily_pnl = None
+    report_position = None
 
 _CC_ALGO_NAME = os.environ.get("STRATEGY_NAME")
 _CC_SERVER_NAME = os.environ.get("SERVER_NAME")
@@ -114,6 +115,7 @@ def report(status="RUNNING"):
         _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] report({status}) ignored error: {e}")
+    _report_positions()
 
 
 def stop(status="STOPPED"):
@@ -165,6 +167,39 @@ def _compute_pnl_mtm():
         print(f"[MONITOR] pnl/mtm compute error (ignored): {e}")
         return (0.0, 0.0)
     return (round(mtm, 2), round(pnl, 2))
+
+
+def _report_positions():
+    """Push per-symbol position rows to POST /api/positions so the
+    dashboard's Positions tab has something to show -- compute_metrics()
+    above only ever sends an aggregated mtm/pnl total, never a per-symbol
+    breakdown. Broker already reports a netqty=0 row for a closed leg,
+    which report_position treats as "delete this row" server-side, so no
+    separate close-tracking is needed here."""
+    if report_position is None or _cc_agent is None:
+        return
+    try:
+        obj = getattr(config, "objconn", None)
+        if not obj or not hasattr(obj, "position"):
+            return
+        data = obj.position()
+        positions = (data or {}).get("data") or []
+        for p in positions:
+            symbol = p.get("tradingsymbol")
+            if not symbol:
+                continue
+            realised = _to_float(p.get("realised"))
+            unrealised = _to_float(p.get("unrealised"))
+            net = _to_float(p.get("pnl"))
+            pnl = (realised + unrealised) if (realised or unrealised) else net
+            report_position(
+                _CC_API_BASE_URL, _CC_API_KEY, _CC_ALGO_NAME, _CC_SERVER_NAME,
+                symbol=symbol, quantity=int(_to_float(p.get("netqty"))),
+                average_price=_to_float(p.get("avgnetprice")),
+                last_price=_to_float(p.get("ltp")) or None, pnl=round(pnl, 2),
+            )
+    except Exception as e:
+        print(f"[MONITOR] position report ignored error: {e}")
 
 
 def _compute_trade_count():

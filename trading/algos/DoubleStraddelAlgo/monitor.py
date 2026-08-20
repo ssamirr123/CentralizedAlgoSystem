@@ -19,6 +19,7 @@ import atexit
 
 import config
 import websocket_feed as wf
+from broker import orders
 
 # Heartbeat sender feeding the control-center schema (POST /api/heartbeat +
 # /api/pnl) -- the only one this algo uses. Previously also ran the shared
@@ -33,10 +34,11 @@ import websocket_feed as wf
 # to values that don't match this algo's actual registered name/server.
 try:
     from trading.common.heartbeat import ControlCenterHeartbeatAgent
-    from trading.common.reporting import report_daily_pnl
+    from trading.common.reporting import report_daily_pnl, report_position
 except ImportError:
     ControlCenterHeartbeatAgent = None
     report_daily_pnl = None
+    report_position = None
 
 _CC_ALGO_NAME = os.environ.get("STRATEGY_NAME")
 _CC_SERVER_NAME = os.environ.get("SERVER_NAME")
@@ -116,6 +118,7 @@ def report(status="RUNNING"):
         _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] report({status}) ignored error: {e}")
+    _report_positions()
 
 
 def stop(status="STOPPED"):
@@ -172,6 +175,85 @@ def _compute_pnl_mtm_live():
         print(f"[MONITOR] pnl/mtm compute error (ignored): {e}")
         return (0.0, 0.0)
     return (round(mtm, 2), round(pnl, 2))
+
+
+def _report_positions():
+    """Push per-symbol position rows to POST /api/positions so the
+    dashboard's Positions tab has something to show -- compute_metrics()
+    above only ever sends an aggregated mtm/pnl total, never a per-symbol
+    breakdown. Same DRY_RUN/live split as _compute_pnl_mtm; best-effort,
+    never raises."""
+    if report_position is None or _cc_agent is None:
+        return
+    try:
+        if getattr(config, "DRY_RUN", False):
+            _report_positions_sim()
+        else:
+            _report_positions_live()
+    except Exception as e:
+        print(f"[MONITOR] position report ignored error: {e}")
+
+
+def _report_positions_live():
+    positions = orders.refresh_positions() or []
+    for p in positions:
+        symbol = p.get("tradingsymbol")
+        if not symbol:
+            continue
+        realised = _to_float(p.get("realised"))
+        unrealised = _to_float(p.get("unrealised"))
+        net = _to_float(p.get("pnl"))
+        pnl = (realised + unrealised) if (realised or unrealised) else net
+        report_position(
+            _CC_API_BASE_URL, _CC_API_KEY, _CC_ALGO_NAME, _CC_SERVER_NAME,
+            symbol=symbol, quantity=int(_to_float(p.get("netqty"))),
+            average_price=_to_float(p.get("avgnetprice")),
+            last_price=_to_float(p.get("ltp")) or None, pnl=round(pnl, 2),
+        )
+
+
+def _report_positions_sim():
+    """No broker position book in DRY_RUN, so build rows straight from
+    config.state -- same source _compute_pnl_mtm_sim reads. A `done` leg
+    is reported with quantity=0 so its row is deleted (closed), not left
+    behind showing a stale open position."""
+    state = getattr(config, "state", None) or {}
+    lot = int(config.LOT_QTY)
+
+    for session in ("morning", "afternoon"):
+        sess = state.get(session) or {}
+        for opt in ("ce", "pe"):
+            leg = sess.get(opt)
+            if leg:
+                _report_leg_position(leg, "SELL", lot)
+
+    hedge = state.get("hedge") or {}
+    for opt in ("ce", "pe"):
+        leg = hedge.get(opt)
+        if leg and leg.get("oid") is not None:
+            _report_leg_position(leg, "BUY", lot)
+
+
+def _report_leg_position(leg, side, lot):
+    symbol = leg.get("sym")
+    entry = leg.get("entry")
+    if not symbol or entry is None:
+        return
+    if leg.get("done"):
+        report_position(
+            _CC_API_BASE_URL, _CC_API_KEY, _CC_ALGO_NAME, _CC_SERVER_NAME,
+            symbol=symbol, quantity=0, average_price=_to_float(entry),
+        )
+        return
+    realised, unrealised = _leg_pnl(leg, side, lot)
+    ltp = wf.get_ltp(leg.get("tok"))
+    qty = -lot if side == "SELL" else lot
+    report_position(
+        _CC_API_BASE_URL, _CC_API_KEY, _CC_ALGO_NAME, _CC_SERVER_NAME,
+        symbol=symbol, quantity=qty, average_price=_to_float(entry),
+        last_price=_to_float(ltp) if ltp is not None else None,
+        pnl=round(realised + unrealised, 2),
+    )
 
 
 def _leg_pnl(leg, side, lot):

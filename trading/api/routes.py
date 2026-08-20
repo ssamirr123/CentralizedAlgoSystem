@@ -72,38 +72,21 @@ def _resolve_server(db: Session, server_name: str) -> models.Server:
 
 
 def _get_or_create_algo(db: Session, algo_name: str, server: models.Server) -> models.Algo:
-    """Every call site invokes this immediately after resolving the
-    server, before staging any other changes on the session -- the
-    rollback on a lost race below is safe precisely because of that
-    ordering. Don't call this after adding other pending objects to the
-    session without re-checking that."""
+    """Auto-create fallback disabled: an algo must now be explicitly
+    registered via POST /api/algos before any start/stop/heartbeat/log
+    call will touch it. Previously this silently inserted a brand-new
+    algos row on first contact, which meant a typo'd algo_id or a stray
+    heartbeat from a decommissioned strategy would quietly reappear on
+    the dashboard instead of failing loudly."""
     algo = (
         db.query(models.Algo)
         .filter(models.Algo.name == algo_name, models.Algo.server_id == server.id)
         .one_or_none()
     )
-    if algo is not None:
-        return algo
-    algo = models.Algo(
-        name=algo_name,
-        server_id=server.id,
-        script_path=f"trading/algos/{algo_name}/main.py",
-    )
-    db.add(algo)
-    try:
-        db.flush()  # assigns algo.id without committing yet
-    except IntegrityError:
-        # Lost the race: a concurrent request (e.g. the heartbeat sender
-        # and log shipper both auto-registering the same brand-new algo
-        # at once -- confirmed to actually happen, not hypothetical)
-        # already inserted this (name, server_id) row between our SELECT
-        # and our INSERT. Roll back and re-fetch -- it's guaranteed to
-        # exist now.
-        db.rollback()
-        algo = (
-            db.query(models.Algo)
-            .filter(models.Algo.name == algo_name, models.Algo.server_id == server.id)
-            .one()
+    if algo is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Algo not registered: {algo_name} on {server.name}. Register it via POST /api/algos first.",
         )
     return algo
 
@@ -394,9 +377,11 @@ def delete_server(server_id: str, db: Session = Depends(get_db)) -> Response:
 @router.post("/algos", response_model=AlgoRegisterResponse, status_code=status.HTTP_201_CREATED)
 def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoRegisterResponse:
     """Registers a new strategy for viewing/management before it's ever
-    been started -- otherwise an algo only exists once a start/stop/
-    heartbeat/log call auto-creates it via _get_or_create_algo, which
-    means it's invisible on the dashboard until it first runs.
+    been started. This is now the ONLY way an algo row gets created --
+    start/stop/heartbeat/log calls against an unregistered algo_id are
+    rejected with 404 (see _get_or_create_algo) rather than silently
+    creating one, so a typo'd algo_id or a stray call from a
+    decommissioned strategy can't quietly reappear on the dashboard.
 
     Also triggers a best-effort code sync (git pull) on the target EC2
     instance right after registering -- a DB row alone puts no file on
@@ -595,19 +580,13 @@ def post_heartbeat(body: HeartbeatIn, db: Session = Depends(get_db)) -> Heartbea
     """
     server = _resolve_server(db, body.server_id)
 
-    # Explicit existence check BEFORE _get_or_create_algo, which would
-    # otherwise mask "brand new" -- a freshly-created Algo row already
-    # has status="STOPPED" (the column's Python-level default) by the
-    # time _get_or_create_algo returns, so checking algo.status alone
-    # afterward can never distinguish "new" from "existing and STOPPED."
-    existing_algo = (
-        db.query(models.Algo)
-        .filter(models.Algo.name == body.algo_id, models.Algo.server_id == server.id)
-        .one_or_none()
-    )
-    is_new_algo = existing_algo is None
-    previous_status = existing_algo.status if existing_algo is not None else None
-    algo = existing_algo if existing_algo is not None else _get_or_create_algo(db, body.algo_id, server)
+    # Auto-create fallback disabled (see _get_or_create_algo) -- an algo
+    # must already be registered via POST /api/algos before it can ever
+    # heartbeat, so "brand new, first heartbeat ever" can no longer
+    # happen here. previous_status always reflects a real prior row
+    # (registration's own status default, or whatever it last reported).
+    algo = _get_or_create_algo(db, body.algo_id, server)
+    previous_status = algo.status
 
     ts = body.timestamp or datetime.now(timezone.utc)
 
@@ -619,12 +598,7 @@ def post_heartbeat(body: HeartbeatIn, db: Session = Depends(get_db)) -> Heartbea
     server.last_heartbeat = ts
     db.commit()
 
-    if is_new_algo:
-        if body.status == "RUNNING":
-            alert_service.strategy_started(body.algo_id, body.server_id)
-        elif body.status == "ERROR":
-            alert_service.strategy_crashed(body.algo_id, body.server_id, reason="Initial status ERROR")
-    elif previous_status != body.status:
+    if previous_status != body.status:
         if body.status == "RUNNING":
             alert_service.strategy_recovered(body.algo_id, body.server_id)
         elif body.status == "STOPPED":

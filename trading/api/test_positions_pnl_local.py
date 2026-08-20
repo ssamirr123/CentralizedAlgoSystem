@@ -41,6 +41,10 @@ db.close()
 client = TestClient(app)
 AUTH = {"X-API-Key": "test-key-123"}
 
+# --- positions/trades/pnl posts require the algo to already be registered (auto-create fallback disabled) ---
+r = client.post("/api/algos", json={"algo_id": "a1", "server_id": "ec2-1"}, headers=AUTH)
+check("register a1 -> 201", r.status_code == 201, str(r.status_code) + " " + r.text)
+
 # =========================== POSITIONS ===========================
 
 r = client.post("/api/positions", json={"algo_id": "a1", "server_id": "ec2-1", "symbol": "NIFTY", "quantity": 50, "average_price": 24700.0})
