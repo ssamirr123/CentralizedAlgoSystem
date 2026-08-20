@@ -84,18 +84,29 @@ with patch("trading.api.routes.invoke_orchestrator") as mock_invoke:
     check("live check Lambda failure -> degrades to cached status, ssm_status None", r.json()["ssm_status"] is None, str(r.json()))
 
 # =========================== HEARTBEAT ALERTING ===========================
+# Auto-create fallback is disabled -- an algo must be registered via
+# POST /api/algos before it can ever heartbeat.
 
 with patch("trading.api.routes.alert_service") as mock_alerts:
-    # brand new algo, first heartbeat RUNNING -> strategy_started
+    # heartbeat against an unregistered algo -> 404, no auto-create, no alert
+    r = client.post("/api/heartbeat", json={"algo_id": "unregistered_algo", "server_id": "ec2-1", "status": "RUNNING"}, headers=AUTH)
+    check("heartbeat for unregistered algo -> 404", r.status_code == 404, str(r.status_code) + " " + r.text)
+    check("unregistered algo heartbeat -> no alert fired", not mock_alerts.method_calls, "")
+
+r = client.post("/api/algos", json={"algo_id": "new_algo", "server_id": "ec2-1"}, headers=AUTH)
+check("register new_algo -> 201", r.status_code == 201, str(r.status_code) + " " + r.text)
+
+with patch("trading.api.routes.alert_service") as mock_alerts:
+    # registered algo defaults to STOPPED; first heartbeat RUNNING -> strategy_recovered (STOPPED -> RUNNING)
     r = client.post("/api/heartbeat", json={"algo_id": "new_algo", "server_id": "ec2-1", "status": "RUNNING"}, headers=AUTH)
     check("first heartbeat RUNNING -> 200", r.status_code == 200, str(r.status_code))
-    check("first heartbeat RUNNING -> strategy_started fired", mock_alerts.strategy_started.called, "")
-    check("first heartbeat RUNNING -> no other alert fired", not mock_alerts.strategy_crashed.called and not mock_alerts.strategy_recovered.called, "")
+    check("first heartbeat RUNNING -> strategy_recovered fired", mock_alerts.strategy_recovered.called, "")
+    check("first heartbeat RUNNING -> no other alert fired", not mock_alerts.strategy_crashed.called and not mock_alerts.strategy_stopped.called, "")
 
 with patch("trading.api.routes.alert_service") as mock_alerts:
     # same status again (RUNNING -> RUNNING) -> no alert (dedup on no-change)
     r = client.post("/api/heartbeat", json={"algo_id": "new_algo", "server_id": "ec2-1", "status": "RUNNING"}, headers=AUTH)
-    check("unchanged status -> no alert fired", not mock_alerts.strategy_started.called and not mock_alerts.strategy_recovered.called, "")
+    check("unchanged status -> no alert fired", not mock_alerts.strategy_recovered.called, "")
 
 with patch("trading.api.routes.alert_service") as mock_alerts:
     # RUNNING -> ERROR -> strategy_crashed
@@ -103,27 +114,24 @@ with patch("trading.api.routes.alert_service") as mock_alerts:
     check("RUNNING -> ERROR -> strategy_crashed fired", mock_alerts.strategy_crashed.called, "")
 
 with patch("trading.api.routes.alert_service") as mock_alerts:
-    # ERROR -> RUNNING -> strategy_recovered (not strategy_started, even though it looks similar)
+    # ERROR -> RUNNING -> strategy_recovered
     r = client.post("/api/heartbeat", json={"algo_id": "new_algo", "server_id": "ec2-1", "status": "RUNNING"}, headers=AUTH)
-    check(
-        "ERROR -> RUNNING -> strategy_recovered fired, NOT strategy_started",
-        mock_alerts.strategy_recovered.called and not mock_alerts.strategy_started.called,
-        "",
-    )
+    check("ERROR -> RUNNING -> strategy_recovered fired", mock_alerts.strategy_recovered.called, "")
 
 with patch("trading.api.routes.alert_service") as mock_alerts:
     # RUNNING -> STOPPED -> strategy_stopped
     r = client.post("/api/heartbeat", json={"algo_id": "new_algo", "server_id": "ec2-1", "status": "STOPPED"}, headers=AUTH)
     check("RUNNING -> STOPPED -> strategy_stopped fired", mock_alerts.strategy_stopped.called, "")
 
+r = client.post("/api/algos", json={"algo_id": "another_new_algo", "server_id": "ec2-1"}, headers=AUTH)
+check("register another_new_algo -> 201", r.status_code == 201, str(r.status_code) + " " + r.text)
+
 with patch("trading.api.routes.alert_service") as mock_alerts:
-    # a SECOND brand-new algo whose first-ever heartbeat is ERROR -> strategy_crashed with "Initial status ERROR"
+    # a SECOND registered algo whose first-ever heartbeat is ERROR -> strategy_crashed ("Status changed to ERROR", not "Initial" -- that reason string was tied to the removed auto-create path)
     r = client.post("/api/heartbeat", json={"algo_id": "another_new_algo", "server_id": "ec2-1", "status": "ERROR"}, headers=AUTH)
-    check("second new algo, first heartbeat ERROR -> strategy_crashed (not strategy_started)", (
-        mock_alerts.strategy_crashed.called and not mock_alerts.strategy_started.called
-    ), "")
+    check("second registered algo, first heartbeat ERROR -> strategy_crashed", mock_alerts.strategy_crashed.called, "")
     call_kwargs = mock_alerts.strategy_crashed.call_args.kwargs
-    check("initial-ERROR alert reason mentions 'Initial'", "Initial" in call_kwargs.get("reason", ""), str(call_kwargs))
+    check("ERROR alert reason mentions 'Status changed'", "Status changed" in call_kwargs.get("reason", ""), str(call_kwargs))
 
 # =========================== RATE LIMITING (last -- deliberately exhausts the window) ===========================
 

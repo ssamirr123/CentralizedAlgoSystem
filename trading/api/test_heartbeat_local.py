@@ -55,7 +55,18 @@ r = client.post(
 )
 check("heartbeat unknown server -> 404", r.status_code == 404, str(r.status_code))
 
-# --- heartbeat auto-registers the algo (matches other endpoints' _get_or_create_algo) ---
+# --- heartbeat for an unregistered algo -> 404 (auto-create fallback disabled) ---
+r = client.post(
+    "/api/heartbeat",
+    json={"algo_id": "example_strategy", "server_id": "ec2-1", "status": "RUNNING"},
+    headers=AUTH,
+)
+check("heartbeat unregistered algo -> 404", r.status_code == 404, str(r.status_code))
+
+# --- register the algo, then heartbeat succeeds against it ---
+r = client.post("/api/algos", json={"algo_id": "example_strategy", "server_id": "ec2-1"}, headers=AUTH)
+check("register example_strategy -> 201", r.status_code == 201, str(r.status_code) + " " + r.text)
+
 r = client.post(
     "/api/heartbeat",
     json={

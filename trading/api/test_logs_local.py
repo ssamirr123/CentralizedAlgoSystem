@@ -51,6 +51,10 @@ r = client.post(
 )
 check("post log unknown server -> 404", r.status_code == 404, str(r.status_code))
 
+# --- log posts require the algo to already be registered (auto-create fallback disabled) ---
+r = client.post("/api/algos", json={"algo_id": "algo1", "server_id": "ec2-1"}, headers=AUTH)
+check("register algo1 -> 201", r.status_code == 201, str(r.status_code) + " " + r.text)
+
 # --- insert 3 logs: ENTRY(INFO), SL(WARNING), EXIT(INFO), on two different days ---
 events = [
     {"algo_id": "algo1", "server_id": "ec2-1", "level": "INFO", "event": "ENTRY",
