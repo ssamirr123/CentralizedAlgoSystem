@@ -110,12 +110,17 @@ def report(status="RUNNING"):
     """Compute fresh metrics and push them to the control-center agent. Never raises."""
     if _cc_agent is None:
         return
+    # obj.position() hits the broker API -- fetch it once per cycle and
+    # share it between the pnl/mtm computation and the per-symbol report
+    # below, instead of the two of them independently double-calling it
+    # (this was tripping Angel One's "exceeding access rate" limit).
+    positions = _fetch_positions()
     try:
-        mtm, pnl, trade_count = compute_metrics()
+        mtm, pnl, trade_count = compute_metrics(positions)
         _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] report({status}) ignored error: {e}")
-    _report_positions()
+    _report_positions(positions)
 
 
 def stop(status="STOPPED"):
@@ -123,7 +128,7 @@ def stop(status="STOPPED"):
     if _cc_agent is None:
         return
     try:
-        mtm, pnl, trade_count = compute_metrics()
+        mtm, pnl, trade_count = compute_metrics(_fetch_positions())
         _report_control_center(status, pnl, trade_count)
     except Exception as e:
         print(f"[MONITOR] stop({status}) metric error (ignored): {e}")
@@ -136,25 +141,37 @@ def stop(status="STOPPED"):
 # --------------------------------------------------------------------------- #
 # Metric computation (best-effort, broker-backed)
 # --------------------------------------------------------------------------- #
-def compute_metrics():
+def _fetch_positions():
+    """Single broker call for the position book, shared by _compute_pnl_mtm
+    and _report_positions below -- calling obj.position() twice per report
+    cycle was tripping Angel One's "exceeding access rate" limit."""
+    try:
+        obj = getattr(config, "objconn", None)
+        if not obj or not hasattr(obj, "position"):
+            return []
+        data = obj.position()
+        return (data or {}).get("data") or []
+    except Exception as e:
+        print(f"[MONITOR] position fetch ignored error: {e}")
+        return []
+
+
+def compute_metrics(positions=None):
     """
     Return (mtm, pnl, trade_count).
 
     Derived from the broker position book (P&L / MTM) and the cached order book
     (trade count). Any failure falls back to safe zeros so nothing breaks.
     """
-    return _compute_pnl_mtm() + (_compute_trade_count(),)
+    if positions is None:
+        positions = _fetch_positions()
+    return _compute_pnl_mtm(positions) + (_compute_trade_count(),)
 
 
-def _compute_pnl_mtm():
+def _compute_pnl_mtm(positions):
     mtm = 0.0
     pnl = 0.0
     try:
-        obj = getattr(config, "objconn", None)
-        if not obj or not hasattr(obj, "position"):
-            return (0.0, 0.0)
-        data = obj.position()
-        positions = (data or {}).get("data") or []
         for p in positions:
             realised = _to_float(p.get("realised"))
             unrealised = _to_float(p.get("unrealised"))
@@ -169,7 +186,7 @@ def _compute_pnl_mtm():
     return (round(mtm, 2), round(pnl, 2))
 
 
-def _report_positions():
+def _report_positions(positions=None):
     """Push per-symbol position rows to POST /api/positions so the
     dashboard's Positions tab has something to show -- compute_metrics()
     above only ever sends an aggregated mtm/pnl total, never a per-symbol
@@ -179,11 +196,8 @@ def _report_positions():
     if report_position is None or _cc_agent is None:
         return
     try:
-        obj = getattr(config, "objconn", None)
-        if not obj or not hasattr(obj, "position"):
-            return
-        data = obj.position()
-        positions = (data or {}).get("data") or []
+        if positions is None:
+            positions = _fetch_positions()
         for p in positions:
             symbol = p.get("tradingsymbol")
             if not symbol:
@@ -226,7 +240,9 @@ def _to_float(value):
 
 def _refresh_loop():
     """Periodically push fresh metrics (RUNNING) so the server stays current."""
-    # Slightly under the 30s heartbeat so values are fresh each heartbeat.
+    # 60s rather than the 30s heartbeat -- each cycle hits the broker's
+    # position() API, and Angel One's rate limit made a tighter interval
+    # too aggressive. Dashboard staleness tolerance covers this gap.
     while True:
-        time.sleep(20)
+        time.sleep(60)
         report("RUNNING")
