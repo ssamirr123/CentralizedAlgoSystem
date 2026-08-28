@@ -3,19 +3,14 @@ FastAPI application factory.
 
 create_app() is the single place the application object is assembled:
 lifespan (DB init + the stale-heartbeat background watcher), the
-control-center router at /api, and system routes (/health).
+control-center router at /api, and the legacy router
+(/update_strategy, /strategies, /health).
 
-The legacy heartbeat endpoints (/update_strategy, /strategies) are still
-defined in backend/main.py and attached to the app returned by
-create_app() -- they are NOT migrated here yet (that is a later stage).
 backend/main.py stays import-compatible: `app = create_app()`.
 
-Nothing about API behavior changes in this stage. The pieces that moved
-out of backend/main.py (app construction, lifespan, watcher, /health) are
-byte-for-byte the same logic.
-
-Transitional import: HealthResponse still comes from backend.schemas; the
-schema move is a later stage.
+Nothing about API behavior changes here -- the legacy endpoints are a
+verbatim move into trading/api/legacy.py, and the control-center surface
+is untouched.
 """
 from __future__ import annotations
 
@@ -25,11 +20,11 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, FastAPI
+from fastapi import FastAPI
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
-from backend.schemas import HealthResponse
+from trading.api.legacy import router as legacy_router
 from trading.api.routes import router as control_center_router
 from trading.database.connection import SessionLocal, init_db
 from trading.database.models import StrategyHeartbeat
@@ -90,24 +85,8 @@ async def lifespan(_: FastAPI):
         watcher_task.cancel()
 
 
-system_router = APIRouter()
-
-
-@system_router.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    return HealthResponse(
-        status="ok",
-        timestamp_utc=datetime.now(timezone.utc),
-        service="central-strategy-monitor",
-    )
-
-
 def create_app() -> FastAPI:
-    """Build and return the FastAPI application.
-
-    backend/main.py calls this as `app = create_app()` and then attaches
-    the legacy /update_strategy and /strategies routes to the result.
-    """
+    """Build and return the FastAPI application."""
     app = FastAPI(
         title="Central Strategy Monitoring API",
         version="1.0.0",
@@ -115,5 +94,5 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(control_center_router, prefix="/api")
-    app.include_router(system_router)
+    app.include_router(legacy_router)
     return app
