@@ -1,84 +1,36 @@
+"""
+Application entrypoint.
+
+The FastAPI object is now assembled by trading.api.app.create_app()
+(Stage 4). This module stays import-compatible -- `app = create_app()` --
+so api/index.py (`from backend.main import app`), `uvicorn
+backend.main:app`, and the existing tests keep working unchanged.
+
+The legacy heartbeat endpoints (/update_strategy, /strategies) are still
+defined here, attached to the app the factory returns. They are not
+migrated yet; that is a later stage. Their behavior is unchanged.
+"""
 from __future__ import annotations
 
-import os
-import asyncio
-from datetime import datetime, timedelta, timezone
 import logging
-from contextlib import asynccontextmanager
+import os
+from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, HTTPException, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from backend.database import SessionLocal, get_db, init_db
-from backend.models import StrategyHeartbeat
-from backend.schemas import HealthResponse, StrategyHeartbeatIn, StrategyHeartbeatOut, StrategyStatus
 from alerts.telegram import alert_service
-from trading.api.routes import router as control_center_router
-from trading.database.connection import init_db as init_control_center_db
+from backend.schemas import StrategyHeartbeatIn, StrategyHeartbeatOut, StrategyStatus
+from trading.api.app import create_app
+from trading.database.connection import get_db
+from trading.database.models import StrategyHeartbeat
 
 DAY_LOSS_LIMIT = float(os.environ.get("DAY_LOSS_LIMIT", "10000.0"))
-STALE_THRESHOLD_MINUTES = float(os.environ.get("STALE_THRESHOLD_MINUTES", "2"))
-STALE_CHECK_INTERVAL_SECONDS = int(os.environ.get("STALE_CHECK_INTERVAL_SECONDS", "60"))
 
 logger = logging.getLogger("strategy_monitor")
-logging.basicConfig(level=logging.INFO)
 
-
-async def _stale_heartbeat_watcher() -> None:
-    """Background task: fires heartbeat_missing alert for strategies silent > threshold."""
-    logger.info("Stale heartbeat watcher started (interval=%ds)", STALE_CHECK_INTERVAL_SECONDS)
-    while True:
-        await asyncio.sleep(STALE_CHECK_INTERVAL_SECONDS)
-        try:
-            cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_THRESHOLD_MINUTES)
-            db: Session = SessionLocal()
-            try:
-                stale = (
-                    db.query(StrategyHeartbeat)
-                    .filter(StrategyHeartbeat.received_at < cutoff)
-                    .all()
-                )
-                for s in stale:
-                    silent_for = (
-                        datetime.now(timezone.utc) - s.received_at.replace(tzinfo=timezone.utc)
-                    ).total_seconds() / 60
-                    logger.warning(
-                        "Stale heartbeat detected | strategy=%s | server=%s | silent=%.1f min",
-                        s.strategy_name, s.server_name, silent_for,
-                    )
-                    alert_service.heartbeat_missing(
-                        s.strategy_name, s.server_name, minutes=silent_for
-                    )
-            finally:
-                db.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Error in stale heartbeat watcher: %s", exc)
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    init_db()
-    init_control_center_db()
-    logger.info("Database initialized at startup (heartbeat monitor + control center schemas)")
-    # Background watcher is disabled on serverless platforms (e.g. Vercel)
-    # Set DISABLE_BACKGROUND_WATCHER=true in Vercel environment variables
-    watcher_task = None
-    if not os.environ.get("DISABLE_BACKGROUND_WATCHER", "").lower() in ("1", "true", "yes"):
-        watcher_task = asyncio.create_task(_stale_heartbeat_watcher())
-    else:
-        logger.info("Background watcher disabled (serverless mode)")
-    yield
-    if watcher_task is not None:
-        watcher_task.cancel()
-
-app = FastAPI(
-    title="Central Strategy Monitoring API",
-    version="1.0.0",
-    description="Receives strategy heartbeats from distributed EC2 strategy workers.",
-    lifespan=lifespan,
-)
-app.include_router(control_center_router, prefix="/api")
+app = create_app()
 
 
 @app.post(
@@ -169,17 +121,7 @@ def get_strategies(db: Session = Depends(get_db)) -> list[StrategyHeartbeatOut]:
     )
 
 
-@app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    return HealthResponse(
-        status="ok",
-        timestamp_utc=datetime.now(timezone.utc),
-        service="central-strategy-monitor",
-    )
-
-
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=False)
-
