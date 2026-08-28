@@ -1,7 +1,15 @@
 """
-Trading control center schema. Minimum tables per the project's own
-design: servers, algos, algo_runs, heartbeats, logs, positions, trades,
-daily_pnl, commands.
+Canonical application schema (single SQLAlchemy Base).
+
+Control-center tables per the project's own design: servers, algos,
+algo_runs, heartbeats, logs, positions, trades, daily_pnl, commands,
+rate_limit_windows.
+
+Legacy table: strategy_heartbeats -- the original per-(strategy, server)
+latest-state row used by POST /update_strategy and GET /strategies. Moved
+here verbatim in Stage 2 of the architecture consolidation (was
+backend/models.py); table name and columns are unchanged so existing
+production data is untouched.
 
 Naming note: Milestone 4's Lambda (orchestrator.py) uses "algo_id" in its
 event payload to mean the algo's NAME (e.g. "example_strategy"), matching
@@ -210,3 +218,34 @@ class RateLimitWindow(Base):
     api_key_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class StrategyHeartbeat(Base):
+    """Legacy heartbeat monitor table (pre-consolidation backend/models.py).
+
+    One latest-state row per (strategy_name, server_name) pair, upserted by
+    POST /update_strategy and listed by GET /strategies. Kept verbatim --
+    same table name, columns, and unique constraint -- so existing rows in
+    the production database continue to work unchanged. New code should use
+    the control-center Heartbeat/Algo tables above; this is retained for
+    backward compatibility until those legacy endpoints are retired.
+    """
+
+    __tablename__ = "strategy_heartbeats"
+    __table_args__ = (
+        UniqueConstraint("strategy_name", "server_name", name="uq_strategy_server"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    strategy_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    server_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    current_mtm: Mapped[float] = mapped_column(Float, nullable=False)
+    day_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    number_of_trades: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_update_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+    )

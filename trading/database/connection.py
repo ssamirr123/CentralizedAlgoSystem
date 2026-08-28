@@ -1,15 +1,16 @@
 """
-Database engine/session for the trading control center schema.
+Canonical database engine/session/Base for the whole application.
 
-Deliberately a SEPARATE SQLAlchemy Base from backend/database.py's (the
-old simple heartbeat monitor) even though both point at the same Postgres
-database via the same DATABASE_URL — this Base's create_all() only
-touches the tables registered under it (servers, algos, algo_runs, ...),
-never strategy_heartbeats, without needing any special-casing.
+This is the single SQLAlchemy DeclarativeBase for the project. Every model
+lives under trading/database/models.py and registers on this Base's
+metadata -- the control-center tables (servers, algos, algo_runs, ...)
+AND the legacy strategy_heartbeats table (moved here in Stage 2 of the
+architecture consolidation; backend/database.py and backend/models.py are
+now thin re-export shims pointing here).
 
-Falls back to a local SQLite file when DATABASE_URL isn't set, matching
-backend/database.py's pattern, so this is testable without a real
-Postgres connection.
+PostgreSQL (via DATABASE_URL) is the authoritative production database.
+Falls back to a local SQLite file only when DATABASE_URL isn't set, so the
+suite is runnable without a real Postgres connection.
 """
 from __future__ import annotations
 
@@ -32,8 +33,7 @@ _connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite"
 # creates its own engine, so SQLAlchemy's default in-process pool (up to
 # pool_size + max_overflow = 15 real connections per engine) multiplies
 # across concurrent invocations and blows past Supabase's session-pooler
-# cap (15 total, shared with backend/database.py's separate engine).
-# Supabase's own pooler already does the multiplexing.
+# cap (15 total). Supabase's own pooler already does the multiplexing.
 _poolclass = NullPool if not DATABASE_URL.startswith("sqlite") else None
 
 
@@ -71,8 +71,11 @@ def get_db() -> Session:
 
 
 def init_db() -> None:
-    """Create this schema's tables if they don't already exist. Does not
-    touch backend/models.py's strategy_heartbeats table -- separate Base."""
+    """Create every registered table if it does not already exist, including
+    the legacy strategy_heartbeats table (single canonical Base since Stage
+    2). Idempotent: create_all() checks first and never drops or alters an
+    existing table. This is a convenience for local/dev and tests; Alembic
+    is the migration mechanism for real deployments (Stage 3)."""
     if DATABASE_URL.startswith("sqlite"):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
     from trading.database import models  # noqa: F401  (registers tables on Base.metadata)
