@@ -24,6 +24,7 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
+from trading.api.health import router as health_router
 from trading.api.legacy import router as legacy_router
 from trading.api.routes import router as control_center_router
 from trading.database.connection import SessionLocal, init_db
@@ -94,5 +95,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(control_center_router, prefix="/api")
+    app.include_router(health_router, prefix="/api")  # GET /api/health, unauthenticated
     app.include_router(legacy_router)
     return app
