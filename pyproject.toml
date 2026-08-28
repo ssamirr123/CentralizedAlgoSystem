@@ -15,4 +15,13 @@ dependencies = [
 	"streamlit-autorefresh>=1.0.1",
 	"uvicorn>=0.30.0",
 	"requests>=2.32.0",
+	"alembic>=1.13,<2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+filterwarnings = [
+	"ignore::DeprecationWarning:starlette.*",
 ]
