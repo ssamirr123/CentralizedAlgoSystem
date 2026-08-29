@@ -26,18 +26,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
+from trading.core.config import load_settings
 from trading.database import models
 from trading.database.connection import SessionLocal
 
-STALE_THRESHOLD_MINUTES = float(os.environ.get("STALE_THRESHOLD_MINUTES", "2"))
-STALE_CHECK_INTERVAL_SECONDS = int(os.environ.get("STALE_CHECK_INTERVAL_SECONDS", "60"))
+_settings = load_settings()
+STALE_THRESHOLD_MINUTES = _settings.stale_threshold_minutes
+STALE_CHECK_INTERVAL_SECONDS = _settings.stale_check_interval_seconds
 
 logger = logging.getLogger("strategy_monitor")
 

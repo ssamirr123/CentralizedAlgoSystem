@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -21,6 +20,7 @@ from trading.api.health import router as health_router
 from trading.api.legacy import router as legacy_router
 from trading.api.routes import router as control_center_router
 from trading.api.watcher import stale_heartbeat_watcher
+from trading.core.config import load_settings
 from trading.database.connection import init_db
 
 logger = logging.getLogger("strategy_monitor")
@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 def _watcher_disabled() -> bool:
-    return os.environ.get("DISABLE_BACKGROUND_WATCHER", "").lower() in ("1", "true", "yes")
+    return load_settings().disable_background_watcher
 
 
 @asynccontextmanager

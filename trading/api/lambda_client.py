@@ -13,11 +13,12 @@ Vercel serverless function holds).
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+from trading.core.config import load_settings
 
 
 class LambdaInvokeError(RuntimeError):
@@ -25,11 +26,12 @@ class LambdaInvokeError(RuntimeError):
 
 
 def invoke_orchestrator(action: str, **payload: Any) -> dict:
-    function_name = os.environ.get("LAMBDA_FUNCTION_NAME")
+    settings = load_settings()
+    function_name = settings.lambda_function_name
     if not function_name:
         raise LambdaInvokeError("LAMBDA_FUNCTION_NAME environment variable is not set")
 
-    client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION"))
+    client = boto3.client("lambda", region_name=settings.aws_region or None)
     event = {"action": action, **payload}
 
     try:
@@ -60,11 +62,12 @@ def invoke_orchestrator_async(action: str, **payload: Any) -> None:
     15-minute budget and reports progress back via PATCH /api/servers/{id}
     using its own API_BASE_URL/CONTROL_API_KEY env vars, the same pattern
     *_all_algos already uses to read the algo list."""
-    function_name = os.environ.get("LAMBDA_FUNCTION_NAME")
+    settings = load_settings()
+    function_name = settings.lambda_function_name
     if not function_name:
         raise LambdaInvokeError("LAMBDA_FUNCTION_NAME environment variable is not set")
 
-    client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION"))
+    client = boto3.client("lambda", region_name=settings.aws_region or None)
     event = {"action": action, **payload}
 
     try:

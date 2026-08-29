@@ -19,7 +19,6 @@ dashboard and strategy processes are migrated off it.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -29,10 +28,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
+from trading.core.config import load_settings
 from trading.database.connection import get_db
 from trading.database.models import StrategyHeartbeat
 
-DAY_LOSS_LIMIT = float(os.environ.get("DAY_LOSS_LIMIT", "10000.0"))
+DAY_LOSS_LIMIT = load_settings().day_loss_limit
 
 logger = logging.getLogger("strategy_monitor")
 

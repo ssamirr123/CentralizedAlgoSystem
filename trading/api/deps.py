@@ -14,22 +14,25 @@ session for RLS policies to evaluate against.
 from __future__ import annotations
 
 import hashlib
-import os
 from datetime import datetime, timezone
 
 from fastapi import Header, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from trading.core.config import load_settings
 from trading.database import models
 from trading.database.connection import SessionLocal
 
-RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX_REQUESTS", "60"))
-RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
+# Module-level so tests can monkeypatch them; defaults come from the
+# centralized settings layer (same env vars, same values as before).
+_settings = load_settings()
+RATE_LIMIT_MAX_REQUESTS = _settings.rate_limit_max_requests
+RATE_LIMIT_WINDOW_SECONDS = _settings.rate_limit_window_seconds
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    expected = os.environ.get("CONTROL_API_KEY")
+    expected = load_settings().control_api_key
     if not expected:
         # Fail closed: an unset key means auth cannot be enforced, so
         # refuse everything rather than silently allowing all requests
