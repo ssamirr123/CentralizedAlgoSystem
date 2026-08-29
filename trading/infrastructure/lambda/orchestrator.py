@@ -6,7 +6,15 @@ Lambda per action (per the project's own guidance to avoid unnecessary
 Lambda duplication when a single function stays clean).
 
 Actions:
-    start_ec2, stop_ec2                              -- EC2 power state
+    start_ec2, stop_ec2, restart_ec2                 -- EC2 power state. stop_ec2 is SAFE by
+                                                          default: it refuses to stop a running
+                                                          instance while a trading process is
+                                                          alive on it (pgrep over trading_agent /
+                                                          algos/*/main.py via SSM) unless the
+                                                          safe-shutdown already ran or the caller
+                                                          passes force:true. restart_ec2 reboots a
+                                                          running instance (same safe-stop guard),
+                                                          or starts a stopped one.
     check_ec2_health                                  -- Milestone 12: EC2 power state AND SSM Agent
                                                           responsiveness, which start_ec2/stop_ec2 alone
                                                           never distinguish (an instance can be power-
@@ -109,6 +117,11 @@ ALL_ALGOS_ACTIONS = {"start_all_algos", "stop_all_algos", "update_all_algos"}
 # which can legitimately take a while and should stay fully async.
 STATUS_POLL_TIMEOUT_SECONDS = 10
 STATUS_POLL_INTERVAL_SECONDS = 1
+
+# stop_ec2 / restart_ec2 safe-stop guard: how long to wait for the SSM
+# "is any trading process alive?" check to return before giving up.
+SAFE_STOP_CHECK_TIMEOUT_SECONDS = 20
+SAFE_STOP_CHECK_INTERVAL_SECONDS = 2
 
 # sync_repo is called synchronously from POST /api/algos (a Vercel
 # serverless function with its own timeout, no maxDuration configured --
@@ -295,10 +308,78 @@ def _action_check_ec2_health(instance_id: str, event: dict) -> dict:
     }
 
 
+def _instance_state(instance_id: str) -> str:
+    current = ec2_client.describe_instances(InstanceIds=[instance_id])
+    return current["Reservations"][0]["Instances"][0]["State"]["Name"]
+
+
+_TRADING_PROC_PATTERN = r"trading/agent/trading_agent\.py|trading/algos/[^/]+/main\.py"
+
+
+def _running_trading_processes(instance_id: str, os_name: str) -> list[str] | None:
+    """Return the command lines of live trading processes on the instance,
+    [] if none, or None if the check itself could not be completed (SSM
+    unreachable, agent offline, timeout). Callers treat None as "cannot
+    confirm safe -> do not stop"."""
+    if os_name == "windows":
+        cmd = (
+            'Get-CimInstance Win32_Process | '
+            'Where-Object { $_.CommandLine -match "trading_agent\\.py|algos\\\\[^\\\\]+\\\\main\\.py" } | '
+            'ForEach-Object { $_.CommandLine }'
+        )
+    else:
+        cmd = f"pgrep -af '{_TRADING_PROC_PATTERN}' || true"
+
+    try:
+        command_id = _send_ssm_command(instance_id, cmd, os_name)
+    except (ClientError, BotoCoreError) as exc:
+        _log_event("SAFE_STOP_CHECK_SEND_FAILED", instance_id=instance_id, error=str(exc))
+        return None
+
+    deadline = time.monotonic() + SAFE_STOP_CHECK_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        res = _get_command_result(command_id, instance_id)
+        status = res.get("Status", "Pending")
+        if status == "Success":
+            lines = [ln.strip() for ln in res.get("StandardOutputContent", "").splitlines() if ln.strip()]
+            return lines
+        if status in ("Failed", "Cancelled", "TimedOut"):
+            _log_event("SAFE_STOP_CHECK_SSM_FAILED", instance_id=instance_id, ssm_status=status)
+            return None
+        time.sleep(SAFE_STOP_CHECK_INTERVAL_SECONDS)
+
+    _log_event("SAFE_STOP_CHECK_TIMED_OUT", instance_id=instance_id)
+    return None
+
+
+def _safe_stop_blocked(instance_id: str, os_name: str, event: dict) -> dict | None:
+    """None -> safe to stop/reboot. dict -> a blocked _error response.
+    Bypassed entirely by force:true (operator override for a stuck box)."""
+    if event.get("force") is True:
+        _log_event("EC2_STOP_FORCE_OVERRIDE", instance_id=instance_id)
+        return None
+
+    procs = _running_trading_processes(instance_id, os_name)
+    if procs is None:
+        return _error(
+            "safe-stop check could not be completed (SSM unreachable / agent offline); "
+            "not stopping the instance. Run the safe-shutdown first, or pass force:true.",
+            server_id=instance_id, safe_stop="unverified",
+        )
+    if procs:
+        _log_event("EC2_STOP_BLOCKED_ALGOS_ACTIVE", instance_id=instance_id, count=len(procs))
+        return _error(
+            f"{len(procs)} trading process(es) still alive on {instance_id}; "
+            "safe-shutdown protocol not confirmed complete. Stop the algos "
+            "(stop_all_algos / stop_algo) first, or pass force:true to override.",
+            server_id=instance_id, safe_stop="blocked", running=procs,
+        )
+    return None
+
+
 def _action_start_ec2(instance_id: str, event: dict) -> dict:
     try:
-        current = ec2_client.describe_instances(InstanceIds=[instance_id])
-        state = current["Reservations"][0]["Instances"][0]["State"]["Name"]
+        state = _instance_state(instance_id)
     except (ClientError, IndexError, KeyError) as exc:
         return _error(f"could not describe instance: {exc}", server_id=instance_id)
 
@@ -315,16 +396,20 @@ def _action_start_ec2(instance_id: str, event: dict) -> dict:
     return {"success": True, "server_id": instance_id, "status": "STARTING"}
 
 
-def _action_stop_ec2(instance_id: str, event: dict) -> dict:
+def _action_stop_ec2(instance_id: str, event: dict, os_name: str = "linux") -> dict:
     try:
-        current = ec2_client.describe_instances(InstanceIds=[instance_id])
-        state = current["Reservations"][0]["Instances"][0]["State"]["Name"]
+        state = _instance_state(instance_id)
     except (ClientError, IndexError, KeyError) as exc:
         return _error(f"could not describe instance: {exc}", server_id=instance_id)
 
     if state in ("stopped", "stopping"):
         _log_event("EC2_ALREADY_STOPPED", instance_id=instance_id, state=state)
         return {"success": True, "server_id": instance_id, "status": state.upper()}
+
+    if state == "running":
+        blocked = _safe_stop_blocked(instance_id, os_name, event)
+        if blocked is not None:
+            return blocked
 
     try:
         ec2_client.stop_instances(InstanceIds=[instance_id])
@@ -333,6 +418,37 @@ def _action_stop_ec2(instance_id: str, event: dict) -> dict:
 
     _log_event("EC2_STOP_REQUESTED", instance_id=instance_id)
     return {"success": True, "server_id": instance_id, "status": "STOPPING"}
+
+
+def _action_restart_ec2(instance_id: str, event: dict, os_name: str = "linux") -> dict:
+    """A stopped instance is started; a running one is rebooted (same
+    safe-stop guard as stop_ec2). 'pending'/'stopping' are transient --
+    tell the caller to retry."""
+    try:
+        state = _instance_state(instance_id)
+    except (ClientError, IndexError, KeyError) as exc:
+        return _error(f"could not describe instance: {exc}", server_id=instance_id)
+
+    if state in ("stopped",):
+        try:
+            ec2_client.start_instances(InstanceIds=[instance_id])
+        except (ClientError, BotoCoreError) as exc:
+            return _error(f"start_instances failed: {exc}", server_id=instance_id)
+        _log_event("EC2_RESTART_AS_START", instance_id=instance_id)
+        return {"success": True, "server_id": instance_id, "status": "STARTING"}
+
+    if state == "running":
+        blocked = _safe_stop_blocked(instance_id, os_name, event)
+        if blocked is not None:
+            return blocked
+        try:
+            ec2_client.reboot_instances(InstanceIds=[instance_id])
+        except (ClientError, BotoCoreError) as exc:
+            return _error(f"reboot_instances failed: {exc}", server_id=instance_id)
+        _log_event("EC2_REBOOT_REQUESTED", instance_id=instance_id)
+        return {"success": True, "server_id": instance_id, "status": "REBOOTING"}
+
+    return _error(f"instance is '{state}' -- retry restart_ec2 once it settles", server_id=instance_id, status=state.upper())
 
 
 def _action_algo_command(action: str, instance_id: str, repo_path: str, os_name: str, event: dict) -> dict:
@@ -880,7 +996,9 @@ def lambda_handler(event: dict, context: Any) -> dict:
     if action == "start_ec2":
         result = _action_start_ec2(instance_id, event)
     elif action == "stop_ec2":
-        result = _action_stop_ec2(instance_id, event)
+        result = _action_stop_ec2(instance_id, event, os_name)
+    elif action == "restart_ec2":
+        result = _action_restart_ec2(instance_id, event, os_name)
     elif action == "check_ec2_health":
         result = _action_check_ec2_health(instance_id, event)
     elif action in ALGO_ACTIONS:
