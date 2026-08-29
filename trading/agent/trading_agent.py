@@ -134,8 +134,15 @@ def _start_lock(algo_name: str):
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = DATA_DIR / f"{algo_name}.start.lock"
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    # 0o666 so the box's crash-recovery watchdog (runs as root, but so can a
+    # differently-privileged caller) can also flock(2) this same file to see
+    # whether a START/RESTART is mid-flight. Widen an existing file too.
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o666)
     try:
+        try:
+            os.fchmod(fd, 0o666)
+        except OSError:
+            pass
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
@@ -291,8 +298,15 @@ def stop_algo(algo_name: str, timeout: float = STOP_GRACE_TIMEOUT_SECONDS) -> di
 
 
 def restart_algo(algo_name: str) -> dict:
-    stop_result = stop_algo(algo_name)
-    start_result = start_algo(algo_name)
+    _algo_main_path(algo_name)  # raises AlgoNotFoundError if missing
+    # Hold the start-lock across BOTH stop and start. The stop->start gap is
+    # the window the crash-recovery watchdog would otherwise mistake for a
+    # crash and "recover" -- spawning a second process. With the lock held
+    # for the whole transition, the watchdog's non-blocking flock fails and
+    # it skips every tick until RESTART completes.
+    with _start_lock(algo_name):
+        stop_result = stop_algo(algo_name)
+        start_result = _start_algo_locked(algo_name)
     return {
         "algo": algo_name,
         "stop": stop_result,

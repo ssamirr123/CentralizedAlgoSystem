@@ -2,22 +2,41 @@
 # /usr/local/bin/centralized-algo-strategy-watchdog  <algo_name>
 #
 # Crash-recovery for an agent-managed strategy. Runs from a systemd timer
-# (~20s). Restarts the algo only when:
-#   * the per-strategy unit is "active" (operator intends it running --
-#     `systemctl stop` clears this), AND
+# (~20s). Restarts the algo only when ALL of the following hold:
+#
+#   * the per-strategy unit is "active" -- the operator intends it running;
+#     `systemctl stop` clears this and we back off.
+#   * no START/RESTART is mid-flight -- trading_agent.py holds an exclusive
+#     flock(2) on <data>/<algo>.start.lock for the whole stop->start
+#     transition of a RESTART_ALGO. If we can't take that lock
+#     non-blocking, a restart is in progress: skip the tick entirely and
+#     DON'T count it as a miss.
 #   * `trading_agent.py STATUS` has been NOT RUNNING for >=2 consecutive
-#     checks (~>=20-40s). The two-strike rule keeps the watchdog from
-#     firing during a normal STOP->START gap of a RESTART_ALGO (which
-#     completes in a few seconds), while still recovering a real crash
-#     within ~40s. Respects a deliberate `systemctl stop`.
+#     checks (~>=20-40s) -- a second line of defence so a brief blip never
+#     triggers a restart.
 set -eu
 ALGO="$1"
 UNIT="centralized-algo-strategy@${ALGO}.service"
 MISS="/run/cas-watchdog-${ALGO}.misses"
+LOCK="/trading-app/trading/data/${ALGO}.start.lock"
 
 if ! systemctl is-active --quiet "$UNIT"; then
   rm -f "$MISS"
   exit 0
+fi
+
+# If a START/RESTART is holding the transition lock, stand down for this
+# tick without accumulating a miss. Probe the lock non-blocking, then
+# release it immediately -- we must NOT still hold it if we go on to call
+# START_ALGO below, since trading_agent.py takes the very same lock.
+if [ -e "$LOCK" ] && command -v flock >/dev/null 2>&1; then
+  { exec 9>>"$LOCK"; } 2>/dev/null || { exec 9<"$LOCK"; } 2>/dev/null || true
+  if ! flock -n 9 2>/dev/null; then
+    logger -t cas-watchdog "start/restart of $ALGO in progress -> skip tick"
+    exit 0
+  fi
+  flock -u 9 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
 fi
 
 S="$(/usr/local/bin/centralized-algo-agent STATUS "$ALGO" 2>/dev/null \
