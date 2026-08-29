@@ -46,13 +46,12 @@ from trading.database.connection import Base  # noqa: E402
 
 API_KEY = os.environ["CONTROL_API_KEY"]
 
-# The Telegram alert service logs a WARNING (with emoji) for every alert
-# when creds are unset; on a cp1252 Windows console that raises inside
-# logging and floods test output. Silence it here -- the real logging
-# cleanup is a later stage; alert *behaviour* is still asserted via mocks.
-import logging as _logging  # noqa: E402
+# Exercise the canonical logging path: one structured JSON stdout handler
+# on root (Stage 10). ensure_ascii escapes the alert-service emoji, so the
+# old cp1252 UnicodeEncodeError can no longer happen mid-test.
+from trading.common.logger import configure_logging  # noqa: E402
 
-_logging.getLogger("alerts.telegram").setLevel(_logging.ERROR)
+configure_logging()
 
 
 # --------------------------------------------------------------------------

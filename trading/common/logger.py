@@ -1,22 +1,29 @@
 """
-Structured JSON logging for trading processes.
+Canonical structured logging for the whole project.
 
-Every log line is a single JSON object with a consistent shape:
+Two entry points:
 
-    {
-      "timestamp": "...",
-      "level": "INFO",
-      "component": "example_strategy",
-      "event": "ENTRY",
-      "server": "ec2-1",
-      "algo": "example_strategy",
-      "details": {...}
-    }
+* ``configure_logging()`` -- call ONCE at process start (the app factory
+  does this). Installs exactly one structured stdout handler on the root
+  logger, so every ``logging.getLogger(...)`` in the codebase -- including
+  ``alerts.telegram`` -- emits consistent JSON without configuring itself.
+  stdout only: safe on a read-only filesystem, container/CloudWatch
+  friendly. Idempotent; removes any prior ``logging.basicConfig`` handler
+  so there are no duplicate lines.
 
-Logs go to both stdout (for CloudWatch/journald capture) and a rotating
-file under trading/logs/. Use `log_event(logger, level, event, **details)`
-for structured events; plain logger.info(...) still works for free-text
-messages during development.
+* ``get_logger(component, ...)`` + ``log_event(logger, level, event, **d)``
+  -- the per-component structured logger used by the strategy runtime.
+  Adds a rotating file under ``trading/logs/`` when the FS is writable and
+  falls back to stdout-only when it is not.
+
+Every log line is a single JSON object. The per-component shape:
+
+    {"timestamp","level","component","server","algo","message",
+     "event"?, "details"?, "exc_info"?}
+
+The root shape (anything not going through get_logger):
+
+    {"timestamp","level","logger","message", "event"?, "details"?, "exc_info"?}
 """
 from __future__ import annotations
 
@@ -24,11 +31,15 @@ import json
 import logging
 import logging.handlers
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
+
+_ROOT_HANDLER_NAME = "cas-root"
+_root_configured = False
 
 
 class JsonFormatter(logging.Formatter):
@@ -56,6 +67,65 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload, default=str)
+
+
+class RootJsonFormatter(logging.Formatter):
+    """JSON formatter for the root handler -- anything not emitted through
+    get_logger(). ensure_ascii keeps emoji as \\uXXXX escapes, so a
+    cp1252 Windows console can never raise UnicodeEncodeError mid-log."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        event = getattr(record, "event", None)
+        if event:
+            payload["event"] = event
+        details = getattr(record, "details", None)
+        if details:
+            payload["details"] = details
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
+
+
+def configure_logging(*, level: str | None = None, force: bool = False) -> logging.Logger:
+    """Install one structured stdout handler on the root logger. Idempotent.
+
+    * stdout only -- never touches the filesystem, so it works identically
+      whether the FS is writable or read-only.
+    * Removes plain logging.basicConfig() StreamHandlers so there are no
+      duplicate lines; leaves handlers installed by other frameworks
+      (e.g. pytest's log capture) untouched.
+    * Safe to call before or after Telegram is (not) configured -- it only
+      sets up transport, never sends anything.
+    """
+    global _root_configured
+    root = logging.getLogger()
+
+    if _root_configured and not force:
+        return root
+
+    resolved = (level or os.environ.get("LOG_LEVEL", "INFO")).upper()
+    root.setLevel(resolved)
+
+    for handler in list(root.handlers):
+        # our own previous handler, or a bare basicConfig StreamHandler
+        # (exact type -- NOT FileHandler or framework subclasses)
+        if getattr(handler, "name", "") == _ROOT_HANDLER_NAME or type(handler) is logging.StreamHandler:
+            root.removeHandler(handler)
+            handler.close()
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.set_name(_ROOT_HANDLER_NAME)
+    stream_handler.setFormatter(RootJsonFormatter())
+    root.addHandler(stream_handler)
+
+    _root_configured = True
+    return root
 
 
 def get_logger(component: str, server: str = "local-dev", algo: str | None = None) -> logging.Logger:

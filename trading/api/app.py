@@ -16,15 +16,21 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from trading.api.health import router as health_router
-from trading.api.legacy import router as legacy_router
-from trading.api.routes import router as control_center_router
-from trading.api.watcher import stale_heartbeat_watcher
-from trading.core.config import load_settings
-from trading.database.connection import init_db
+# Configure the root logger before importing the sub-modules below -- some
+# of them (via alerts.telegram) log at import time, and we want those
+# lines to go through the canonical JSON handler too.
+from trading.common.logger import configure_logging
+
+configure_logging()
+
+from trading.api.health import router as health_router  # noqa: E402
+from trading.api.legacy import router as legacy_router  # noqa: E402
+from trading.api.routes import router as control_center_router  # noqa: E402
+from trading.api.watcher import stale_heartbeat_watcher  # noqa: E402
+from trading.core.config import load_settings  # noqa: E402
+from trading.database.connection import init_db  # noqa: E402
 
 logger = logging.getLogger("strategy_monitor")
-logging.basicConfig(level=logging.INFO)
 
 
 def _watcher_disabled() -> bool:
