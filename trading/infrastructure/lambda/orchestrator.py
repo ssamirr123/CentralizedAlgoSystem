@@ -181,7 +181,18 @@ def _build_algo_shell_command(
             f'export STRATEGY_NAME="{algo_name}" SERVER_NAME="{server_name}" '
             f'API_BASE_URL="{api_base_url}" CONTROL_API_KEY="{control_api_key}";'
         )
-    parts += [f'cd "{repo_path}";', "venv/bin/python3 trading/agent/trading_agent.py", agent_command, algo_name]
+    # Run the agent as ec2-user, exactly as the box's systemd unit and
+    # crash-recovery watchdog do. SSM RunCommand executes as root; without
+    # this drop the Lambda path would launch the strategy as root, and then
+    # an unprivileged `STATUS` check (watchdog) can't signal it to test
+    # liveness -> healthy process misread as crashed -> duplicate spawn.
+    # `-E` keeps the STRATEGY_NAME/SERVER_NAME/... exports above; sudo
+    # leaves the working directory (repo_path) untouched.
+    parts += [
+        f'cd "{repo_path}";',
+        "sudo -u ec2-user -E venv/bin/python3 trading/agent/trading_agent.py",
+        agent_command, algo_name,
+    ]
     if agent_command == "LOGS" and lines is not None:
         parts.append(f"--lines {lines}")
     return " ".join(parts)
