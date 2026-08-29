@@ -1,0 +1,9 @@
+# /etc/systemd/system/centralized-algo-strategy-watchdog@.service
+# Oneshot invoked by the paired .timer. See centralized-algo-strategy-watchdog.
+
+[Unit]
+Description=Centralized Algo - strategy %i watchdog
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/centralized-algo-strategy-watchdog %i

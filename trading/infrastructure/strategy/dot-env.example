@@ -1,0 +1,28 @@
+# Strategy EC2 runtime env -> deploy to <repo>/trading/.env on the box,
+# chmod 600, owned by the run user (ec2-user). Never commit a real one.
+#
+# The trading_agent.py launcher (centralized-algo-agent) sources this
+# before START_ALGO, so main.py's load_config() sees it, and Popen passes
+# it into the detached strategy process.
+
+# --- SAFETY: paper only. main.py refuses live orders unless TRADING_MODE
+#     is exactly "live"; the real broker adapters double-check before any
+#     SDK call. Leave both as below. ---
+TRADING_MODE=paper
+BROKER=paper
+
+# --- identity / control-centre wiring ---
+STRATEGY_NAME=example_strategy
+SERVER_NAME=strategy-01
+API_BASE_URL=http://<backend-ec2-ip-or-host>
+CONTROL_API_KEY=<same key as the backend's CONTROL_API_KEY>
+
+# --- heartbeat cadence ---
+HEARTBEAT_INTERVAL_SECONDS=30
+CONTROL_HEARTBEAT_INTERVAL_SECONDS=10
+LOG_LEVEL=INFO
+
+# --- example_strategy params (defaults are fine for a paper smoke test) ---
+STRATEGY_SYMBOL=NIFTY
+STRATEGY_QUANTITY=1
+STRATEGY_LOOP_INTERVAL_SECONDS=2

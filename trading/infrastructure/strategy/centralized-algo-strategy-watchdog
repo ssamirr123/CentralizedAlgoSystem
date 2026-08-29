@@ -1,0 +1,22 @@
+#!/bin/sh
+# /usr/local/bin/centralized-algo-strategy-watchdog  <algo_name>
+#
+# Crash-recovery for an agent-managed strategy. Runs from a systemd timer
+# every ~20s. If the per-strategy unit is "active" (i.e. the operator
+# intends the strategy to be running -- `systemctl stop` clears this) but
+# `trading_agent.py STATUS` is not RUNNING (ERROR = crashed, or an
+# unexpected STOPPED), it re-issues START_ALGO. Respects a deliberate
+# `systemctl stop`, so it never fights an intentional shutdown.
+set -eu
+ALGO="$1"
+UNIT="centralized-algo-strategy@${ALGO}.service"
+
+systemctl is-active --quiet "$UNIT" || exit 0
+
+S="$(/usr/local/bin/centralized-algo-agent STATUS "$ALGO" 2>/dev/null \
+      | grep -o '"status": *"[^"]*"' | head -1 | sed 's/.*"\([A-Z]*\)"$/\1/')"
+
+if [ "$S" != "RUNNING" ]; then
+  logger -t cas-watchdog "strategy $ALGO status=${S:-unknown} while unit active -> START_ALGO"
+  /usr/local/bin/centralized-algo-agent START_ALGO "$ALGO" || true
+fi
