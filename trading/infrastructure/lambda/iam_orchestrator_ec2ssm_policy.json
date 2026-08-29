@@ -1,0 +1,48 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EC2PowerExplicitInstances",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:RebootInstances"
+      ],
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:471112713822:instance/i-0f344752a1ca2811b",
+        "arn:aws:ec2:ap-south-1:471112713822:instance/i-0b0c8bb83adeb716b"
+      ]
+    },
+    {
+      "Sid": "EC2DescribeState",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SSMSendCommandExplicitInstances",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:471112713822:instance/i-0f344752a1ca2811b",
+        "arn:aws:ec2:ap-south-1:471112713822:instance/i-0b0c8bb83adeb716b",
+        "arn:aws:ssm:ap-south-1::document/AWS-RunShellScript"
+      ]
+    },
+    {
+      "Sid": "SSMReadResults",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations",
+        "ssm:ListCommands",
+        "ssm:DescribeInstanceInformation"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
