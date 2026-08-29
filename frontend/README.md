@@ -1,0 +1,77 @@
+# Trading Control Center — Frontend
+
+New React + TypeScript UI for the Centralized Algo System. Talks to the
+**existing** FastAPI `/api/*` backend — no backend contract changes.
+
+The Streamlit dashboard (`dashboard/streamlit_app.py`) is untouched and
+still runs; this app is additive.
+
+## Stack
+
+- React 18 + TypeScript, Vite
+- React Router (12 screens + login)
+- TanStack Query (polling / cache)
+- Plain CSS (`src/index.css`), no component library
+
+## Screens
+
+Login · Dashboard · Servers · Strategies · Algo Status · Heartbeats · P&L ·
+Positions · Trades · Commands · Logs · Risk · System Health
+
+## Paper vs Live
+
+- A build targets one mode via `VITE_TRADING_MODE` (`paper` | `live`).
+  Anything that is not exactly `live` is treated as **paper** (fail safe).
+- The mode is shown **at all times**: a coloured stripe + pill in the top
+  bar, on the login card, and restated inside every command-confirmation
+  dialog.
+- **No live order execution is implemented.** The Commands screen only
+  issues process-control actions (start / stop / restart / update) against
+  the backend; it never places or cancels orders. `LIVE_EXECUTION_ENABLED`
+  in `src/lib/config.ts` is hard-wired `false`.
+
+## Auth
+
+Shared-key auth, matching the backend (`X-API-Key`). The Login screen takes
+the key, verifies it against `GET /api/algos`, then stores it in
+`localStorage`. "Sign out" clears it.
+
+## Local development
+
+```sh
+cd frontend
+npm install
+cp .env.example .env.local     # then edit VITE_API_PROXY_TARGET / VITE_TRADING_MODE
+npm run dev                     # http://localhost:5173
+```
+
+`npm run dev` proxies `/api`, `/strategies`, `/health` to
+`VITE_API_PROXY_TARGET` (default `http://13.206.203.145`) so the browser
+makes same-origin requests — the backend needs no CORS changes.
+
+## Build
+
+```sh
+npm run build      # tsc --noEmit && vite build  ->  dist/
+npm run preview    # serve dist/ on http://localhost:4173
+```
+
+## Production hosting (later milestone)
+
+Serve `dist/` as static files behind the same nginx that fronts the API
+(`trading/infrastructure/backend/nginx/`), so `/api/*` stays same-origin.
+Set `VITE_API_BASE_URL` only if the UI is hosted somewhere the API is not
+reachable same-origin (and then the backend must send CORS headers for
+that origin).
+
+## Layout
+
+```
+src/
+  api/         client (fetch + X-API-Key), endpoints, types, react-query hooks
+  auth/        authStore (localStorage) + AuthContext
+  components/  Layout, StatusBadge, TradingModeBadge, ConfirmDialog, AlgoPicker, States
+  lib/         config (env), format (IST dates, ₹, staleness)
+  pages/       one file per screen
+  routes.tsx   nav + route table
+```
