@@ -2,21 +2,37 @@
 # /usr/local/bin/centralized-algo-strategy-watchdog  <algo_name>
 #
 # Crash-recovery for an agent-managed strategy. Runs from a systemd timer
-# every ~20s. If the per-strategy unit is "active" (i.e. the operator
-# intends the strategy to be running -- `systemctl stop` clears this) but
-# `trading_agent.py STATUS` is not RUNNING (ERROR = crashed, or an
-# unexpected STOPPED), it re-issues START_ALGO. Respects a deliberate
-# `systemctl stop`, so it never fights an intentional shutdown.
+# (~20s). Restarts the algo only when:
+#   * the per-strategy unit is "active" (operator intends it running --
+#     `systemctl stop` clears this), AND
+#   * `trading_agent.py STATUS` has been NOT RUNNING for >=2 consecutive
+#     checks (~>=20-40s). The two-strike rule keeps the watchdog from
+#     firing during a normal STOP->START gap of a RESTART_ALGO (which
+#     completes in a few seconds), while still recovering a real crash
+#     within ~40s. Respects a deliberate `systemctl stop`.
 set -eu
 ALGO="$1"
 UNIT="centralized-algo-strategy@${ALGO}.service"
+MISS="/run/cas-watchdog-${ALGO}.misses"
 
-systemctl is-active --quiet "$UNIT" || exit 0
+if ! systemctl is-active --quiet "$UNIT"; then
+  rm -f "$MISS"
+  exit 0
+fi
 
 S="$(/usr/local/bin/centralized-algo-agent STATUS "$ALGO" 2>/dev/null \
       | grep -o '"status": *"[^"]*"' | head -1 | sed 's/.*"\([A-Z]*\)"$/\1/')"
 
-if [ "$S" != "RUNNING" ]; then
-  logger -t cas-watchdog "strategy $ALGO status=${S:-unknown} while unit active -> START_ALGO"
+if [ "$S" = "RUNNING" ]; then
+  rm -f "$MISS"
+  exit 0
+fi
+
+misses="$(( $(cat "$MISS" 2>/dev/null || echo 0) + 1 ))"
+printf '%s\n' "$misses" > "$MISS"
+
+if [ "$misses" -ge 2 ]; then
+  logger -t cas-watchdog "strategy $ALGO status=${S:-unknown} x${misses} while unit active -> START_ALGO"
   /usr/local/bin/centralized-algo-agent START_ALGO "$ALGO" || true
+  rm -f "$MISS"
 fi
