@@ -1,0 +1,61 @@
+# Local development stack: FastAPI backend + PostgreSQL.
+#
+#   cp .env.example .env      # then edit .env
+#   docker compose up --build
+#
+# The backend waits for Postgres to be healthy, runs `alembic upgrade head`,
+# then serves on http://localhost:8000 (/docs, /api/health, /api/algos).
+#
+# docker compose automatically reads .env in this directory for the
+# ${VAR} substitutions below. No secret is stored in this file or the
+# Dockerfile -- only non-sensitive defaults for a throwaway local stack.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-algo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-algo}
+      POSTGRES_DB: ${POSTGRES_DB:-centralized_algo}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-algo} -d ${POSTGRES_DB:-centralized_algo}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # Not published to the host by default. Uncomment to inspect with psql:
+    # ports:
+    #   - "5432:5432"
+
+  backend:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # PostgreSQL is the database for the Docker stack -- never SQLite.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://algo:algo@postgres:5432/centralized_algo}
+      # Fails closed if unset in the app; a local-only default keeps
+      # `docker compose up` frictionless. Override in .env for anything real.
+      CONTROL_API_KEY: ${CONTROL_API_KEY:-dev-control-key}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      APP_ENV: ${APP_ENV:-docker}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DISABLE_BACKGROUND_WATCHER: ${DISABLE_BACKGROUND_WATCHER:-}
+      # Optional integrations -- set in .env when needed:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AWS_REGION: ${AWS_REGION:-}
+      LAMBDA_FUNCTION_NAME: ${LAMBDA_FUNCTION_NAME:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  pgdata:
