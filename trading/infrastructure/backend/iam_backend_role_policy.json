@@ -1,0 +1,72 @@
+{
+  "//": "Least-privilege permissions for the Backend-EC2 instance role. Stage 13 = deploy the FastAPI backend only. PostgreSQL runs on the same box (a container); the backend needs NO database IAM grant. It needs NO broker credentials (Milestone 9 / Secrets Manager is later). It needs NO lambda:InvokeFunction until strategy control is exercised (add the optional stanza below only when you start Milestone 5+). What it DOES need: SSM (so you can manage the box without SSH and Milestone 3+ tooling works) and CloudWatch (host metrics + logs + the /api/health canary).",
+  "//attach": "Prefer attaching the two AWS managed policies AmazonSSMManagedInstanceCore and CloudWatchAgentServerPolicy to the role instead of pasting this file -- they cover the same ground and AWS keeps them current. This JSON is the explicit equivalent if you want an inline policy you can read and scope.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SSMManagedInstanceCore",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:UpdateInstanceInformation",
+        "ssm:ListAssociations",
+        "ssm:ListInstanceAssociations",
+        "ssm:DescribeAssociation",
+        "ssm:GetDeployablePatchSnapshotForInstance",
+        "ssm:GetDocument",
+        "ssm:DescribeDocument",
+        "ssm:GetManifest",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:PutInventory",
+        "ssm:PutComplianceItems",
+        "ssm:PutConfigurePackageResult",
+        "ssm:UpdateAssociationStatus",
+        "ssm:UpdateInstanceAssociationStatus",
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel",
+        "ec2messages:AcknowledgeMessage",
+        "ec2messages:DeleteMessage",
+        "ec2messages:FailMessage",
+        "ec2messages:GetEndpoint",
+        "ec2messages:GetMessages",
+        "ec2messages:SendReply"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchAgent",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricData",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeTags",
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchAgentSsmConfig",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter"],
+      "Resource": "arn:aws:ssm:ap-south-1:471112713822:parameter/AmazonCloudWatch-*"
+    }
+  ],
+  "//optional-lambda-invoke": {
+    "note": "Add this as a SECOND inline policy named CentralizedAlgoBackendLambdaInvoke ONLY when the backend starts issuing algo start/stop (Milestone 5+). Scope it to the orchestrator function ARN.",
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "InvokeOrchestrator",
+        "Effect": "Allow",
+        "Action": "lambda:InvokeFunction",
+        "Resource": "arn:aws:lambda:ap-south-1:471112713822:function:TradingOrchestrator"
+      }
+    ]
+  }
+}
