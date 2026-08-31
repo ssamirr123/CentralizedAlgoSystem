@@ -92,6 +92,42 @@ class Settings:
         default_factory=lambda: _env_int("RATE_LIMIT_WINDOW_SECONDS", 60)
     )
 
+    # --- Stage 18: human authentication (username/password -> JWT) ------
+    # HS256 signing secret for access tokens. MUST be set (>= 32 chars) in
+    # any non-development environment -- deps.py fails closed if it is
+    # missing while APP_ENV != development.
+    auth_secret_key: str = field(default_factory=lambda: _env("AUTH_SECRET_KEY"))
+    auth_access_ttl_minutes: int = field(
+        default_factory=lambda: _env_int("AUTH_ACCESS_TTL_MINUTES", 15)
+    )
+    auth_refresh_ttl_days: int = field(
+        default_factory=lambda: _env_int("AUTH_REFRESH_TTL_DAYS", 7)
+    )
+    # Secure + SameSite=Strict refresh/CSRF cookies. Default true; set
+    # AUTH_COOKIE_SECURE=false only for plain-http local dev.
+    auth_cookie_secure: bool = field(
+        default_factory=lambda: _env("AUTH_COOKIE_SECURE", "true").lower() not in ("0", "false", "no")
+    )
+    auth_cookie_domain: str = field(default_factory=lambda: _env("AUTH_COOKIE_DOMAIN"))
+    # Comma-separated exact origins allowed to call the API with
+    # credentials (CORS). Empty => same-origin only (no CORS headers).
+    auth_allowed_origins: str = field(default_factory=lambda: _env("AUTH_ALLOWED_ORIGINS"))
+    # Failed-login lockout: N attempts per window per (username+ip).
+    auth_login_max_attempts: int = field(
+        default_factory=lambda: _env_int("AUTH_LOGIN_MAX_ATTEMPTS", 5)
+    )
+    auth_login_window_seconds: int = field(
+        default_factory=lambda: _env_int("AUTH_LOGIN_WINDOW_SECONDS", 300)
+    )
+    # One-time admin bootstrap: if BOTH are set and the users table is
+    # empty at startup, a single admin user is created and logged.
+    auth_bootstrap_admin_username: str = field(
+        default_factory=lambda: _env("AUTH_BOOTSTRAP_ADMIN_USERNAME")
+    )
+    auth_bootstrap_admin_password: str = field(
+        default_factory=lambda: _env("AUTH_BOOTSTRAP_ADMIN_PASSWORD")
+    )
+
     # --- Stale-heartbeat watcher --------------------------------
     stale_threshold_minutes: float = field(
         default_factory=lambda: _env_float("STALE_THRESHOLD_MINUTES", 2.0)

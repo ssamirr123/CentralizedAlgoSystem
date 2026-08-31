@@ -7,14 +7,15 @@ import { PageHeader } from "@/components/PageHeader";
 import { AlgoPicker, type AlgoRef } from "@/components/AlgoPicker";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StatusBadge } from "@/components/StatusBadge";
-import { IS_LIVE, LIVE_EXECUTION_ENABLED, TRADING_MODE } from "@/lib/config";
+import { IS_LIVE, LIVE_EXECUTION_ENABLED, TRADING_MODE, type Permission } from "@/lib/config";
 import { formatIST } from "@/lib/format";
+import { useAuth } from "@/auth/AuthContext";
 
-const ACTIONS: { action: AlgoAction; label: string; danger?: boolean }[] = [
-  { action: "start", label: "Start" },
-  { action: "stop", label: "Stop", danger: true },
-  { action: "restart", label: "Restart", danger: true },
-  { action: "update", label: "Update code" },
+const ACTIONS: { action: AlgoAction; label: string; danger?: boolean; permission: Permission }[] = [
+  { action: "start", label: "Start", permission: "START" },
+  { action: "stop", label: "Stop", danger: true, permission: "STOP" },
+  { action: "restart", label: "Restart", danger: true, permission: "RESTART" },
+  { action: "update", label: "Update code", permission: "TRADING_CONTROL" },
 ];
 
 interface LogRow {
@@ -31,6 +32,8 @@ interface LogRow {
 const TERMINAL = new Set(["RUNNING", "STOPPED", "ERROR", "FAILED", "SUCCESS", "UNKNOWN", "UPDATED"]);
 
 export function CommandsPage() {
+  const { hasPermission, hasAny } = useAuth();
+  const canControlAnything = hasAny(["START", "STOP", "RESTART", "TRADING_CONTROL"]);
   const [ref, setRef] = useState<AlgoRef | null>(null);
   const [pending, setPending] = useState<AlgoAction | null>(null);
   const [rows, setRows] = useState<LogRow[]>([]);
@@ -138,17 +141,26 @@ export function CommandsPage() {
           <AlgoPicker value={ref} onChange={setRef} />
         </div>
         <div className="row-actions" style={{ flexWrap: "wrap" }}>
-          {ACTIONS.map((a) => (
-            <button
-              key={a.action}
-              className={a.danger ? "danger" : "primary"}
-              disabled={!ref || mutation.isPending}
-              onClick={() => setPending(a.action)}
-            >
-              {a.label}
-            </button>
-          ))}
+          {ACTIONS.map((a) => {
+            const allowed = hasPermission(a.permission);
+            return (
+              <button
+                key={a.action}
+                className={a.danger ? "danger" : "primary"}
+                disabled={!ref || mutation.isPending || !allowed}
+                title={allowed ? undefined : `Requires the ${a.permission} permission`}
+                onClick={() => setPending(a.action)}
+              >
+                {a.label}
+              </button>
+            );
+          })}
         </div>
+        {!canControlAnything && (
+          <div className="inline-note warn" style={{ marginTop: 10 }}>
+            Your role has no process-control permissions — these actions are read-only for you.
+          </div>
+        )}
       </div>
 
       <div className="card">

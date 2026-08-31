@@ -62,7 +62,7 @@ def test_start_algo_happy_path_linux_command(orch):
     }
     sent = orch.ssm_client.send_command.call_args.kwargs["Parameters"]["commands"][0]
     assert sent == (
-        'cd "C:\\trading-app"; venv/bin/python3 trading/agent/trading_agent.py '
+        'cd "C:\\trading-app"; sudo -u ec2-user -E venv/bin/python3 trading/agent/trading_agent.py '
         'START_ALGO example_strategy'
     )
 

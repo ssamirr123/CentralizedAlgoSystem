@@ -65,7 +65,9 @@ def test_start_algo_happy_path(client, auth, env, db_session):
     row = db_session.query(models.Command).filter(models.Command.id == command_id).one()
     assert row.job_id == "cmd-abc"
     assert row.status == "STARTING"
-    assert row.requested_by == "test-user"
+    # Stage 18: requested_by is the authenticated identity, not the
+    # client-supplied label -- so the audit trail can't be spoofed.
+    assert row.requested_by == "operator"
 
 
 def test_start_algo_lambda_failure_is_200_failed(client, auth, env):

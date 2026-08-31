@@ -8,6 +8,10 @@ httpx>=0.27.0
 psycopg2-binary>=2.9.0
 boto3>=1.34.0
 
+# Auth / security (Stage 18)
+bcrypt>=4.1.0
+PyJWT>=2.9.0
+
 # Dashboard (Streamlit Cloud)
 streamlit>=1.37.0
 pandas>=2.2.2

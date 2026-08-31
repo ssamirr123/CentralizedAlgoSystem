@@ -27,3 +27,14 @@ export const STALE_MS = STALE_MINUTES * 60 * 1000;
 
 /** Default polling cadence for live views, ms. */
 export const POLL_INTERVAL_MS = 15000;
+
+/** Backend RBAC permissions (mirror trading/api/security/permissions.py). */
+export const PERMISSIONS = [
+  "VIEW",
+  "START",
+  "STOP",
+  "RESTART",
+  "TRADING_CONTROL",
+  "ADMIN",
+] as const;
+export type Permission = (typeof PERMISSIONS)[number];

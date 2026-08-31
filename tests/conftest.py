@@ -29,6 +29,11 @@ os.environ["CONTROL_API_KEY"] = "test-key"
 os.environ["DISABLE_BACKGROUND_WATCHER"] = "true"
 os.environ["TRADING_MODE"] = "paper"
 os.environ["BROKER"] = "paper"
+# Stage 18 auth: fixed test signing secret; plain-http test client.
+os.environ["AUTH_SECRET_KEY"] = "test-secret-" + "a" * 40
+os.environ["AUTH_COOKIE_SECURE"] = "false"
+os.environ.pop("AUTH_BOOTSTRAP_ADMIN_USERNAME", None)
+os.environ.pop("AUTH_BOOTSTRAP_ADMIN_PASSWORD", None)
 # Make sure nothing can reach a real external service.
 for _var in (
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",

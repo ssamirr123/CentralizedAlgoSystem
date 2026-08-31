@@ -17,13 +17,23 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
-from trading.api.deps import enforce_rate_limit, get_db, require_api_key
+from trading.api.deps import (
+    Principal,
+    client_ip,
+    enforce_rate_limit,
+    get_db,
+    get_principal,
+    require_ingest,
+    require_permission,
+)
+from trading.api.security import audit
+from trading.api.security.permissions import Permission
 from trading.api.lambda_client import LambdaInvokeError, invoke_orchestrator, invoke_orchestrator_async
 from trading.api.schemas import (
     AlgoActionRequest,
@@ -53,7 +63,10 @@ from trading.api.schemas import (
 )
 from trading.database import models
 
-router = APIRouter(dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)])
+# Every route authenticates (Bearer user OR X-API-Key service) and is
+# rate-limited per identity. Individual routes add
+# Depends(require_permission(...)) for the capability they need.
+router = APIRouter(dependencies=[Depends(get_principal), Depends(enforce_rate_limit)])
 logger = logging.getLogger("trading.api")
 
 _ACTION_TO_AGENT_COMMAND = {
@@ -61,6 +74,20 @@ _ACTION_TO_AGENT_COMMAND = {
     "stop": "STOP_ALGO",
     "restart": "RESTART_ALGO",
     "update": "UPDATE",
+}
+
+_ACTION_PERMISSION = {
+    "start": Permission.START,
+    "stop": Permission.STOP,
+    "restart": Permission.RESTART,
+    "update": Permission.TRADING_CONTROL,
+}
+
+_ACTION_AUDIT = {
+    "start": audit.ALGO_START,
+    "stop": audit.ALGO_STOP,
+    "restart": audit.ALGO_RESTART,
+    "update": audit.ALGO_UPDATE,
 }
 
 
@@ -91,20 +118,32 @@ def _get_or_create_algo(db: Session, algo_name: str, server: models.Server) -> m
     return algo
 
 
-def _run_algo_action(action: str, body: AlgoActionRequest, db: Session) -> CommandResponse:
+def _run_algo_action(
+    action: str, body: AlgoActionRequest, db: Session, request: Request, principal: Principal
+) -> CommandResponse:
     server = _resolve_server(db, body.server_id)
     algo = _get_or_create_algo(db, body.algo_id, server)
+
+    # The authenticated identity is authoritative for "who did this" --
+    # a client-supplied requested_by is only a fallback label.
+    requested_by = principal.label or body.requested_by
 
     command_row = models.Command(
         algo_id=algo.id,
         server_id=server.id,
         command=_ACTION_TO_AGENT_COMMAND[action],
-        requested_by=body.requested_by,
+        requested_by=requested_by,
         status="PENDING",
     )
     db.add(command_row)
     db.commit()
     db.refresh(command_row)
+
+    audit.record(
+        db, actor=principal.actor, actor_label=principal.label, action=_ACTION_AUDIT[action],
+        target=f"algo:{body.algo_id}@{body.server_id}", ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"), detail={"command_id": command_row.id},
+    )
 
     try:
         lambda_action = {"start": "start_algo", "stop": "stop_algo", "restart": "restart_algo", "update": "update_algo"}[action]
@@ -135,27 +174,42 @@ def _run_algo_action(action: str, body: AlgoActionRequest, db: Session) -> Comma
 
 
 @router.post("/algo/start", response_model=CommandResponse)
-def start_algo(body: AlgoActionRequest, db: Session = Depends(get_db)) -> CommandResponse:
-    return _run_algo_action("start", body, db)
+def start_algo(
+    body: AlgoActionRequest, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.START)),
+) -> CommandResponse:
+    return _run_algo_action("start", body, db, request, principal)
 
 
 @router.post("/algo/stop", response_model=CommandResponse)
-def stop_algo(body: AlgoActionRequest, db: Session = Depends(get_db)) -> CommandResponse:
-    return _run_algo_action("stop", body, db)
+def stop_algo(
+    body: AlgoActionRequest, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.STOP)),
+) -> CommandResponse:
+    return _run_algo_action("stop", body, db, request, principal)
 
 
 @router.post("/algo/restart", response_model=CommandResponse)
-def restart_algo(body: AlgoActionRequest, db: Session = Depends(get_db)) -> CommandResponse:
-    return _run_algo_action("restart", body, db)
+def restart_algo(
+    body: AlgoActionRequest, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.RESTART)),
+) -> CommandResponse:
+    return _run_algo_action("restart", body, db, request, principal)
 
 
 @router.post("/algo/update", response_model=CommandResponse)
-def update_algo(body: AlgoActionRequest, db: Session = Depends(get_db)) -> CommandResponse:
-    return _run_algo_action("update", body, db)
+def update_algo(
+    body: AlgoActionRequest, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> CommandResponse:
+    return _run_algo_action("update", body, db, request, principal)
 
 
 @router.get("/command/{command_id}", response_model=CommandResponse)
-def get_command(command_id: int, db: Session = Depends(get_db)) -> CommandResponse:
+def get_command(
+    command_id: int, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> CommandResponse:
     command_row = db.query(models.Command).filter(models.Command.id == command_id).one_or_none()
     if command_row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown command_id: {command_id}")
@@ -205,7 +259,10 @@ def get_command(command_id: int, db: Session = Depends(get_db)) -> CommandRespon
 
 
 @router.get("/algo/status", response_model=AlgoStatusResponse)
-def algo_status(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> AlgoStatusResponse:
+def algo_status(
+    algo_id: str, server_id: str, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> AlgoStatusResponse:
     server = _resolve_server(db, server_id)
     try:
         result = invoke_orchestrator(
@@ -226,7 +283,10 @@ def algo_status(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> 
 
 
 @router.get("/server/status", response_model=ServerStatusResponse)
-def server_status(server_id: str, live: bool = False, db: Session = Depends(get_db)) -> ServerStatusResponse:
+def server_status(
+    server_id: str, live: bool = False, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> ServerStatusResponse:
     server = _resolve_server(db, server_id)
 
     ssm_status = None
@@ -266,7 +326,10 @@ def _server_entry(server: models.Server) -> ServerListEntry:
 
 
 @router.post("/servers", response_model=ServerListEntry, status_code=status.HTTP_201_CREATED)
-def register_server(body: ServerIn, db: Session = Depends(get_db)) -> ServerListEntry:
+def register_server(
+    body: ServerIn, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> ServerListEntry:
     """Registers a new EC2 trading server. There's no auto-registration
     path (heartbeats/logs/etc. all require the server to already exist,
     via _resolve_server) -- this is the one place a servers row gets
@@ -307,17 +370,29 @@ def register_server(body: ServerIn, db: Session = Depends(get_db)) -> ServerList
             server.provisioning_message = f"Could not start provisioning: {exc}"
             db.commit()
 
+    audit.record(
+        db, actor=principal.actor, actor_label=principal.label, action=audit.SERVER_REGISTERED,
+        target=f"server:{server.name}", ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"ec2_instance_id": server.ec2_instance_id, "auto_provision": body.auto_provision},
+    )
     return _server_entry(server)
 
 
 @router.get("/servers", response_model=list[ServerListEntry])
-def list_servers(db: Session = Depends(get_db)) -> list[ServerListEntry]:
+def list_servers(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> list[ServerListEntry]:
     rows = db.query(models.Server).order_by(models.Server.name).all()
     return [_server_entry(r) for r in rows]
 
 
 @router.patch("/servers/{server_id}", response_model=ServerListEntry)
-def update_server(server_id: str, body: ServerUpdate, db: Session = Depends(get_db)) -> ServerListEntry:
+def update_server(
+    server_id: str, body: ServerUpdate, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> ServerListEntry:
     server = _resolve_server(db, server_id)
 
     if body.server_id is not None:
@@ -345,11 +420,20 @@ def update_server(server_id: str, body: ServerUpdate, db: Session = Depends(get_
             status.HTTP_409_CONFLICT, f"Server already registered: {body.server_id}"
         ) from None
     db.refresh(server)
+    audit.record(
+        db, actor=principal.actor, actor_label=principal.label, action=audit.SERVER_UPDATED,
+        target=f"server:{server.name}", ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail=body.model_dump(exclude_none=True),
+    )
     return _server_entry(server)
 
 
 @router.delete("/servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_server(server_id: str, db: Session = Depends(get_db)) -> Response:
+def delete_server(
+    server_id: str, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> Response:
     """Refuses to delete a server that still has algos registered against
     it -- the caller has to remove/reassign those first, rather than this
     endpoint silently cascading through heartbeats/logs/positions/trades/
@@ -371,11 +455,19 @@ def delete_server(server_id: str, db: Session = Depends(get_db)) -> Response:
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Cannot delete server '{server_id}': it still has related records."
         ) from None
+    audit.record(
+        db, actor=principal.actor, actor_label=principal.label, action=audit.SERVER_DELETED,
+        target=f"server:{server_id}", ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/algos", response_model=AlgoRegisterResponse, status_code=status.HTTP_201_CREATED)
-def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoRegisterResponse:
+def register_algo(
+    body: AlgoIn, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> AlgoRegisterResponse:
     """Registers a new strategy for viewing/management before it's ever
     been started. This is now the ONLY way an algo row gets created --
     start/stop/heartbeat/log calls against an unregistered algo_id are
@@ -441,13 +533,21 @@ def register_algo(body: AlgoIn, db: Session = Depends(get_db)) -> AlgoRegisterRe
         sync_success = False
         sync_message = str(exc)
 
+    audit.record(
+        db, actor=principal.actor, actor_label=principal.label, action=audit.ALGO_REGISTERED,
+        target=f"algo:{body.algo_id}@{body.server_id}", ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"), detail={"sync_success": sync_success},
+    )
     return AlgoRegisterResponse(
         algo=algo_entry, sync_attempted=True, sync_success=sync_success, sync_message=sync_message,
     )
 
 
 @router.patch("/algos/{algo_id}", response_model=AlgoListEntry)
-def patch_algo(algo_id: str, server_id: str, body: AlgoUpdate, db: Session = Depends(get_db)) -> AlgoListEntry:
+def patch_algo(
+    algo_id: str, server_id: str, body: AlgoUpdate, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> AlgoListEntry:
     server = _resolve_server(db, server_id)
     algo = (
         db.query(models.Algo)
@@ -466,6 +566,11 @@ def patch_algo(algo_id: str, server_id: str, body: AlgoUpdate, db: Session = Dep
     db.commit()
     db.refresh(algo)
 
+    audit.record(
+        db, actor=principal.actor, actor_label=principal.label, action=audit.ALGO_PATCHED,
+        target=f"algo:{algo_id}@{server_id}", ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"), detail=body.model_dump(exclude_none=True),
+    )
     last_heartbeat = (
         db.query(func.max(models.Heartbeat.timestamp))
         .filter(models.Heartbeat.algo_id == algo.id)
@@ -479,7 +584,10 @@ def patch_algo(algo_id: str, server_id: str, body: AlgoUpdate, db: Session = Dep
 
 
 @router.delete("/algos/{algo_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_algo(algo_id: str, server_id: str, force: bool = False, db: Session = Depends(get_db)) -> Response:
+def delete_algo(
+    algo_id: str, server_id: str, request: Request, force: bool = False, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> Response:
     """Refuses to delete an algo that still has heartbeat/log/position/
     trade/P&L/command/run history -- same reasoning as delete_server:
     surface exactly what's blocking it rather than silently cascading
@@ -528,11 +636,19 @@ def delete_algo(algo_id: str, server_id: str, force: bool = False, db: Session =
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Cannot delete algo '{algo_id}': it still has related records."
         ) from None
+    audit.record(
+        db, actor=principal.actor, actor_label=principal.label, action=audit.ALGO_DELETED,
+        target=f"algo:{algo_id}@{server_id}", ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"), detail={"force": force, "purged": blocking},
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/algos", response_model=list[AlgoListEntry])
-def list_algos(db: Session = Depends(get_db)) -> list[AlgoListEntry]:
+def list_algos(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> list[AlgoListEntry]:
     # algos has no last_heartbeat column (matches the schema's original
     # field list) -- computed here via MAX(timestamp) per algo instead of
     # requiring an ALTER TABLE on an already-created Supabase table.
@@ -560,7 +676,10 @@ def list_algos(db: Session = Depends(get_db)) -> list[AlgoListEntry]:
 
 
 @router.post("/heartbeat", response_model=HeartbeatAck)
-def post_heartbeat(body: HeartbeatIn, db: Session = Depends(get_db)) -> HeartbeatAck:
+def post_heartbeat(
+    body: HeartbeatIn, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_ingest),
+) -> HeartbeatAck:
     """Appends to heartbeats history (unlike the old strategy_heartbeats
     table, this is a log, not an upsert-one-row-per-pair table) and
     updates algos.status + servers.last_heartbeat for fast list-view
@@ -618,6 +737,7 @@ def get_logs(
     event: str | None = None,
     log_date: str | None = None,  # YYYY-MM-DD, matches that calendar day (UTC)
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
 ) -> list[LogEntry]:
     server = _resolve_server(db, server_id)
     algo = _get_or_create_algo(db, algo_id, server)
@@ -640,7 +760,10 @@ def get_logs(
 
 
 @router.post("/logs", response_model=LogAck)
-def post_log(body: LogIn, db: Session = Depends(get_db)) -> LogAck:
+def post_log(
+    body: LogIn, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_ingest),
+) -> LogAck:
     """Ingests a shipped log event (see trading/common/log_shipper.py) --
     only the curated trading-significant events + WARNING/ERROR, not
     every line the local structured logger emits."""
@@ -657,7 +780,10 @@ def post_log(body: LogIn, db: Session = Depends(get_db)) -> LogAck:
 
 
 @router.get("/pnl/today", response_model=dict[str, float])
-def get_today_pnl_bulk(pnl_date: str | None = None, db: Session = Depends(get_db)) -> dict[str, float]:
+def get_today_pnl_bulk(
+    pnl_date: str | None = None, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> dict[str, float]:
     """Bulk equivalent of GET /pnl, filtered to one calendar day -- one
     query instead of one HTTP round trip per algo. The dashboard's header
     P&L total and per-row P&L column both used to loop over every algo
@@ -692,7 +818,10 @@ def get_today_pnl_bulk(pnl_date: str | None = None, db: Session = Depends(get_db
 
 
 @router.get("/pnl", response_model=list[DailyPnlEntry])
-def get_pnl(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> list[DailyPnlEntry]:
+def get_pnl(
+    algo_id: str, server_id: str, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> list[DailyPnlEntry]:
     server = _resolve_server(db, server_id)
     algo = _get_or_create_algo(db, algo_id, server)
     db.commit()
@@ -707,7 +836,10 @@ def get_pnl(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> list
 
 
 @router.get("/positions", response_model=list[PositionEntry])
-def get_positions(algo_id: str, server_id: str, db: Session = Depends(get_db)) -> list[PositionEntry]:
+def get_positions(
+    algo_id: str, server_id: str, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> list[PositionEntry]:
     server = _resolve_server(db, server_id)
     algo = _get_or_create_algo(db, algo_id, server)
     db.commit()
@@ -723,7 +855,10 @@ def get_positions(algo_id: str, server_id: str, db: Session = Depends(get_db)) -
 
 
 @router.post("/positions", response_model=PositionAck)
-def post_position(body: PositionIn, db: Session = Depends(get_db)) -> PositionAck:
+def post_position(
+    body: PositionIn, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_ingest),
+) -> PositionAck:
     """Upserts current holdings (unlike trades, which are insert-only
     history) -- a position row represents what's held RIGHT NOW. A
     quantity of 0 means the position closed, so the row is deleted rather
@@ -764,7 +899,10 @@ def post_position(body: PositionIn, db: Session = Depends(get_db)) -> PositionAc
 
 
 @router.get("/trades", response_model=list[TradeEntry])
-def get_trades(algo_id: str, server_id: str, limit: int = 100, db: Session = Depends(get_db)) -> list[TradeEntry]:
+def get_trades(
+    algo_id: str, server_id: str, limit: int = 100, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.VIEW)),
+) -> list[TradeEntry]:
     server = _resolve_server(db, server_id)
     algo = _get_or_create_algo(db, algo_id, server)
     db.commit()
@@ -786,7 +924,10 @@ def get_trades(algo_id: str, server_id: str, limit: int = 100, db: Session = Dep
 
 
 @router.post("/trades", response_model=TradeAck)
-def post_trade(body: TradeIn, db: Session = Depends(get_db)) -> TradeAck:
+def post_trade(
+    body: TradeIn, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_ingest),
+) -> TradeAck:
     """Insert-only -- every fill is its own permanent record, never
     updated or deleted (unlike positions, which reflect current state)."""
     server = _resolve_server(db, body.server_id)
@@ -803,7 +944,10 @@ def post_trade(body: TradeIn, db: Session = Depends(get_db)) -> TradeAck:
 
 
 @router.post("/pnl", response_model=DailyPnlEntry)
-def post_pnl(body: DailyPnlIn, db: Session = Depends(get_db)) -> DailyPnlEntry:
+def post_pnl(
+    body: DailyPnlIn, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_ingest),
+) -> DailyPnlEntry:
     """Upserts today's (or the given date's) rollup -- one row per
     algo/server/day, overwritten as the strategy's own running total
     changes through the day, not accumulated server-side."""

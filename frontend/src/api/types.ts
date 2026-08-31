@@ -2,6 +2,50 @@
 // trading/api/legacy.py (GET /strategies). Keep in sync with the backend —
 // these are the response shapes, not a redefinition of its contract.
 
+import type { Permission } from "@/lib/config";
+
+// --- auth -------------------------------------------------------------
+export interface AuthUser {
+  id: number;
+  username: string;
+  email: string | null;
+  role: string;
+  permissions: Permission[];
+  must_change_password: boolean;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: "bearer";
+  expires_in: number;
+  user: AuthUser;
+}
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  email: string | null;
+  role: string;
+  extra_permissions: string[];
+  effective_permissions: Permission[];
+  is_active: boolean;
+  must_change_password: boolean;
+  last_login_at: string | null;
+  created_at: string;
+}
+
+export interface AuditEntry {
+  id: number;
+  timestamp: string;
+  actor: string;
+  actor_label: string | null;
+  action: string;
+  target: string | null;
+  outcome: string;
+  ip: string | null;
+  detail: Record<string, unknown> | null;
+}
+
 export interface HealthResponse {
   status: "ok" | "degraded" | string;
   service: string;

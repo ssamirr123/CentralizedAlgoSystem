@@ -1,8 +1,12 @@
 import { apiRequest } from "./client";
+import { readCsrfCookie } from "@/auth/authStore";
 import type {
+  AdminUser,
   AlgoAction,
   AlgoListEntry,
   AlgoStatusResponse,
+  AuditEntry,
+  AuthUser,
   CommandResponse,
   DailyPnlEntry,
   HealthResponse,
@@ -11,8 +15,52 @@ import type {
   ServerListEntry,
   ServerStatusResponse,
   StrategyHeartbeatOut,
+  TokenResponse,
   TradeEntry,
 } from "./types";
+
+// --- auth -----------------------------------------------------------
+export const login = (username: string, password: string) =>
+  apiRequest<TokenResponse>("/api/auth/login", { method: "POST", body: { username, password }, auth: false });
+
+export const logout = () =>
+  apiRequest<void>("/api/auth/logout", {
+    method: "POST",
+    auth: false,
+    headers: { "X-CSRF-Token": readCsrfCookie() },
+  });
+
+export const getMe = () => apiRequest<AuthUser>("/api/auth/me");
+
+export const changePassword = (current_password: string, new_password: string) =>
+  apiRequest<void>("/api/auth/change-password", {
+    method: "POST",
+    body: { current_password, new_password },
+  });
+
+// --- admin ---------------------------------------------------------
+export const listAdminUsers = () => apiRequest<AdminUser[]>("/api/admin/users");
+
+export const createAdminUser = (body: {
+  username: string;
+  password: string;
+  role: string;
+  email?: string | null;
+}) => apiRequest<AdminUser>("/api/admin/users", { method: "POST", body });
+
+export const updateAdminUser = (
+  id: number,
+  body: { role?: string; is_active?: boolean; email?: string | null; extra_permissions?: string[] },
+) => apiRequest<AdminUser>(`/api/admin/users/${id}`, { method: "PATCH", body });
+
+export const resetAdminUserPassword = (id: number, new_password: string) =>
+  apiRequest<void>(`/api/admin/users/${id}/reset-password`, { method: "POST", body: { new_password } });
+
+export const deactivateAdminUser = (id: number) =>
+  apiRequest<void>(`/api/admin/users/${id}`, { method: "DELETE" });
+
+export const getAudit = (q: { actor?: string; action?: string; outcome?: string; limit?: number } = {}) =>
+  apiRequest<AuditEntry[]>("/api/admin/audit", { query: { ...q } });
 
 // --- health -------------------------------------------------------------
 export const getHealth = () =>

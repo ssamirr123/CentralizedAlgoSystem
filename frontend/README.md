@@ -30,11 +30,22 @@ Positions · Trades · Commands · Logs · Risk · System Health
   the backend; it never places or cancels orders. `LIVE_EXECUTION_ENABLED`
   in `src/lib/config.ts` is hard-wired `false`.
 
-## Auth
+## Auth (Stage 18)
 
-Shared-key auth, matching the backend (`X-API-Key`). The Login screen takes
-the key, verifies it against `GET /api/algos`, then stores it in
-`localStorage`. "Sign out" clears it.
+Per-user login: username + password → a short-lived JWT access token
+(kept **in memory only**) plus an httpOnly `cas_refresh` cookie the
+backend sets. On load the app silently calls `POST /api/auth/refresh`;
+`client.ts` also does one transparent refresh-and-retry on a 401.
+
+RBAC: `AuthContext.hasPermission(perm)` gates nav entries (`routes.tsx`
+`permission`), the Commands screen's action buttons
+(`START/STOP/RESTART/TRADING_CONTROL`), and the Administration screen
+(`ADMIN` — users + audit log). A forced-password-change account is
+redirected to `/change-password`.
+
+No secret is stored in the browser beyond the httpOnly cookie the backend
+controls; the non-httpOnly `cas_csrf` cookie is only a double-submit CSRF
+token.
 
 ## Local development
 

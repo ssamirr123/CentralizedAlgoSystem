@@ -1,46 +1,89 @@
-import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { ReactNode } from "react";
 import { authStore } from "./authStore";
-import { apiRequest } from "@/api/client";
+import { attemptRefresh } from "@/api/client";
+import * as api from "@/api/endpoints";
+import type { AuthUser } from "@/api/types";
+import type { Permission } from "@/lib/config";
 
 interface AuthContextValue {
-  apiKey: string | null;
-  baseUrl: string;
+  user: AuthUser | null;
   isAuthenticated: boolean;
-  /** Verifies the key against an auth-protected endpoint before persisting. */
-  signIn: (apiKey: string, baseUrlOverride?: string) => Promise<void>;
-  signOut: () => void;
+  /** true until the initial silent-refresh attempt settles. */
+  initializing: boolean;
+  baseUrl: string;
+  signIn: (username: string, password: string) => Promise<AuthUser>;
+  signOut: () => Promise<void>;
+  refreshMe: () => Promise<void>;
+  hasPermission: (perm: Permission) => boolean;
+  hasAny: (perms: Permission[]) => boolean;
+  setBaseUrl: (url: string) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const state = useSyncExternalStore(authStore.subscribe, authStore.get, authStore.get);
+  const [initializing, setInitializing] = useState(state.sessionHint);
+  const didInit = useRef(false);
 
-  const signIn = useCallback(async (apiKey: string, baseUrlOverride?: string) => {
-    const key = apiKey.trim();
-    if (!key) throw new Error("API key is required.");
-    // Persist first so apiRequest picks up the key + base URL, then probe.
-    authStore.signIn(key, baseUrlOverride?.trim());
-    try {
-      await apiRequest("/api/algos", { method: "GET" });
-    } catch (e) {
-      authStore.signOut();
-      throw e;
+  useEffect(() => {
+    if (didInit.current) return;
+    didInit.current = true;
+    if (!authStore.get().sessionHint) {
+      setInitializing(false);
+      return;
     }
+    attemptRefresh().finally(() => setInitializing(false));
   }, []);
 
-  const signOut = useCallback(() => authStore.signOut(), []);
+  const signIn = useCallback(async (username: string, password: string) => {
+    const res = await api.login(username, password);
+    authStore.setSession(res.access_token, res.user);
+    return res.user;
+  }, []);
+
+  const signOut = useCallback(async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* best effort */
+    }
+    authStore.clear();
+  }, []);
+
+  const refreshMe = useCallback(async () => {
+    const me = await api.getMe();
+    authStore.updateUser(me);
+  }, []);
+
+  const permSet = useMemo(() => new Set(state.user?.permissions ?? []), [state.user]);
+  const hasPermission = useCallback((p: Permission) => permSet.has(p), [permSet]);
+  const hasAny = useCallback((ps: Permission[]) => ps.some((p) => permSet.has(p)), [permSet]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
-      apiKey: state.apiKey,
+      user: state.user,
+      isAuthenticated: !!state.accessToken && !!state.user,
+      initializing,
       baseUrl: state.baseUrl,
-      isAuthenticated: !!state.apiKey,
       signIn,
       signOut,
+      refreshMe,
+      hasPermission,
+      hasAny,
+      setBaseUrl: authStore.setBaseUrl,
     }),
-    [state, signIn, signOut],
+    [state, initializing, signIn, signOut, refreshMe, hasPermission, hasAny],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
