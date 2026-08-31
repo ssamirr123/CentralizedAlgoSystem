@@ -16,8 +16,20 @@ OAC_NAME="${OAC_NAME:-centralized-algo-frontend-oac}"
 FUNC_NAME="${FUNC_NAME:-centralized-algo-spa-rewrite}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/.deploy-outputs"
+TMPD="$HERE/.provision-tmp"
+mkdir -p "$TMPD"
+trap 'rm -rf "$TMPD"' EXIT
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+
+# The AWS CLI here is native Windows aws.exe under Git Bash, which cannot
+# read MSYS-style paths (/c/...) in file:// / fileb:// args. Convert.
+winpath() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"
+  else echo "$1" | sed -E 's|^/([a-zA-Z])/|\1:/|'; fi
+}
+fileb() { printf 'fileb://%s' "$(winpath "$1")"; }
+filet() { printf 'file://%s'  "$(winpath "$1")"; }
 
 # --- S3 bucket -------------------------------------------------------------
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
@@ -60,7 +72,7 @@ if [ -z "$FUNC_ARN" ] || [ "$FUNC_ARN" = "None" ]; then
   say "creating CloudFront Function '$FUNC_NAME'"
   aws cloudfront create-function --name "$FUNC_NAME" \
     --function-config "Comment=SPA rewrite for centralized-algo frontend,Runtime=cloudfront-js-2.0" \
-    --function-code "fileb://$HERE/cloudfront-function-spa-rewrite.js" >/dev/null
+    --function-code "$(fileb "$HERE/cloudfront-function-spa-rewrite.js")" >/dev/null
 fi
 ETAG="$(aws cloudfront describe-function --name "$FUNC_NAME" --query "ETag" --output text)"
 aws cloudfront update-function --name "$FUNC_NAME" --if-match "$ETAG" \
@@ -73,25 +85,23 @@ FUNC_ARN="$(aws cloudfront describe-function --name "$FUNC_NAME" \
 say "function published: $FUNC_ARN"
 
 # --- CloudFront distribution ------------------------------------------
-CFG="$(mktemp)"
+CFG="$TMPD/distribution-config.json"
 sed -e "s|__OAC_ID__|$OAC_ID|g" \
     -e "s|__FUNCTION_ARN__|$FUNC_ARN|g" \
     -e "s|__CALLER_REF__|centralized-algo-frontend-$(date +%s)|g" \
     "$HERE/cloudfront-distribution-config.json" > "$CFG"
 
 say "creating CloudFront distribution"
-DIST_JSON="$(aws cloudfront create-distribution --distribution-config "file://$CFG" \
+DIST_JSON="$(aws cloudfront create-distribution --distribution-config "$(filet "$CFG")" \
   --query "Distribution.{Id:Id,Arn:ARN,Domain:DomainName}" --output json)"
-rm -f "$CFG"
 DIST_ID="$(echo "$DIST_JSON" | grep -o '"Id": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
 DIST_ARN="$(echo "$DIST_JSON" | grep -o '"Arn": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
 DIST_DOMAIN="$(echo "$DIST_JSON" | grep -o '"Domain": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
 
 # --- Bucket policy: allow ONLY this distribution via OAC --------------
-POL="$(mktemp)"
+POL="$TMPD/bucket-policy.json"
 sed "s|__DISTRIBUTION_ID__|$DIST_ID|g" "$HERE/s3-bucket-policy.json" > "$POL"
-aws s3api put-bucket-policy --bucket "$BUCKET" --policy "file://$POL" >/dev/null
-rm -f "$POL"
+aws s3api put-bucket-policy --bucket "$BUCKET" --policy "$(filet "$POL")" >/dev/null
 say "bucket policy bound to distribution $DIST_ID"
 
 # --- Persist outputs for deploy.sh ----------------------------------

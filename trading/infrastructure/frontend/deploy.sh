@@ -44,9 +44,12 @@ aws s3 cp dist/index.html "s3://$BUCKET/index.html" \
   --content-type "text/html; charset=utf-8"
 
 # --- bust the edge cache for the shell -----------------------------
+# MSYS_NO_PATHCONV: stop Git Bash rewriting the leading "/" in the path
+# args into a Windows path before they reach aws.exe.
 say "invalidating /"
-aws cloudfront create-invalidation --distribution-id "$DIST_ID" \
-  --paths "/" "/index.html" --query "Invalidation.{Id:Id,Status:Status}" --output table
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' aws cloudfront create-invalidation \
+  --distribution-id "$DIST_ID" \
+  --paths '/*' --query "Invalidation.{Id:Id,Status:Status}" --output table
 
 say "deployed. domain:"
 aws cloudfront get-distribution --id "$DIST_ID" \
