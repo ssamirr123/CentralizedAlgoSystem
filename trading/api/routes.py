@@ -1,16 +1,14 @@
 """
-Control-center API routes. Mounted onto the existing backend/main.py
-FastAPI app under /api (see backend/main.py's app.include_router call).
+Control-center API routes, mounted under /api by create_app().
 
-Algo control actions (start/stop/restart/update) are async, matching
-Milestone 4's Lambda design directly: create a Command audit row, invoke
-the Lambda, store the returned job_id, return immediately. The caller
-polls GET /api/command/{command_id} for the real outcome -- this endpoint
-never claims RUNNING just because the Lambda accepted the request.
+Algo control actions (start/stop/restart/update) are async: create a
+Command audit row, invoke the orchestration Lambda, store the returned
+job_id, return immediately. The caller polls GET /api/command/{id} for
+the real outcome -- this endpoint never claims RUNNING just because the
+Lambda accepted the request.
 
 GET endpoints (server/status, logs, pnl, positions) read straight from
-Supabase, no Lambda call -- logs/pnl/positions will be empty until
-Milestones 8-10 wire up ingestion, which is expected at this milestone.
+PostgreSQL, no Lambda call.
 """
 from __future__ import annotations
 
@@ -23,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
+from trading.core.config import load_settings
 from trading.api.deps import (
     Principal,
     client_ip,
@@ -1041,4 +1040,20 @@ def post_pnl(
         body.algo_id, body.server_id, date=target_date.isoformat(),
         pnl=body.pnl, trade_count=body.trade_count,
     )
+
+    # Day-loss alert -- fires whenever the reported daily P&L breaches the
+    # configured limit. alert_service dedups so it won't spam on every
+    # rollup update. (This preserved the behaviour of the removed legacy
+    # /update_strategy path.)
+    day_loss_limit = load_settings().day_loss_limit
+    if body.pnl < 0 and abs(body.pnl) > day_loss_limit:
+        alert_service.day_loss_exceeded(
+            body.algo_id, body.server_id, loss=body.pnl, limit=day_loss_limit
+        )
+        rt.alert(
+            kind="day_loss_exceeded", severity="critical",
+            message=f"{body.algo_id} day loss {body.pnl:.0f} exceeds limit {day_loss_limit:.0f}",
+            algo_id=body.algo_id, server_id=body.server_id,
+        )
+
     return DailyPnlEntry(date=target_date, pnl=body.pnl, trade_count=body.trade_count)

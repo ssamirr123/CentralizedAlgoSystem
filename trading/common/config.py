@@ -56,9 +56,9 @@ class TradingConfig:
     # Which BrokerClient implementation to instantiate: paper | zerodha | angelone | icici_breeze
     broker_name: str = field(default_factory=lambda: _env("BROKER", "paper").lower())
 
-    # Identity used for heartbeat reporting. Both heartbeat senders share
-    # api_base_url -- the control-center API (Milestone 6) is mounted onto
-    # the same deployed app as the old /update_strategy endpoint.
+    # Identity + control-center API base URL used for heartbeat / log /
+    # P&L reporting. API_BASE_URL is injected per-run by the orchestrator
+    # (START_ALGO) in production.
     strategy_name: str = field(default_factory=lambda: _env("STRATEGY_NAME", "example_strategy"))
     server_name: str = field(default_factory=lambda: _env("SERVER_NAME", "local-dev"))
     api_base_url: str = field(default_factory=lambda: _env("API_BASE_URL", "http://127.0.0.1:8000"))

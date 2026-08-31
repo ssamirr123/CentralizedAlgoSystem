@@ -1,6 +1,5 @@
-// Mirrors trading/api/schemas.py (control-center /api/*) and
-// trading/api/legacy.py (GET /strategies). Keep in sync with the backend —
-// these are the response shapes, not a redefinition of its contract.
+// Mirrors trading/api/schemas.py (the /api/* control-center API). These
+// are the response shapes, not a redefinition of the backend's contract.
 
 import type { Permission } from "@/lib/config";
 
@@ -131,18 +130,6 @@ export interface TradeEntry {
   price: number;
   executed_at: string;
   order_id: string | null;
-}
-
-/** Legacy GET /strategies row — richer heartbeat snapshot (MTM, day P&L). */
-export interface StrategyHeartbeatOut {
-  strategy_name: string;
-  server_name: string;
-  status: "RUNNING" | "STOPPED" | "ERROR" | string;
-  current_mtm: number;
-  day_pnl: number;
-  number_of_trades: number;
-  last_update_time: string;
-  received_at: string;
 }
 
 export type AlgoAction = "start" | "stop" | "restart" | "update";

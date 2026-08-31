@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { AlgoListEntry, ServerListEntry, StrategyHeartbeatOut } from "@/api/types";
+import type { AlgoListEntry, ServerListEntry } from "@/api/types";
 import type {
   CommandData,
   HeartbeatData,
@@ -21,18 +21,15 @@ export function applyEventToCache(qc: QueryClient, ev: MonitoringEvent): void {
   switch (ev.type) {
     case "heartbeat": {
       const d = ev.data as unknown as HeartbeatData;
-      patchAlgo(qc, d.algo_id, d.server_id, { status: d.status, last_heartbeat: d.timestamp ?? new Date().toISOString() });
-      patchLegacyHeartbeat(qc, d.algo_id, d.server_id, {
+      patchAlgo(qc, d.algo_id, d.server_id, {
         status: d.status,
-        last_update_time: d.timestamp ?? new Date().toISOString(),
-        ...(d.pnl != null ? { day_pnl: d.pnl } : {}),
+        last_heartbeat: d.timestamp ?? new Date().toISOString(),
       });
       break;
     }
     case "strategy_status": {
       const d = ev.data as unknown as StrategyStatusData;
       patchAlgo(qc, d.algo_id, d.server_id, { status: d.status });
-      patchLegacyHeartbeat(qc, d.algo_id, d.server_id, { status: d.status });
       break;
     }
     case "pnl": {
@@ -76,18 +73,5 @@ export function applyEventToCache(qc: QueryClient, ev: MonitoringEvent): void {
 function patchAlgo(qc: QueryClient, algoId: string, serverId: string, patch: Partial<AlgoListEntry>): void {
   qc.setQueryData<AlgoListEntry[]>(["algos"], (prev) =>
     prev?.map((a) => (a.algo_id === algoId && a.server_id === serverId ? { ...a, ...patch } : a)),
-  );
-}
-
-function patchLegacyHeartbeat(
-  qc: QueryClient,
-  name: string,
-  server: string,
-  patch: Partial<StrategyHeartbeatOut>,
-): void {
-  qc.setQueryData<StrategyHeartbeatOut[]>(["strategy-heartbeats"], (prev) =>
-    prev?.map((h) =>
-      h.strategy_name === name && h.server_name === server ? { ...h, ...patch, received_at: new Date().toISOString() } : h,
-    ),
   );
 }

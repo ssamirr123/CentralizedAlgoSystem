@@ -5,11 +5,10 @@ Control-center tables per the project's own design: servers, algos,
 algo_runs, heartbeats, logs, positions, trades, daily_pnl, commands,
 rate_limit_windows.
 
-Legacy table: strategy_heartbeats -- the original per-(strategy, server)
-latest-state row used by POST /update_strategy and GET /strategies. Moved
-here verbatim in Stage 2 of the architecture consolidation (was
-backend/models.py); table name and columns are unchanged so existing
-production data is untouched.
+Dormant table: strategy_heartbeats -- the original per-(strategy, server)
+latest-state row. The endpoints that fed it (POST /update_strategy,
+GET /strategies) have been removed; the table is retained unchanged so
+its historical production rows are preserved. Nothing writes to it now.
 
 Naming note: Milestone 4's Lambda (orchestrator.py) uses "algo_id" in its
 event payload to mean the algo's NAME (e.g. "example_strategy"), matching
@@ -299,14 +298,14 @@ class AuditLog(Base):
 
 
 class StrategyHeartbeat(Base):
-    """Legacy heartbeat monitor table (pre-consolidation backend/models.py).
+    """Dormant heartbeat table from the pre-consolidation monitoring API.
 
-    One latest-state row per (strategy_name, server_name) pair, upserted by
-    POST /update_strategy and listed by GET /strategies. Kept verbatim --
-    same table name, columns, and unique constraint -- so existing rows in
-    the production database continue to work unchanged. New code should use
-    the control-center Heartbeat/Algo tables above; this is retained for
-    backward compatibility until those legacy endpoints are retired.
+    One latest-state row per (strategy_name, server_name) pair. The
+    endpoints that populated and read it (POST /update_strategy,
+    GET /strategies) have been removed; the table, its columns, and its
+    unique constraint are kept verbatim so its existing production rows
+    are preserved. Current code uses the control-center Heartbeat / Algo
+    tables above.
     """
 
     __tablename__ = "strategy_heartbeats"

@@ -1,24 +1,18 @@
-"""Canonical single-Base schema checks (Stage 2)."""
+"""Canonical single-Base schema checks."""
 from __future__ import annotations
 
-import backend.database as backend_db
-import backend.models as backend_models
 from trading.database import models as tmodels
 from trading.database.connection import Base
 
 _EXPECTED_TABLES = {
     "servers", "algos", "algo_runs", "heartbeats", "logs", "positions",
     "trades", "daily_pnl", "commands", "rate_limit_windows", "strategy_heartbeats",
+    "users", "auth_sessions", "audit_log",
 }
 
 
 def test_all_tables_on_one_base():
     assert _EXPECTED_TABLES.issubset(set(Base.metadata.tables))
-
-
-def test_backend_shims_reexport_canonical_objects():
-    assert backend_db.Base is Base
-    assert backend_models.StrategyHeartbeat is tmodels.StrategyHeartbeat
 
 
 def test_strategy_heartbeats_table_unchanged():

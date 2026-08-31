@@ -16,7 +16,7 @@ Contents:
 4. [Docker](#4-docker)
 5. [FastAPI application](#5-fastapi-application)
 6. [Control-Center API](#6-control-center-api)
-7. [Legacy compatibility APIs](#7-legacy-compatibility-apis)
+7. [Removed legacy surface](#7-removed-legacy-surface)
 8. [Trading algorithms](#8-trading-algorithms)
 9. [Paper trading](#9-paper-trading)
 10. [Broker abstraction](#10-broker-abstraction)
@@ -49,7 +49,7 @@ export CONTROL_API_KEY="dev-control-key"
 # TRADING_MODE defaults to "paper" — leave it
 
 alembic upgrade head
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn trading.api.app:create_app --factory --host 0.0.0.0 --port 8000 --reload
 ```
 
 Then: `http://localhost:8000/docs`, `GET /api/health`,
@@ -109,9 +109,6 @@ Docker stack or production.
   `pool_pre_ping` (a pooled Postgres pooler already multiplexes) and, for
   the SQLite test fallback only, a per-connection `PRAGMA foreign_keys=ON`
   so tests don't silently accept FK violations Postgres would reject.
-- `backend/database.py`, `backend/models.py`, `backend/schemas.py` are
-  thin re-export shims pointing at `trading/`; existing
-  `from backend.… import …` call sites still work.
 - Initially PostgreSQL runs **on the Backend EC2 itself**. Moving to RDS
   later is a `DATABASE_URL` change with no application code change.
 
@@ -128,8 +125,9 @@ Docker stack or production.
 | `trades` | insert-only fill history |
 | `daily_pnl` | one rollup row per algo/server/day (upserted) |
 | `commands` | audit row for every control action (before Lambda is even called) |
-| `rate_limit_windows` | DB-backed per-API-key fixed-window counter |
-| `strategy_heartbeats` | **legacy**: one latest-state row per `(strategy, server)` — feeds `/update_strategy` + `/strategies` |
+| `rate_limit_windows` | DB-backed per-identity fixed-window counter |
+| `users` / `auth_sessions` / `audit_log` | per-user auth: accounts, refresh sessions, security audit trail |
+| `strategy_heartbeats` | dormant legacy table — retained for its historical rows; no active endpoint writes to it |
 
 ---
 
@@ -186,7 +184,7 @@ docker compose up --build
     toolchain).
   - Runs as a **non-root user** `appuser` (uid 10001).
   - `ENTRYPOINT docker/entrypoint.sh` → `alembic upgrade head` → `exec` the
-    CMD (`uvicorn backend.main:app --host 0.0.0.0 --port 8000`). The
+    CMD (`uvicorn trading.api.app:create_app --factory --host 0.0.0.0 --port 8000`). The
     backend does not become ready until migrations are applied.
   - `depends_on: postgres` with `condition: service_healthy`.
   - Healthcheck hits `GET /api/health`.
@@ -216,14 +214,15 @@ no application change.
 ## 5. FastAPI application
 
 - **Factory:** `trading/api/app.py::create_app()` assembles the
-  `FastAPI` object: `lifespan` (DB init + the stale-heartbeat watcher),
-  the control-centre router at `/api`, `/api/health`, and the legacy
-  router.
-- **Entrypoint:** `backend/main.py` is `app = create_app()` plus a
-  `__main__` uvicorn block. It is the import-stable target used by
-  `uvicorn backend.main:app`, `api/index.py` (Vercel), and every test.
+  `FastAPI` object: `lifespan` (DB init + the stale-heartbeat watcher +
+  admin bootstrap), CORS, security headers, and the routers — `/api`
+  (control centre), `/api/auth`, `/api/admin`, `/api/health`, and the
+  `/api/ws` WebSocket.
+- **Entrypoint:** uvicorn runs the factory directly:
+  `uvicorn trading.api.app:create_app --factory`. There is no separate
+  `main` module.
 - **Lifespan** calls `init_db()` once (idempotent; the canonical `Base`
-  covers all 11 tables) and, unless `DISABLE_BACKGROUND_WATCHER` is set,
+  covers every table) and, unless `DISABLE_BACKGROUND_WATCHER` is set,
   schedules the stale-heartbeat watcher as a background task.
 - **Docs:** `/docs` (Swagger), `/redoc`, `/openapi.json`.
 
@@ -275,25 +274,28 @@ rate-limit-exempt (it is a probe).
 
 ---
 
-## 7. Legacy compatibility APIs
+## 7. Removed legacy surface
 
-`trading/api/legacy.py` — the original monitoring endpoints, kept working
-**unchanged** for backward compatibility. Unauthenticated. Do not add new
-features here.
+The pre-consolidation monitoring stack has been removed. For historical
+context, it consisted of:
 
-| Route | Behaviour |
-|---|---|
-| `POST /update_strategy` | Upsert one row per `(strategy_name, server_name)` into `strategy_heartbeats`. Fires Telegram alerts: `strategy_started/stopped/crashed/recovered` on status transitions, `day_loss_exceeded` when `day_pnl < 0` and `abs(day_pnl) > DAY_LOSS_LIMIT` (default 10000). Returns the full row. Validation errors → 422. |
-| `GET /strategies` | All `strategy_heartbeats` rows, newest `received_at` first. |
-| `GET /health` | `{"status":"ok","timestamp_utc":"…","service":"central-strategy-monitor"}`. Cheap liveness — no DB touch. Distinct from `/api/health`. |
+- `trading/api/legacy.py` — unauthenticated `POST /update_strategy`,
+  `GET /strategies`, `GET /health`, backed by the `strategy_heartbeats`
+  table.
+- `strategy_agent/` — a second heartbeat client that posted
+  `/update_strategy`.
+- `dashboard/` + `streamlit_app.py` — a Streamlit dashboard that polled
+  `GET /strategies`.
+- `backend/` — an import shim (`backend.main:app`) and `database.py` /
+  `models.py` / `schemas.py` re-export shims.
+- `api/index.py` + `vercel.json` — a Vercel deployment entrypoint.
 
-Consumers today: the legacy Streamlit dashboard (`dashboard/`,
-`streamlit_app.py`) polls `GET /strategies`; `strategy_agent/agent.py`
-posts `/update_strategy`; `example_strategy` runs that legacy agent
-alongside the canonical one.
-
-The compatibility contract (request/response shapes, status codes, upsert
-semantics, every alert transition) is pinned by `tests/api/test_legacy.py`.
+All of it is gone. Every strategy now heartbeats via
+`ControlCenterHeartbeatAgent` → `POST /api/heartbeat`; daily P&L (and the
+day-loss alert) go via `POST /api/pnl`; the dashboard is `frontend/`
+(React, served from S3 + CloudFront); the sole deployment target is the
+Backend EC2 (Docker + Nginx). The `strategy_heartbeats` table is kept
+only for its historical rows — nothing writes to it.
 
 ---
 
@@ -412,10 +414,6 @@ its own AngelOne SmartAPI integration:
   `API_BASE_URL` / `CONTROL_API_KEY` from the environment (the same vars
   the agent's `START_ALGO` injects).
 
-`DoubleStraddelAlgo/strategy_agent/` is a stale, divergent vendored copy
-of the legacy heartbeat agent and is not imported by that algo's
-`main.py`.
-
 Because these algos hold their own broker session, the `TRADING_MODE` gate
 does not protect them. Safety for them is: `BOT_DRY_RUN` (the two straddle/
 VWAP algos, default paper) and the broker account they are pointed at
@@ -425,18 +423,21 @@ VWAP algos, default paper) and the broker account they are pointed at
 
 ## 12. Heartbeats
 
-Two heartbeat paths run during the consolidation transition. They are
-independent; both can run in the same process.
+One heartbeat path: `trading.common.heartbeat.ControlCenterHeartbeatAgent`.
 
-| | Legacy | Canonical (control-centre) |
-|---|---|---|
-| Sender class | `strategy_agent.agent.StrategyHeartbeatAgent` | `trading.common.heartbeat.ControlCenterHeartbeatAgent` |
-| Endpoint | `POST /update_strategy` | `POST /api/heartbeat` (`X-API-Key`) |
-| Storage | `strategy_heartbeats` — upsert one row per `(strategy, server)` | `heartbeats` — append-only; also sets `algos.status`, `servers.last_heartbeat` |
-| Payload | name, server, status, `current_mtm`, `day_pnl`, `number_of_trades`, `last_update_time` | `algo_id`, `server_id`, status, `cpu`, `memory` (psutil, this process), `pnl`, `position`, `timestamp` |
-| Interval env | `HEARTBEAT_INTERVAL_SECONDS` (default 30) | `CONTROL_HEARTBEAT_INTERVAL_SECONDS` (default 10) |
-| Transport | daemon thread, retry + exponential backoff, non-blocking, never raises | same shape |
-| Used by | `example_strategy` (always), `strategy_agent/sample_trading_strategy.py` | the three real algos (via `monitor.py`), `example_strategy` (when `CONTROL_API_KEY` is set) |
+| | Control-centre heartbeat |
+|---|---|
+| Sender class | `trading.common.heartbeat.ControlCenterHeartbeatAgent` |
+| Endpoint | `POST /api/heartbeat` (service `X-API-Key`) |
+| Storage | `heartbeats` — append-only; also sets `algos.status`, `servers.last_heartbeat` |
+| Payload | `algo_id`, `server_id`, status, `cpu`, `memory` (psutil, this process), `pnl`, `position`, `timestamp` |
+| Interval env | `CONTROL_HEARTBEAT_INTERVAL_SECONDS` (default 10) |
+| Transport | daemon thread, retry + exponential backoff, non-blocking, never raises |
+| Used by | every strategy — the three real algos via `monitor.py`, `example_strategy` directly (when `CONTROL_API_KEY` is set) |
+
+Daily P&L is reported separately by `report_daily_pnl` → `POST /api/pnl`,
+which also raises the `day_loss_exceeded` alert when
+`abs(day_pnl) > DAY_LOSS_LIMIT`.
 
 Related best-effort reporters (canonical only), all non-blocking and
 failure-swallowing:
@@ -598,7 +599,7 @@ this is the target and the order.
 
 ```
         React frontend (future)  ──  CloudFront + S3
-        Streamlit dashboard (interim)
+        (served from S3 + CloudFront)
                      │  HTTPS
                 Backend EC2  (t3.medium — 2 vCPU / 4 GB)
                 Nginx → Uvicorn → FastAPI → PostgreSQL (on the box)

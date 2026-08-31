@@ -127,7 +127,3 @@ def test_readonly_collections_empty_but_wellformed(client, auth, env, path):
     r = client.get(path, params={"algo_id": "example_strategy", "server_id": "ec2-1"}, headers=auth)
     assert r.status_code == 200
     assert r.json() == []
-
-
-def test_legacy_health_still_works_no_auth(client):
-    assert client.get("/health").status_code == 200

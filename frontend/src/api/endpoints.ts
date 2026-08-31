@@ -14,7 +14,6 @@ import type {
   PositionEntry,
   ServerListEntry,
   ServerStatusResponse,
-  StrategyHeartbeatOut,
   TokenResponse,
   TradeEntry,
 } from "./types";
@@ -87,10 +86,6 @@ export const runAlgoAction = (action: AlgoAction, algo_id: string, server_id: st
 
 export const getCommand = (command_id: number) =>
   apiRequest<CommandResponse>(`/api/command/${command_id}`);
-
-// --- heartbeats (legacy richer snapshot) ---------------------------
-export const listStrategyHeartbeats = () =>
-  apiRequest<StrategyHeartbeatOut[]>("/strategies", { auth: false });
 
 // --- pnl ----------------------------------------------------------
 export const getPnlToday = (pnl_date?: string) =>

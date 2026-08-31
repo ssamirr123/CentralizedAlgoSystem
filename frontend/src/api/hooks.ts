@@ -37,15 +37,6 @@ export const useAlgoStatus = (algoId: string | null, serverId: string | null) =>
     enabled: !!algoId && !!serverId,
   });
 
-export const useStrategyHeartbeats = () => {
-  const poll = usePollInterval(POLL_INTERVAL_MS);
-  return useQuery({
-    queryKey: ["strategy-heartbeats"],
-    queryFn: api.listStrategyHeartbeats,
-    refetchInterval: poll,
-  });
-};
-
 export const usePnlToday = (pnlDate?: string) => {
   const poll = usePollInterval(POLL_INTERVAL_MS);
   return useQuery({

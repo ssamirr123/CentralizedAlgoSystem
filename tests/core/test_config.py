@@ -203,11 +203,10 @@ def test_agrees_with_common_config(clean_env):
 # --------------------------- wiring: refactored modules read the same values ---------------------------
 def test_refactored_module_constants_unchanged():
     import trading.api.deps as deps
-    import trading.api.legacy as legacy
     import trading.api.watcher as watcher
 
     assert deps.RATE_LIMIT_MAX_REQUESTS == 60
     assert deps.RATE_LIMIT_WINDOW_SECONDS == 60
     assert watcher.STALE_THRESHOLD_MINUTES == 2.0
     assert watcher.STALE_CHECK_INTERVAL_SECONDS == 60
-    assert legacy.DAY_LOSS_LIMIT == 10000.0
+    assert load_settings().day_loss_limit == 10000.0

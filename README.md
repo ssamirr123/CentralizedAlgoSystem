@@ -3,15 +3,20 @@
 A control plane for algorithmic trading strategies that run across one or
 more servers, plus the strategies themselves.
 
-- **Control plane** — a FastAPI backend: strategy registry, start/stop/
-  restart control (via AWS Lambda → SSM), heartbeat + log + P&L ingestion,
-  health, and a legacy monitoring API. Runs behind Nginx on a "Backend
-  EC2" in production; containerised with Docker for local/CI.
-- **Execution plane** — strategy processes (`trading/algos/*`) driven by a
-  local `trading-agent` CLI. Each runs independently; the backend/dashboard
-  being down never stops a running strategy.
-- **Data plane** — PostgreSQL (authoritative), plus per-run structured
-  logs and (future) S3 for historical data / reports.
+- **Frontend** — a React + TypeScript dashboard (`frontend/`) served as a
+  static build from **S3 behind CloudFront**. Talks only to `/api/*`
+  (same origin via CloudFront → the backend). JWT auth + RBAC.
+- **Control plane** — a FastAPI backend: auth/RBAC, strategy registry,
+  start/stop/restart control (via AWS Lambda → SSM), heartbeat + log +
+  P&L ingestion, `/api/health`, and a realtime WebSocket at `/api/ws`.
+  Runs behind **Nginx on a Backend EC2** in production; containerised with
+  Docker for local/CI.
+- **Execution plane** — strategy processes (`trading/algos/*`) on separate
+  Strategy EC2 instances, driven by the `trading-agent` CLI (invoked
+  remotely via Lambda → SSM). Each runs independently; the backend or
+  dashboard being down never stops a running strategy.
+- **Data plane** — PostgreSQL (authoritative, local to the Backend EC2),
+  plus per-run structured logs and CloudWatch metrics.
 
 > **Safety default: `TRADING_MODE=paper`.** Nothing places a real order
 > unless `TRADING_MODE` is *exactly* `live` (and, for the AngelOne algos,
@@ -27,20 +32,23 @@ Security posture: [`trading/SECURITY.md`](trading/SECURITY.md).
 ## Repository layout
 
 ```
-backend/                Import-stable entrypoint. backend.main:app = create_app().
-                        database.py / models.py / schemas.py are thin re-export
-                        shims kept for backward compatibility.
+frontend/               React + TypeScript dashboard (Vite). Built to static
+                        files, served from S3 + CloudFront. Calls /api/* only.
 
 trading/
   api/
     app.py              create_app() -- the FastAPI application factory
-    routes.py           control-center API  (/api/*, X-API-Key auth + rate limit)
-    legacy.py           legacy monitoring API  (/update_strategy, /strategies, /health)
+                        (uvicorn runs it as `trading.api.app:create_app --factory`)
+    routes.py           control-center API  (/api/*, JWT/RBAC + rate limit)
+    auth_routes.py      /api/auth/*  (login / refresh / logout / me / change-password)
+    admin_routes.py     /api/admin/* (user administration + audit log)
     health.py           GET /api/health  (DB probe, unauthenticated)
+    realtime/           WebSocket stream at /api/ws (Stage 19)
     watcher.py          server-side stale-heartbeat detection
-    deps.py             auth + rate-limit + DB-session dependencies
+    deps.py             auth (JWT + service key) + RBAC + rate-limit + DB session
     lambda_client.py    invokes the orchestration Lambda
     schemas.py          Pydantic request/response models for /api/*
+    security/           passwords, JWT tokens, the permission model, audit
   core/
     config.py           load_settings() -- the single backend Settings layer
   common/
@@ -54,7 +62,7 @@ trading/
     utils.py            PID files, graceful-shutdown flag, process liveness
   database/
     connection.py       the ONE canonical SQLAlchemy Base / engine / session
-    models.py           all 11 tables (control-center + legacy strategy_heartbeats)
+    models.py           all tables (control-center + auth: users/sessions/audit)
     init_db.py          create_all() helper -- dev/tests only, NOT prod migrations
   agent/
     trading_agent.py    per-host CLI: START_ALGO / STOP_ALGO / RESTART_ALGO /
@@ -64,22 +72,18 @@ trading/
     CombinedVwapNifty/  |
     DoubleStraddelAlgo/ |  three real strategies -- vendor their own AngelOne
     Vwap_Algo_Nifty_hedge/  SmartAPI client; do NOT use the broker abstraction
-  infrastructure/       Lambda orchestrator, EventBridge Scheduler, IAM, SSM
-  dashboard/            Streamlit control-center UI (talks to /api/*)
+  infrastructure/       Lambda orchestrator, EventBridge Scheduler, IAM, SSM,
+                        backend + frontend deployment, CloudWatch config
 
-alembic/                migration environment; versions/ holds the baseline
+alembic/                migration environment; versions/ holds the migrations
 alembic.ini
-Dockerfile              backend image (uvicorn, non-root)
+Dockerfile              backend image (uvicorn factory, non-root)
 docker-compose.yml      backend + PostgreSQL, local/CI
+docker/entrypoint.sh    runs `alembic upgrade head`, then the CMD
 .env.example            docker-compose configuration template (placeholders)
 
-dashboard/              legacy Streamlit dashboard (polls GET /strategies)
-strategy_agent/         legacy heartbeat client -> POST /update_strategy
 alerts/telegram.py      Telegram alert service (dedup + retry; no-op without creds)
-analytics/              legacy report stub (not wired into the live flow)
 tests/                  the pytest suite
-
-api/index.py            Vercel entrypoint (from backend.main import app)
 ```
 
 ---
@@ -120,7 +124,7 @@ export CONTROL_API_KEY="dev-control-key"
 # TRADING_MODE defaults to paper -- leave it
 
 alembic upgrade head
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn trading.api.app:create_app --factory --host 0.0.0.0 --port 8000 --reload
 ```
 
 Without `DATABASE_URL`, the app falls back to a local SQLite file. That is
@@ -172,17 +176,6 @@ endpoint returns **HTTP 503** with `"status":"degraded"` and
 `"database":"error: <ExceptionClass>"` — it never 500s, and never leaks
 the connection string.
 
-### Legacy compatibility API (unauthenticated)
-
-Kept working, unchanged, for the existing Streamlit dashboard and the
-`strategy_agent` heartbeat client. Do not build new features on these.
-
-| Route | Purpose |
-|---|---|
-| `POST /update_strategy` | upsert one latest-state row per `(strategy, server)` into `strategy_heartbeats`; fires Telegram alerts on status transitions and day-loss |
-| `GET /strategies` | list those rows (newest first) |
-| `GET /health` | `{"status":"ok","timestamp_utc":"…","service":"central-strategy-monitor"}` — cheap liveness, no DB |
-
 ---
 
 ## Configuration
@@ -223,8 +216,7 @@ Templates: [`trading/.env.example`](trading/.env.example),
 
 One canonical SQLAlchemy `Base` lives in
 `trading/database/connection.py`; every model is in
-`trading/database/models.py`. `backend/database.py`, `backend/models.py`
-and `backend/schemas.py` are compatibility re-export shims.
+`trading/database/models.py`.
 
 **Alembic** is the migration mechanism.
 
@@ -321,15 +313,14 @@ AngelOne strategies bypass it entirely (see above). Unifying them onto
 
 ## Heartbeats & monitoring
 
-Two heartbeat paths run during the consolidation transition:
-
-| | Legacy | Canonical |
-|---|---|---|
-| Sender | `strategy_agent/agent.py` | `trading/common/heartbeat.py` (`ControlCenterHeartbeatAgent`) |
-| Endpoint | `POST /update_strategy` | `POST /api/heartbeat` |
-| Storage | `strategy_heartbeats` (1 row per strategy/server, upsert) | `heartbeats` (append-only) + updates `algos.status`, `servers.last_heartbeat` |
-| Interval | `HEARTBEAT_INTERVAL_SECONDS` (30) | `CONTROL_HEARTBEAT_INTERVAL_SECONDS` (10) |
-| Used by | `example_strategy` (always), `sample_trading_strategy` | the three real algos, `example_strategy` (when `CONTROL_API_KEY` is set) |
+Every strategy runs `ControlCenterHeartbeatAgent`
+(`trading/common/heartbeat.py`), which `POST`s to `/api/heartbeat` every
+`CONTROL_HEARTBEAT_INTERVAL_SECONDS` (10). The backend appends to the
+`heartbeats` table and updates `algos.status` + `servers.last_heartbeat`.
+Daily P&L is reported separately via `report_daily_pnl` → `POST /api/pnl`,
+which also fires the day-loss alert when `abs(day_pnl) > DAY_LOSS_LIMIT`.
+The dashboard receives all of this live over the `/api/ws` WebSocket, with
+polling as the fallback.
 
 **Server-side staleness detection** (`trading/api/watcher.py`) runs inside
 the app lifespan unless `DISABLE_BACKGROUND_WATCHER` is set. Every
@@ -371,11 +362,14 @@ handlers. Generated `*.log` files are git-ignored.
 ## Security
 
 See [`trading/SECURITY.md`](trading/SECURITY.md) for the current posture:
-API-key auth (fails closed), per-key rate limiting, a `commands` audit
-row before every control action, Pydantic validation + parameterised SQL,
-no committed secrets, the `TRADING_MODE` gate, non-root container user,
-and the honestly-deferred items (per-user auth/RBAC, generic
-position-aware SAFE_STOP, position reconciliation).
+per-user login (username + password, bcrypt) → short-lived JWT access
+token + rotating refresh cookie (httpOnly, Secure, SameSite=Strict);
+RBAC with the permissions `VIEW / START / STOP / RESTART /
+TRADING_CONTROL / ADMIN`; the shared `X-API-Key` reduced to a VIEW-only
+machine identity; CSRF double-submit on the cookie endpoints; a CORS
+allow-list; per-identity rate limiting; an append-only `audit_log`;
+Pydantic validation + parameterised SQL; no committed secrets; the
+`TRADING_MODE` gate; and a non-root container user.
 
 ---
 
@@ -385,9 +379,9 @@ Target production shape (details and milestone breakdown in
 [`SYSTEM_DETAILED_GUIDE.md`](SYSTEM_DETAILED_GUIDE.md)):
 
 ```
-CloudFront + S3 (React frontend, future)   Streamlit dashboard (interim)
+        S3 + CloudFront  (React frontend, static build)
                      │
-              Backend EC2  (t3.medium, ap-south-1)
+              Backend EC2  (ap-south-1)
               Nginx → Uvicorn → FastAPI → PostgreSQL (local, on the box)
                      │
         ┌────────────┼────────────┐

@@ -21,7 +21,6 @@ if __package__ in {None, ""}:
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-from strategy_agent.agent import StrategyHeartbeatAgent
 from trading.algos.example_strategy.config import load_strategy_config
 from trading.algos.example_strategy.strategy import ExampleStrategy
 from trading.common.broker import BrokerConfigError, BrokerConnectionError, create_broker
@@ -146,20 +145,10 @@ def main() -> int:
     log_event(logger, logging.INFO, "STRATEGY_INITIALIZED")
     log_event(logger, logging.INFO, "START")  # shippable per the project's own event list
 
-    heartbeat_agent = StrategyHeartbeatAgent(
-        strategy_name=config.strategy_name,
-        server_name=server_name,
-        api_base_url=config.api_base_url,
-        heartbeat_interval_seconds=config.heartbeat_interval_seconds,
-    )
-    heartbeat_agent.start()
-    log_event(logger, logging.INFO, "HEARTBEAT_RUNNING", interval_seconds=config.heartbeat_interval_seconds)
-
-    # Second, independent heartbeat sender feeding the control-center schema
-    # (Milestone 5's heartbeats table) alongside the one above, which still
-    # feeds the old dashboard unchanged. Optional -- runs only if
-    # CONTROL_API_KEY is configured, so this doesn't break setups that
-    # haven't adopted the control-center API yet.
+    # Heartbeat sender feeding the control-center schema (heartbeats table
+    # via POST /api/heartbeat). Runs only if CONTROL_API_KEY is configured
+    # -- the strategy still runs without it, it just won't report to the
+    # dashboard.
     control_center_agent: ControlCenterHeartbeatAgent | None = None
     if config.control_api_key:
         control_center_agent = ControlCenterHeartbeatAgent(
@@ -188,10 +177,7 @@ def main() -> int:
     try:
         while not shutdown.is_set():
             try:
-                status, mtm, day_pnl, trade_count = strategy.on_tick()
-                heartbeat_agent.update_metrics(
-                    mtm=mtm, pnl=day_pnl, trade_count=trade_count, status=status,
-                )
+                status, _mtm, day_pnl, trade_count = strategy.on_tick()
                 if control_center_agent is not None:
                     control_center_agent.update_metrics(status=status, pnl=day_pnl)
 
@@ -206,10 +192,6 @@ def main() -> int:
                 # A single bad tick should not crash the whole process —
                 # log it, report ERROR status via heartbeat, keep looping.
                 log_event(logger, logging.ERROR, "TICK_ERROR", error=str(exc))
-                heartbeat_agent.update_metrics(
-                    mtm=strategy.mtm, pnl=strategy.day_pnl,
-                    trade_count=strategy.trade_count, status="ERROR",
-                )
                 if control_center_agent is not None:
                     control_center_agent.update_metrics(status="ERROR", pnl=strategy.day_pnl)
 
@@ -223,12 +205,6 @@ def main() -> int:
             strategy.on_stop()
         except Exception as exc:  # noqa: BLE001
             log_event(logger, logging.ERROR, "STRATEGY_STOP_ERROR", error=str(exc))
-
-        heartbeat_agent.update_metrics(
-            mtm=strategy.mtm, pnl=strategy.day_pnl,
-            trade_count=strategy.trade_count, status="STOPPED",
-        )
-        heartbeat_agent.stop()
 
         if control_center_agent is not None:
             control_center_agent.update_metrics(status="STOPPED", pnl=strategy.day_pnl)

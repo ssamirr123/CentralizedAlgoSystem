@@ -2,11 +2,12 @@
 FastAPI application factory.
 
 create_app() assembles: lifespan (DB init + stale-heartbeat watcher +
-Stage 18 admin bootstrap), CORS, security headers, and the routers --
-control-center at /api, auth at /api/auth, admin at /api/admin,
-/api/health, and the legacy router.
+admin bootstrap), CORS, security headers, and the routers -- control-
+center at /api, auth at /api/auth, admin at /api/admin, /api/health, and
+the realtime WebSocket at /api/ws.
 
-backend/main.py stays import-compatible: `app = create_app()`.
+This is the single application entrypoint. Uvicorn runs it via the
+factory: `uvicorn trading.api.app:create_app --factory`.
 """
 from __future__ import annotations
 
@@ -27,7 +28,6 @@ configure_logging()
 from trading.api.admin_routes import router as admin_router  # noqa: E402
 from trading.api.auth_routes import router as auth_router  # noqa: E402
 from trading.api.health import router as health_router  # noqa: E402
-from trading.api.legacy import router as legacy_router  # noqa: E402
 from trading.api.realtime.ws import router as realtime_router  # noqa: E402
 from trading.api.routes import router as control_center_router  # noqa: E402
 from trading.api.security.bootstrap import bootstrap_admin  # noqa: E402
@@ -119,5 +119,4 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api")  # GET /api/health, unauthenticated
     if load_settings().realtime_enabled:
         app.include_router(realtime_router, prefix="/api")  # WS /api/ws (Stage 19)
-    app.include_router(legacy_router)  # legacy machine/streamlit endpoints (unauthenticated, slated for removal)
     return app

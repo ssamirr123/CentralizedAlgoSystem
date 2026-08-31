@@ -51,9 +51,3 @@ def test_health_recovers_after_transient_failure(client):
 
     r = client.get("/api/health")
     assert r.status_code == 200 and r.json()["database"] == "connected"
-
-
-def test_legacy_health_still_distinct(client):
-    legacy = client.get("/health").json()
-    assert "timestamp_utc" in legacy and "database" not in legacy
-    assert legacy["service"] == "central-strategy-monitor"

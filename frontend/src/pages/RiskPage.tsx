@@ -1,13 +1,17 @@
-import { useAlgos, useStrategyHeartbeats } from "@/api/hooks";
+import { useAlgos, usePnlToday } from "@/api/hooks";
 import { PageHeader } from "@/components/PageHeader";
 import { QueryBoundary } from "@/components/States";
 import { StatusBadge } from "@/components/StatusBadge";
 import { DAY_LOSS_LIMIT, STALE_MINUTES, TRADING_MODE } from "@/lib/config";
 import { formatINR, isStale, pnlSign, relativeAge } from "@/lib/format";
 
+function istToday(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+}
+
 export function RiskPage() {
-  const hb = useStrategyHeartbeats();
   const algos = useAlgos();
+  const pnl = usePnlToday(istToday());
 
   return (
     <>
@@ -35,8 +39,8 @@ export function RiskPage() {
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
-        <h2>Day-loss check (from /strategies)</h2>
-        <QueryBoundary query={hb} empty={(d) => d.length === 0}>
+        <h2>Day-loss check (today's P&L per strategy)</h2>
+        <QueryBoundary query={algos} empty={(d) => d.length === 0}>
           {(list) => (
             <div className="table-wrap">
               <table className="data">
@@ -51,17 +55,18 @@ export function RiskPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {list.map((h) => {
-                    const loss = h.day_pnl < 0 ? Math.abs(h.day_pnl) : 0;
+                  {list.map((a) => {
+                    const dayPnl = pnl.data?.[`${a.algo_id}|${a.server_id}`] ?? null;
+                    const loss = dayPnl != null && dayPnl < 0 ? Math.abs(dayPnl) : 0;
                     const breach = loss > DAY_LOSS_LIMIT;
                     return (
-                      <tr key={`${h.strategy_name}|${h.server_name}`}>
-                        <td>{h.strategy_name}</td>
-                        <td className="mono">{h.server_name}</td>
+                      <tr key={`${a.algo_id}|${a.server_id}`}>
+                        <td>{a.algo_id}</td>
+                        <td className="mono">{a.server_id}</td>
                         <td>
-                          <StatusBadge status={h.status} />
+                          <StatusBadge status={a.status} />
                         </td>
-                        <td className={`num ${pnlSign(h.day_pnl)}`}>{formatINR(h.day_pnl)}</td>
+                        <td className={`num ${pnlSign(dayPnl)}`}>{dayPnl == null ? "—" : formatINR(dayPnl)}</td>
                         <td className="num">
                           {loss === 0 ? "—" : `${Math.round((loss / DAY_LOSS_LIMIT) * 100)}%`}
                         </td>
