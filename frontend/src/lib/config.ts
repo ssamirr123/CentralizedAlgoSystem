@@ -25,8 +25,15 @@ export const DAY_LOSS_LIMIT = Number(import.meta.env.VITE_DAY_LOSS_LIMIT ?? "100
 export const STALE_MINUTES = Number(import.meta.env.VITE_STALE_MINUTES ?? "2") || 2;
 export const STALE_MS = STALE_MINUTES * 60 * 1000;
 
-/** Default polling cadence for live views, ms. */
+/** Default polling cadence for live views, ms (fallback when realtime is down). */
 export const POLL_INTERVAL_MS = 15000;
+
+/** Stage 19: use the WebSocket stream when available. Anything other than
+ *  "off"/"false"/"0" enables it. Polling is the automatic fallback. */
+export const REALTIME_ENABLED =
+  (import.meta.env.VITE_REALTIME ?? "on").trim().toLowerCase() !== "off" &&
+  (import.meta.env.VITE_REALTIME ?? "on").trim().toLowerCase() !== "false" &&
+  (import.meta.env.VITE_REALTIME ?? "on").trim().toLowerCase() !== "0";
 
 /** Backend RBAC permissions (mirror trading/api/security/permissions.py). */
 export const PERMISSIONS = [

@@ -1,13 +1,22 @@
 import { useQuery, useMutation, keepPreviousData } from "@tanstack/react-query";
 import { POLL_INTERVAL_MS } from "@/lib/config";
+import { usePollInterval } from "@/realtime/RealtimeProvider";
 import * as api from "./endpoints";
 import type { AlgoAction } from "./types";
 
-export const useHealth = () =>
-  useQuery({ queryKey: ["health"], queryFn: api.getHealth, refetchInterval: POLL_INTERVAL_MS, retry: false });
+// While the realtime socket is connected, `poll` is false and these
+// queries update from the WS stream (+ a one-shot invalidate on connect).
+// When it drops, `poll` becomes POLL_INTERVAL_MS — the polling fallback.
 
-export const useServers = () =>
-  useQuery({ queryKey: ["servers"], queryFn: api.listServers, refetchInterval: POLL_INTERVAL_MS });
+export const useHealth = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["health"], queryFn: api.getHealth, refetchInterval: poll || POLL_INTERVAL_MS, retry: false });
+};
+
+export const useServers = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["servers"], queryFn: api.listServers, refetchInterval: poll });
+};
 
 export const useServerStatus = (serverId: string | null, live: boolean) =>
   useQuery({
@@ -16,8 +25,10 @@ export const useServerStatus = (serverId: string | null, live: boolean) =>
     enabled: !!serverId,
   });
 
-export const useAlgos = () =>
-  useQuery({ queryKey: ["algos"], queryFn: api.listAlgos, refetchInterval: POLL_INTERVAL_MS });
+export const useAlgos = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["algos"], queryFn: api.listAlgos, refetchInterval: poll });
+};
 
 export const useAlgoStatus = (algoId: string | null, serverId: string | null) =>
   useQuery({
@@ -26,19 +37,23 @@ export const useAlgoStatus = (algoId: string | null, serverId: string | null) =>
     enabled: !!algoId && !!serverId,
   });
 
-export const useStrategyHeartbeats = () =>
-  useQuery({
+export const useStrategyHeartbeats = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({
     queryKey: ["strategy-heartbeats"],
     queryFn: api.listStrategyHeartbeats,
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: poll,
   });
+};
 
-export const usePnlToday = (pnlDate?: string) =>
-  useQuery({
+export const usePnlToday = (pnlDate?: string) => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({
     queryKey: ["pnl-today", pnlDate ?? "utc-today"],
     queryFn: () => api.getPnlToday(pnlDate),
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: poll,
   });
+};
 
 export const usePnlHistory = (algoId: string | null, serverId: string | null) =>
   useQuery({
@@ -48,14 +63,16 @@ export const usePnlHistory = (algoId: string | null, serverId: string | null) =>
     placeholderData: keepPreviousData,
   });
 
-export const usePositions = (algoId: string | null, serverId: string | null) =>
-  useQuery({
+export const usePositions = (algoId: string | null, serverId: string | null) => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({
     queryKey: ["positions", algoId, serverId],
     queryFn: () => api.getPositions(algoId as string, serverId as string),
     enabled: !!algoId && !!serverId,
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: poll,
     placeholderData: keepPreviousData,
   });
+};
 
 export const useTrades = (algoId: string | null, serverId: string | null, limit = 100) =>
   useQuery({

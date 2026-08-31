@@ -28,6 +28,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
+from trading.api.realtime import publish as rt
 from trading.core.config import load_settings
 from trading.database.connection import get_db
 from trading.database.models import StrategyHeartbeat
@@ -114,6 +115,8 @@ def update_strategy(
         new_status = payload.status.value
         s_name = payload.strategy_name
         srv_name = payload.server_name
+        is_new = strategy is None
+        prev_status = None if is_new else strategy.status
 
         if strategy is None:
             strategy = StrategyHeartbeat(
@@ -135,7 +138,6 @@ def update_strategy(
             elif new_status == StrategyStatus.ERROR:
                 alert_service.strategy_crashed(s_name, srv_name, reason="Initial status ERROR")
         else:
-            prev_status = strategy.status
             strategy.status = new_status
             strategy.current_mtm = payload.current_mtm
             strategy.day_pnl = payload.day_pnl
@@ -156,9 +158,22 @@ def update_strategy(
         # Day loss alert (fires on every heartbeat when over limit, dedup prevents spam)
         if payload.day_pnl < 0 and abs(payload.day_pnl) > DAY_LOSS_LIMIT:
             alert_service.day_loss_exceeded(s_name, srv_name, loss=payload.day_pnl, limit=DAY_LOSS_LIMIT)
+            rt.alert(kind="day_loss_exceeded", severity="critical",
+                     message=f"{s_name} day loss {payload.day_pnl:.0f} exceeds limit {DAY_LOSS_LIMIT:.0f}",
+                     algo_id=s_name, server_id=srv_name)
 
         db.commit()
         db.refresh(strategy)
+
+        # Stage 19: mirror the legacy heartbeat onto the realtime stream so
+        # the dashboard is live for strategies still on POST /update_strategy.
+        rt.heartbeat(s_name, srv_name, status=new_status, pnl=payload.day_pnl,
+                     timestamp=payload.last_update_time.isoformat())
+        if is_new or prev_status != new_status:
+            rt.strategy_status(s_name, srv_name, status=new_status,
+                               previous_status=prev_status, source="legacy")
+        rt.pnl(s_name, srv_name, date=datetime.now(timezone.utc).date().isoformat(),
+               pnl=payload.day_pnl, trade_count=payload.number_of_trades)
         return strategy
     except SQLAlchemyError as exc:
         db.rollback()

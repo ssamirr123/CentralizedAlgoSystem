@@ -34,6 +34,7 @@ from trading.api.deps import (
 )
 from trading.api.security import audit
 from trading.api.security.permissions import Permission
+from trading.api.realtime import publish as rt
 from trading.api.lambda_client import LambdaInvokeError, invoke_orchestrator, invoke_orchestrator_async
 from trading.api.schemas import (
     AlgoActionRequest,
@@ -155,6 +156,8 @@ def _run_algo_action(
         command_row.status = "FAILED"
         command_row.error = str(exc)
         db.commit()
+        rt.command(command_id=command_row.id, algo_id=body.algo_id, server_id=body.server_id,
+                   action=action, status="FAILED", requested_by=requested_by, message=str(exc))
         return CommandResponse(success=False, command_id=command_row.id, status="FAILED", message=str(exc))
 
     command_row.job_id = result.get("job_id")
@@ -164,6 +167,11 @@ def _run_algo_action(
         command_row.error = result.get("error")
     db.commit()
 
+    rt.command(
+        command_id=command_row.id, algo_id=body.algo_id, server_id=body.server_id, action=action,
+        status=result.get("status", "UNKNOWN"), job_id=result.get("job_id"),
+        requested_by=requested_by, message=result.get("error") or result.get("message"),
+    )
     return CommandResponse(
         success=bool(result.get("success")),
         command_id=command_row.id,
@@ -242,12 +250,26 @@ def get_command(
             # correct it. This is trading_agent.py's own reported status
             # (process-liveness checked), the most authoritative source
             # available, not a guess derived from the command type.
+            synced_algo_status = None
+            algo_name = None
             if command_row.algo_id is not None and result.get("status"):
                 algo_row = db.query(models.Algo).filter(models.Algo.id == command_row.algo_id).one_or_none()
                 if algo_row is not None:
                     algo_row.status = result["status"]
+                    synced_algo_status = result["status"]
+                    algo_name = algo_row.name
 
             db.commit()
+
+            rt.command(
+                command_id=command_row.id, algo_id=algo_name, server_id=command_server.name,
+                action=command_row.command, status=command_row.status, job_id=command_row.job_id,
+                requested_by=command_row.requested_by, message=command_row.error,
+            )
+            if synced_algo_status and algo_name:
+                rt.strategy_status(
+                    algo_name, command_server.name, status=synced_algo_status, source="command",
+                )
 
     return CommandResponse(
         success=command_row.status not in ("FAILED", "ERROR", "UNKNOWN"),
@@ -299,6 +321,12 @@ def server_status(
                 ssm_status = result.get("ssm_status")
                 live_check_healthy = result.get("healthy")
                 db.commit()
+                rt.server_health(
+                    server.name, status=server.status, ssm_status=ssm_status,
+                    healthy=live_check_healthy,
+                    last_heartbeat=server.last_heartbeat.isoformat() if server.last_heartbeat else None,
+                    source="live_check",
+                )
         except LambdaInvokeError as exc:
             # A failed live check degrades to the cached DB value rather
             # than failing the whole request -- "can't verify right now"
@@ -717,13 +745,31 @@ def post_heartbeat(
     server.last_heartbeat = ts
     db.commit()
 
+    rt.heartbeat(
+        body.algo_id, body.server_id, status=body.status, cpu=body.cpu, memory=body.memory,
+        pnl=body.pnl, position=body.position, timestamp=ts.isoformat(),
+    )
+
     if previous_status != body.status:
+        rt.strategy_status(
+            body.algo_id, body.server_id, status=body.status,
+            previous_status=previous_status, source="heartbeat",
+        )
         if body.status == "RUNNING":
             alert_service.strategy_recovered(body.algo_id, body.server_id)
+            rt.alert(kind="strategy_recovered", severity="info",
+                     message=f"{body.algo_id} recovered on {body.server_id}",
+                     algo_id=body.algo_id, server_id=body.server_id)
         elif body.status == "STOPPED":
             alert_service.strategy_stopped(body.algo_id, body.server_id)
+            rt.alert(kind="strategy_stopped", severity="warning",
+                     message=f"{body.algo_id} stopped on {body.server_id}",
+                     algo_id=body.algo_id, server_id=body.server_id)
         elif body.status == "ERROR":
             alert_service.strategy_crashed(body.algo_id, body.server_id, reason="Status changed to ERROR")
+            rt.alert(kind="strategy_crashed", severity="critical",
+                     message=f"{body.algo_id} entered ERROR on {body.server_id}",
+                     algo_id=body.algo_id, server_id=body.server_id)
 
     return HeartbeatAck(success=True, algo_id=body.algo_id, server_id=body.server_id)
 
@@ -770,12 +816,19 @@ def post_log(
     server = _resolve_server(db, body.server_id)
     algo = _get_or_create_algo(db, body.algo_id, server)
 
+    level = body.level.upper()
     db.add(models.Log(
         algo_id=algo.id, server_id=server.id,
         timestamp=body.timestamp or datetime.now(timezone.utc),
-        level=body.level.upper(), event=body.event, details=body.details,
+        level=level, event=body.event, details=body.details,
     ))
     db.commit()
+    if level in ("ERROR", "WARNING"):
+        rt.alert(
+            kind="log", severity="critical" if level == "ERROR" else "warning",
+            message=f"{body.event} ({body.algo_id})", algo_id=body.algo_id,
+            server_id=body.server_id, detail=body.details,
+        )
     return LogAck(success=True)
 
 
@@ -881,6 +934,7 @@ def post_position(
         if existing is not None:
             db.delete(existing)
             db.commit()
+        rt.position(body.algo_id, body.server_id, symbol=body.symbol, quantity=0, closed=True)
         return PositionAck(success=True, closed=True)
 
     if existing is not None:
@@ -895,6 +949,10 @@ def post_position(
             last_price=body.last_price, pnl=body.pnl,
         ))
     db.commit()
+    rt.position(
+        body.algo_id, body.server_id, symbol=body.symbol, quantity=body.quantity,
+        average_price=body.average_price, last_price=body.last_price, pnl=body.pnl, closed=False,
+    )
     return PositionAck(success=True, closed=False)
 
 
@@ -933,13 +991,19 @@ def post_trade(
     server = _resolve_server(db, body.server_id)
     algo = _get_or_create_algo(db, body.algo_id, server)
 
+    executed_at = body.executed_at or datetime.now(timezone.utc)
     db.add(models.Trade(
         algo_id=algo.id, server_id=server.id, symbol=body.symbol, side=body.side.upper(),
         quantity=body.quantity, price=body.price,
-        executed_at=body.executed_at or datetime.now(timezone.utc),
+        executed_at=executed_at,
         order_id=body.order_id,
     ))
     db.commit()
+    rt.trade(
+        body.algo_id, body.server_id, symbol=body.symbol, side=body.side.upper(),
+        quantity=body.quantity, price=body.price, executed_at=executed_at.isoformat(),
+        order_id=body.order_id,
+    )
     return TradeAck(success=True)
 
 
@@ -973,4 +1037,8 @@ def post_pnl(
             pnl=body.pnl, trade_count=body.trade_count,
         ))
     db.commit()
+    rt.pnl(
+        body.algo_id, body.server_id, date=target_date.isoformat(),
+        pnl=body.pnl, trade_count=body.trade_count,
+    )
     return DailyPnlEntry(date=target_date, pnl=body.pnl, trade_count=body.trade_count)

@@ -32,6 +32,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from alerts.telegram import alert_service
+from trading.api.realtime import publish as rt
 from trading.core.config import load_settings
 from trading.database import models
 from trading.database.connection import SessionLocal
@@ -89,6 +90,14 @@ def check_stale_heartbeats_once(
             algo.name, server_name, algo.status, silent_for,
         )
         alert_service.heartbeat_missing(algo.name, server_name, minutes=silent_for)
+        rt.alert(
+            kind="heartbeat_missing", severity="warning",
+            message=f"{algo.name} on {server_name}: no heartbeat for {silent_for:.1f} min",
+            algo_id=algo.name, server_id=server_name, detail={"minutes_silent": round(silent_for, 1)},
+        )
+        rt.strategy_status(
+            algo.name, server_name, status="STALE", previous_status=algo.status, source="watcher",
+        )
         alerted.append((algo.name, server_name, silent_for))
     return alerted
 

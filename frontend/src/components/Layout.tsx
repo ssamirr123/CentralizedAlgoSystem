@@ -4,6 +4,8 @@ import { NAV_ROUTES } from "@/routes";
 import { useAuth } from "@/auth/AuthContext";
 import { useHealth } from "@/api/hooks";
 import { TradingModeBadge, TradingModeStripe } from "./TradingModeBadge";
+import { RealtimeIndicator } from "./RealtimeIndicator";
+import { AlertsBell } from "./AlertsBell";
 
 function ConnIndicator() {
   const { data, isError, isLoading } = useHealth();
@@ -66,7 +68,9 @@ export function Layout({ children }: { children: ReactNode }) {
           <strong style={{ fontSize: 15 }}>{active?.label ?? "Trading Control Center"}</strong>
           <TradingModeBadge />
           <div className="spacer" />
+          <RealtimeIndicator />
           <ConnIndicator />
+          <AlertsBell />
           {user && (
             <span className="conn" title={`role: ${user.role}`}>
               {user.username}

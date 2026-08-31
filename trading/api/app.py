@@ -28,6 +28,7 @@ from trading.api.admin_routes import router as admin_router  # noqa: E402
 from trading.api.auth_routes import router as auth_router  # noqa: E402
 from trading.api.health import router as health_router  # noqa: E402
 from trading.api.legacy import router as legacy_router  # noqa: E402
+from trading.api.realtime.ws import router as realtime_router  # noqa: E402
 from trading.api.routes import router as control_center_router  # noqa: E402
 from trading.api.security.bootstrap import bootstrap_admin  # noqa: E402
 from trading.api.watcher import stale_heartbeat_watcher  # noqa: E402
@@ -116,5 +117,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_router, prefix="/api")  # /api/admin/*
     app.include_router(control_center_router, prefix="/api")
     app.include_router(health_router, prefix="/api")  # GET /api/health, unauthenticated
+    if load_settings().realtime_enabled:
+        app.include_router(realtime_router, prefix="/api")  # WS /api/ws (Stage 19)
     app.include_router(legacy_router)  # legacy machine/streamlit endpoints (unauthenticated, slated for removal)
     return app

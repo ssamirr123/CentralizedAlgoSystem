@@ -128,6 +128,17 @@ class Settings:
         default_factory=lambda: _env("AUTH_BOOTSTRAP_ADMIN_PASSWORD")
     )
 
+    # --- Stage 19: realtime (WebSocket) monitoring --------------------
+    realtime_enabled: bool = field(
+        default_factory=lambda: _env("REALTIME_ENABLED", "true").lower() not in ("0", "false", "no")
+    )
+    realtime_ping_interval_seconds: int = field(
+        default_factory=lambda: _env_int("REALTIME_PING_INTERVAL_SECONDS", 25)
+    )
+    realtime_client_timeout_seconds: int = field(
+        default_factory=lambda: _env_int("REALTIME_CLIENT_TIMEOUT_SECONDS", 60)
+    )
+
     # --- Stale-heartbeat watcher --------------------------------
     stale_threshold_minutes: float = field(
         default_factory=lambda: _env_float("STALE_THRESHOLD_MINUTES", 2.0)

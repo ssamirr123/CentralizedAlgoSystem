@@ -6,6 +6,7 @@ interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
   readonly VITE_DAY_LOSS_LIMIT?: string;
   readonly VITE_STALE_MINUTES?: string;
+  readonly VITE_REALTIME?: string;
 }
 
 interface ImportMeta {

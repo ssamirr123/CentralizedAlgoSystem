@@ -19,7 +19,8 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       proxy: {
-        "/api": { target, changeOrigin: true },
+        // ws:true so the realtime socket (/api/ws) is proxied too.
+        "/api": { target, changeOrigin: true, ws: true },
         "/strategies": { target, changeOrigin: true },
         "/health": { target, changeOrigin: true },
       },
