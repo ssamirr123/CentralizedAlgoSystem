@@ -15,12 +15,12 @@ BUCKET="${BUCKET:-centralized-algo-frontend-${ACCOUNT_ID}}"
 OAC_NAME="${OAC_NAME:-centralized-algo-frontend-oac}"
 FUNC_NAME="${FUNC_NAME:-centralized-algo-spa-rewrite}"
 # The API-proxy origin. CloudFront cannot use a bare IP for a custom
-# origin, and the backend box has NO Elastic IP, so its public IP (and
-# this DNS name) change on every stop/start. Resolve it live from the
-# instance unless API_ORIGIN_DNS is pinned in the environment. FIX THIS
-# PROPERLY: attach an Elastic IP to BACKEND_INSTANCE_ID and pin
-# API_ORIGIN_DNS to the EIP's ec2-<a-b-c-d>... name.
+# origin. The backend now has Elastic IP 13.232.95.211, so its public
+# DNS name is stable across stop/start — pinned here. If the EIP is ever
+# changed, update this (or unset it to re-resolve live from the
+# instance's current public IP).
 BACKEND_INSTANCE_ID="${BACKEND_INSTANCE_ID:-i-0f344752a1ca2811b}"
+API_ORIGIN_DNS="${API_ORIGIN_DNS:-ec2-13-232-95-211.ap-south-1.compute.amazonaws.com}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/.deploy-outputs"
 TMPD="$HERE/.provision-tmp"
