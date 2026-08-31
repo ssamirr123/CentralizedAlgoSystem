@@ -14,6 +14,13 @@ ACCOUNT_ID="${ACCOUNT_ID:-471112713822}"
 BUCKET="${BUCKET:-centralized-algo-frontend-${ACCOUNT_ID}}"
 OAC_NAME="${OAC_NAME:-centralized-algo-frontend-oac}"
 FUNC_NAME="${FUNC_NAME:-centralized-algo-spa-rewrite}"
+# The API-proxy origin. CloudFront cannot use a bare IP for a custom
+# origin, and the backend box has NO Elastic IP, so its public IP (and
+# this DNS name) change on every stop/start. Resolve it live from the
+# instance unless API_ORIGIN_DNS is pinned in the environment. FIX THIS
+# PROPERLY: attach an Elastic IP to BACKEND_INSTANCE_ID and pin
+# API_ORIGIN_DNS to the EIP's ec2-<a-b-c-d>... name.
+BACKEND_INSTANCE_ID="${BACKEND_INSTANCE_ID:-i-0f344752a1ca2811b}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/.deploy-outputs"
 TMPD="$HERE/.provision-tmp"
@@ -21,6 +28,15 @@ mkdir -p "$TMPD"
 trap 'rm -rf "$TMPD"' EXIT
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+
+# --- resolve the API-proxy origin DNS name ---------------------------
+if [ -z "${API_ORIGIN_DNS:-}" ]; then
+  ip="$(aws ec2 describe-instances --region "$REGION" --instance-ids "$BACKEND_INSTANCE_ID" \
+    --query 'Reservations[].Instances[].PublicIpAddress' --output text)"
+  [ -n "$ip" ] && [ "$ip" != "None" ] || { echo "backend $BACKEND_INSTANCE_ID has no public IP" >&2; exit 1; }
+  API_ORIGIN_DNS="ec2-$(echo "$ip" | tr . -).${REGION}.compute.amazonaws.com"
+fi
+say "API origin -> $API_ORIGIN_DNS"
 
 # The AWS CLI here is native Windows aws.exe under Git Bash, which cannot
 # read MSYS-style paths (/c/...) in file:// / fileb:// args. Convert.
@@ -88,6 +104,7 @@ say "function published: $FUNC_ARN"
 CFG="$TMPD/distribution-config.json"
 sed -e "s|__OAC_ID__|$OAC_ID|g" \
     -e "s|__FUNCTION_ARN__|$FUNC_ARN|g" \
+    -e "s|__API_ORIGIN_DNS__|$API_ORIGIN_DNS|g" \
     -e "s|__CALLER_REF__|centralized-algo-frontend-$(date +%s)|g" \
     "$HERE/cloudfront-distribution-config.json" > "$CFG"
 
