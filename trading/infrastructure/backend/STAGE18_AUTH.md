@@ -1,5 +1,11 @@
 # Stage 18 — production auth & security (deploy notes)
 
+> **Deployed 2026-08-31** — backend `i-0f344752a1ca2811b` at commit
+> `3a823cd`, migration `a1b2c3d4e5f6` applied, frontend rebuilt to
+> CloudFront `d1135mn36rkeep.cloudfront.net`. Bootstrap admin created,
+> password rotated, `AUTH_BOOTSTRAP_ADMIN_*` removed from the box `.env`.
+> 43/43 production auth+RBAC+CORS checks passed. `TRADING_MODE=paper`.
+
 Adds per-user auth + RBAC + audit to the `/api/*` surface. The shared
 `X-API-Key` still works but is now a **fixed, VIEW-only machine identity**
 — it can no longer start/stop/restart a process or reach `/api/admin/*`.
