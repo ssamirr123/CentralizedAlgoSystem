@@ -55,11 +55,17 @@ services:
       AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-}
       AUTH_BOOTSTRAP_ADMIN_USERNAME: ${AUTH_BOOTSTRAP_ADMIN_USERNAME:-}
       AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${AUTH_BOOTSTRAP_ADMIN_PASSWORD:-}
+      # Realtime (Stage 19). Endpoint mounts by default; these only tune it.
+      REALTIME_ENABLED: ${REALTIME_ENABLED:-true}
+      REALTIME_PING_INTERVAL_SECONDS: ${REALTIME_PING_INTERVAL_SECONDS:-}
+      REALTIME_CLIENT_TIMEOUT_SECONDS: ${REALTIME_CLIENT_TIMEOUT_SECONDS:-}
+      # Dashboard -> Lambda control hop (Stage 15 / Stage 20 P0). Needs the
+      # backend instance role to also allow lambda:InvokeFunction.
+      LAMBDA_FUNCTION_NAME: ${LAMBDA_FUNCTION_NAME:-}
+      AWS_REGION: ${AWS_REGION:-}
       # Optional integrations -- set in .env when needed:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-      AWS_REGION: ${AWS_REGION:-}
-      LAMBDA_FUNCTION_NAME: ${LAMBDA_FUNCTION_NAME:-}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     healthcheck:
