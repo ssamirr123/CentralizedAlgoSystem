@@ -142,6 +142,42 @@ a scheduler-set pause flag.
 - No repository changes beyond this report +
   `iam_backend_invoke_orchestrator_policy.json`.
 
+## Deploy outcome (2026-08-31, "deploy all")
+
+Applied:
+- **Stage 19 realtime** deployed. Backend rebuilt via the prod overlay
+  (`docker compose -f docker-compose.yml -f
+  trading/infrastructure/backend/docker-compose.prod.yml up -d --build`)
+  at commit `f1b0d24`; `/api/ws` live. nginx on the box already had the
+  WebSocket upgrade `map` + headers — **no nginx change needed**.
+  Frontend rebuilt (`index-CwsyyL7s.js`) and pushed to S3 + CloudFront
+  invalidated. E2E verified through CloudFront: `wss://…/api/ws`
+  handshake with `bearer.<jwt>` subprotocol → `hello`, live `heartbeat`
+  + `pnl` events, monotonic/unique `seq`, ping→pong, bad token → close
+  `1008`.
+- **P0 #2** — deploys now use the same compose invocation as the systemd
+  unit (the `/var/lib/centralized-algo/pgdata` bind mount is canonical);
+  the Stage 20 `admin` user is on that DB and survives restarts.
+- **P0 #1 (partial)** — `LAMBDA_FUNCTION_NAME=TradingOrchestrator` +
+  `AWS_REGION=ap-south-1` set in the backend container + compose
+  passthrough. Still needs the IAM grant below.
+
+Still requires an admin identity (`trading-control-cli` cannot):
+
+```sh
+# P0 #1 — let the backend invoke the orchestrator
+aws iam put-role-policy --role-name TradingEC2SSMRole \
+  --policy-name InvokeTradingOrchestrator \
+  --policy-document file://trading/infrastructure/lambda/iam_backend_invoke_orchestrator_policy.json
+
+# P1 #4 — stop the legacy schedules bouncing the backend EC2
+aws scheduler delete-schedule --region ap-south-1 --name ec2_stop
+aws scheduler delete-schedule --region ap-south-1 --name ec2_start
+```
+
+After the IAM grant, dashboard START/STOP/RESTART + live EC2 health work
+end-to-end (re-run the Stage 20 control-plane checks to confirm).
+
 ## Recommended order of remediation
 
 1. **#2** pin the canonical DB + fix the deploy command (prevents another
