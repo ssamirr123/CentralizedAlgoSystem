@@ -43,6 +43,18 @@ services:
       APP_ENV: ${APP_ENV:-docker}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DISABLE_BACKGROUND_WATCHER: ${DISABLE_BACKGROUND_WATCHER:-}
+      # Stage 18 auth -- values come from .env in this directory. Empty
+      # defaults keep a throwaway local stack frictionless; deps.py fails
+      # closed on a missing AUTH_SECRET_KEY only when APP_ENV != development.
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-}
+      AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+      AUTH_ACCESS_TTL_MINUTES: ${AUTH_ACCESS_TTL_MINUTES:-}
+      AUTH_REFRESH_TTL_DAYS: ${AUTH_REFRESH_TTL_DAYS:-}
+      AUTH_LOGIN_MAX_ATTEMPTS: ${AUTH_LOGIN_MAX_ATTEMPTS:-}
+      AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-}
+      AUTH_BOOTSTRAP_ADMIN_USERNAME: ${AUTH_BOOTSTRAP_ADMIN_USERNAME:-}
+      AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${AUTH_BOOTSTRAP_ADMIN_PASSWORD:-}
       # Optional integrations -- set in .env when needed:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
