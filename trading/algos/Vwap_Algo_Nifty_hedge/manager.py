@@ -132,7 +132,7 @@ def _trademanager(strike):
                 triggerhigh = df['High'][count]
 
             #Booking
-            if(df['Datetime'][count]=='15:14:00'):
+            if(df['Datetime'][count]=='15:25:00'):
                 if(isintrade):
                     time.sleep(random.randint(1,9)/10)
                     print(str(strike)+' Trade Booked '+str('    '))

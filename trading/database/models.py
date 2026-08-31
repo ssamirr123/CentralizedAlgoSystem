@@ -1,7 +1,14 @@
 """
-Trading control center schema. Minimum tables per the project's own
-design: servers, algos, algo_runs, heartbeats, logs, positions, trades,
-daily_pnl, commands.
+Canonical application schema (single SQLAlchemy Base).
+
+Control-center tables per the project's own design: servers, algos,
+algo_runs, heartbeats, logs, positions, trades, daily_pnl, commands,
+rate_limit_windows.
+
+Dormant table: strategy_heartbeats -- the original per-(strategy, server)
+latest-state row. The endpoints that fed it (POST /update_strategy,
+GET /strategies) have been removed; the table is retained unchanged so
+its historical production rows are preserved. Nothing writes to it now.
 
 Naming note: Milestone 4's Lambda (orchestrator.py) uses "algo_id" in its
 event payload to mean the algo's NAME (e.g. "example_strategy"), matching
@@ -210,3 +217,112 @@ class RateLimitWindow(Base):
     api_key_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class User(Base):
+    """Stage 18: a human dashboard operator.
+
+    Auth is username + password (bcrypt hash, never the plaintext).
+    Authorization is role-based: `role` maps to a fixed permission set in
+    trading/api/security/permissions.py; `extra_permissions` is an
+    optional per-user grant list layered on top (JSON array of permission
+    names) for the rare case a user needs one capability beyond their
+    role. A brand-new user defaults to role "viewer" (VIEW only) -- no
+    one can control a trading process without an admin explicitly
+    assigning a control role.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="viewer")
+    extra_permissions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Forces a password change on next login (e.g. after an admin reset).
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class AuthSession(Base):
+    """A refresh-token session. The opaque refresh token is delivered to
+    the browser only as an httpOnly, Secure, SameSite=Strict cookie; only
+    its SHA-256 hash is stored here, so a DB leak cannot be replayed. Each
+    refresh rotates the token (new row, old row revoked). Logout / admin
+    revoke sets revoked_at.
+    """
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    # Non-secret double-submit CSRF value bound to this session.
+    csrf_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rotated_to: Mapped[int | None] = mapped_column(ForeignKey("auth_sessions.id"), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class AuditLog(Base):
+    """Append-only record of every security-relevant action: auth events,
+    trading-process control (START/STOP/RESTART/UPDATE), EC2 power,
+    server/algo registration, user administration, and every permission
+    denial on a control route. Read by admins via GET /api/admin/audit.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True
+    )
+    # "user:<id>" | "service:<name>" | "anonymous"
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    actor_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    action: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    target: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False, default="success")  # success|denied|error
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class StrategyHeartbeat(Base):
+    """Dormant heartbeat table from the pre-consolidation monitoring API.
+
+    One latest-state row per (strategy_name, server_name) pair. The
+    endpoints that populated and read it (POST /update_strategy,
+    GET /strategies) have been removed; the table, its columns, and its
+    unique constraint are kept verbatim so its existing production rows
+    are preserved. Current code uses the control-center Heartbeat / Algo
+    tables above.
+    """
+
+    __tablename__ = "strategy_heartbeats"
+    __table_args__ = (
+        UniqueConstraint("strategy_name", "server_name", name="uq_strategy_server"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    strategy_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    server_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    current_mtm: Mapped[float] = mapped_column(Float, nullable=False)
+    day_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    number_of_trades: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_update_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+    )

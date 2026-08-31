@@ -1,0 +1,11 @@
+{
+  "//": "Trust policy for the Backend-EC2 instance role (e.g. CentralizedAlgoBackendRole). Attach to an instance profile of the same name and associate that profile with the algo-backend EC2 instance. Lets the instance assume the role -- no long-lived AWS keys ever land on the box.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "ec2.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}

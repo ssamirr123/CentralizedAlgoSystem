@@ -1,23 +1,20 @@
 """
-Invokes the Milestone 4 orchestration Lambda synchronously (RequestResponse)
-and returns its parsed JSON response.
+Invokes the orchestration Lambda (TradingOrchestrator) synchronously
+(RequestResponse) and returns its parsed JSON response.
 
-Vercel serverless functions have no IAM role to assume (unlike the EC2
-instance), so this needs real AWS credentials via env vars:
-    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION
-Use a dedicated IAM user scoped to ONLY lambda:InvokeFunction on this one
-function -- not the trading-control-cli user (that one's for one-time
-setup from your machine, this is a always-on production credential a
-Vercel serverless function holds).
+Credentials come from the Backend EC2 instance role, which must allow
+`lambda:InvokeFunction` on TradingOrchestrator. `LAMBDA_FUNCTION_NAME`
+and `AWS_REGION` are read from the environment.
 """
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+from trading.core.config import load_settings
 
 
 class LambdaInvokeError(RuntimeError):
@@ -25,11 +22,12 @@ class LambdaInvokeError(RuntimeError):
 
 
 def invoke_orchestrator(action: str, **payload: Any) -> dict:
-    function_name = os.environ.get("LAMBDA_FUNCTION_NAME")
+    settings = load_settings()
+    function_name = settings.lambda_function_name
     if not function_name:
         raise LambdaInvokeError("LAMBDA_FUNCTION_NAME environment variable is not set")
 
-    client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION"))
+    client = boto3.client("lambda", region_name=settings.aws_region or None)
     event = {"action": action, **payload}
 
     try:
@@ -55,16 +53,17 @@ def invoke_orchestrator_async(action: str, **payload: Any) -> None:
     """Fire-and-forget (InvocationType=Event) -- for actions that can
     legitimately take minutes (provision_server: attach IAM profile,
     reboot, wait for SSM, clone, install deps), which a synchronous
-    RequestResponse call can't wait out inside a single Vercel request
-    (hard timeout, no maxDuration configured). The Lambda has its own
+    RequestResponse call can't wait out inside a single HTTP request. The
+    Lambda has its own
     15-minute budget and reports progress back via PATCH /api/servers/{id}
     using its own API_BASE_URL/CONTROL_API_KEY env vars, the same pattern
     *_all_algos already uses to read the algo list."""
-    function_name = os.environ.get("LAMBDA_FUNCTION_NAME")
+    settings = load_settings()
+    function_name = settings.lambda_function_name
     if not function_name:
         raise LambdaInvokeError("LAMBDA_FUNCTION_NAME environment variable is not set")
 
-    client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION"))
+    client = boto3.client("lambda", region_name=settings.aws_region or None)
     event = {"action": action, **payload}
 
     try:

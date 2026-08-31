@@ -90,6 +90,14 @@ def is_process_running(pid: int) -> bool:
         return _is_process_running_windows(pid)
     try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # The signal was refused, which means a process with this PID exists
+        # but is owned by another user (e.g. a strategy launched as root via
+        # the Lambda/SSM path, checked here by an unprivileged agent). A
+        # refusal is positive proof of liveness -- only ESRCH means "gone".
+        return True
     except OSError:
         return False
     return True

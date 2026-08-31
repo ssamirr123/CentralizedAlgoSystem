@@ -1,0 +1,49 @@
+# Keep the build context small and never ship local secrets / state.
+.git
+.gitignore
+.github
+.venv
+.venv*
+*.venv*
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# secrets / local env
+.env
+.env.*
+!.env.example
+.streamlit
+*.pem
+*.p12
+*.pfx
+
+# local databases / runtime state / logs
+*.db
+*.sqlite3
+trading/data/*
+!trading/data/.gitkeep
+trading/logs/*
+!trading/logs/.gitkeep
+*.log
+
+# tests and docs not needed in the runtime image
+tests
+.devcontainer
+*.md
+!alembic/README
+
+# editor / OS noise
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# packaging artifacts
+build
+dist
+*.zip
+!trading/infrastructure/lambda/orchestrator.zip

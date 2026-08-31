@@ -1,8 +1,10 @@
 # Secrets -- never commit real credentials. .env.example files are
 # intentionally NOT ignored (they're templates with blank values).
 .env
+.env.*
 *.env
 !*.env.example
+!.env.example
 .streamlit/secrets.toml
 
 # AWS / cloud credential files, in case any tool ever writes one locally
@@ -16,6 +18,7 @@ credentials.json
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
 .venv/
 .venv*/
 *.venv*/
@@ -23,6 +26,10 @@ __pycache__/
 # Local databases (SQLite fallbacks used for dev/testing only)
 *.db
 *.sqlite3
+
+# Generated log files -- process-local, regenerated on every run, never
+# meant to be tracked (applies repo-wide, not just trading/logs/).
+*.log
 
 # Trading runtime local state (PID files, stop flags, per-run logs) --
 # these are process-local, regenerated on every run, and were never meant

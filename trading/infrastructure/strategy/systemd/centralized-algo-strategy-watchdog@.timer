@@ -1,0 +1,14 @@
+# /etc/systemd/system/centralized-algo-strategy-watchdog@.timer
+#
+#   sudo systemctl enable --now centralized-algo-strategy-watchdog@example_strategy.timer
+
+[Unit]
+Description=Centralized Algo - strategy %i watchdog (every 20s)
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=20
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,33 @@
+# /etc/systemd/system/centralized-algo-backend.service
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now centralized-algo-backend
+#   systemctl status centralized-algo-backend
+#
+# Brings the Docker stack (backend + postgres) up at boot and keeps it
+# up. The container entrypoint runs `alembic upgrade head` before uvicorn
+# serves, so migrations are applied on every start.
+
+[Unit]
+Description=Centralized Algo System - FastAPI backend + PostgreSQL (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/centralized-algo/app
+ExecStartPre=/usr/bin/git -C /opt/centralized-algo/app pull --ff-only
+ExecStart=/usr/bin/docker compose \
+    -f docker-compose.yml \
+    -f trading/infrastructure/backend/docker-compose.prod.yml \
+    up -d --build --remove-orphans
+ExecStop=/usr/bin/docker compose \
+    -f docker-compose.yml \
+    -f trading/infrastructure/backend/docker-compose.prod.yml \
+    down
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

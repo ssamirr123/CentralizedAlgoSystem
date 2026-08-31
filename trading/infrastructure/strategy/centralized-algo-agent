@@ -1,0 +1,14 @@
+#!/bin/sh
+# /usr/local/bin/centralized-algo-agent  <AGENT_CMD> <algo_name>
+#
+# Thin launcher the systemd units call. Sources the strategy runtime env
+# (trading/.env: TRADING_MODE=paper, BROKER=paper, STRATEGY_NAME,
+# SERVER_NAME, API_BASE_URL, CONTROL_API_KEY, heartbeat intervals) and runs
+# trading/agent/trading_agent.py -- the same CLI the orchestrator Lambda
+# invokes over SSM. AGENT_CMD is one of:
+#   START_ALGO | STOP_ALGO | RESTART_ALGO | STATUS | UPDATE | LOGS
+set -eu
+APP=/trading-app
+[ -f "$APP/trading/.env" ] && { set -a; . "$APP/trading/.env"; set +a; }
+cd "$APP"
+exec sudo -u ec2-user -E "$APP/venv/bin/python" trading/agent/trading_agent.py "$1" "$2"

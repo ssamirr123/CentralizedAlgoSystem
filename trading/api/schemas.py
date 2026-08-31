@@ -37,6 +37,22 @@ class ServerStatusResponse(BaseModel):
     live_check_healthy: bool | None = None
 
 
+class ServerPowerResponse(BaseModel):
+    success: bool
+    server_id: str  # server NAME
+    ec2_instance_id: str
+    # STARTING / STOPPING / REBOOTING / RUNNING / STOPPED / UNKNOWN --
+    # the orchestrator's reported EC2 lifecycle state. Never a guess: a
+    # successful call returns the transient state, the caller then polls
+    # GET /api/server/status?live=true for the settled one.
+    status: str
+    message: str | None = None
+    # Populated only when the orchestrator's safe-stop guard blocked a
+    # stop/restart ("blocked" / "unverified") -- None on success.
+    safe_stop: str | None = None
+    running_processes: list[str] | None = None
+
+
 class AlgoStatusResponse(BaseModel):
     success: bool
     algo_id: str

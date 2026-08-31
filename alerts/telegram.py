@@ -62,21 +62,14 @@ from typing import Optional
 import httpx
 
 # ---------------------------------------------------------------------------
-# Logging setup
+# Logging
 # ---------------------------------------------------------------------------
-LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-logging.basicConfig(format=LOG_FORMAT, level=logging.INFO)
+# No handler / basicConfig / FileHandler here: this module logs through the
+# root logger, which trading.common.logger.configure_logging() sets up once
+# at process start (structured JSON stdout, read-only-FS safe). If nothing
+# configured logging (e.g. this module imported standalone), Python's
+# last-resort handler still prints WARNING+ to stderr -- never a crash.
 logger = logging.getLogger("alerts.telegram")
-
-_log_dir = os.path.dirname(os.path.abspath(__file__))
-_log_file = os.path.join(_log_dir, "telegram_alerts.log")
-try:
-    _file_handler = logging.FileHandler(_log_file)
-    _file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-    logger.addHandler(_file_handler)
-except (OSError, PermissionError):
-    # Read-only filesystem (e.g. Vercel serverless) — skip file logging
-    logger.warning("Could not attach file log handler (read-only filesystem); logging to stdout only.")
 
 # ---------------------------------------------------------------------------
 # Constants

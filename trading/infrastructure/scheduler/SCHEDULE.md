@@ -140,6 +140,44 @@ Expected: JSON with `results` covering every algo currently in `GET
 /api/algos` with `enabled: true` — empty `results: []` is correct if none
 are registered/enabled yet.
 
+## Stage 15 update — deployed state + a coordination gap
+
+Deployed and verified against the EC2 backend (2026-08-29):
+
+- Lambda `TradingOrchestrator` code updated (adds `restart_ec2` + the
+  safe-stop guard); env repointed to `API_BASE_URL=http://<backend-ec2>`
+  and the backend's `CONTROL_API_KEY`; `INSTANCE_ID` = the strategy box.
+- Inline policy `TradingOrchestratorEC2SSMExplicit` on
+  `TradingLambdaExecutionRole` grants `ec2:Start/Stop/RebootInstances` +
+  `ssm:SendCommand` on the two explicit instance ARNs (see
+  `../lambda/iam_orchestrator_ec2ssm_policy.json`) — IAM role, no keys.
+- All 6 `TradingSchedule-*` exist, ENABLED, `Asia/Kolkata`, `MON-FRI`.
+- Verified `check_ec2_health` / `start_ec2` / `stop_ec2` / `restart_ec2`
+  for an explicit `instance_id`; safe-stop guard blocks `stop_ec2` /
+  `restart_ec2` while a strategy process is alive; `stop_all_algos` reads
+  the algo list from the EC2 backend and stops each via SSM.
+- Legacy schedules `ec2_start` / `ec2_stop` still exist (predate the
+  `TradingSchedule-*` set) — review and delete; they are redundant.
+
+**Coordination gap (needs a decision):** Stage 14's strategy box runs a
+systemd watchdog (`centralized-algo-strategy-watchdog@<algo>.timer`) that
+restarts the algo within ~20s whenever its unit is `active` but the
+process isn't RUNNING. So `stop_all_algos` at 15:15 / 15:30 stops the
+*process*, the watchdog restarts it, and `stop_ec2` at 16:00 then hits
+the safe-stop guard and **refuses to stop the box** (correct, but the box
+never powers down). Pick one:
+
+1. Add a schedule step / action that also `systemctl stop`s the
+   per-strategy units before 16:00 (a deliberate end-of-day stop), or
+2. Make `STOP_ALGO` (in `trading_agent.py` or the Lambda's SSM command)
+   also `systemctl stop centralized-algo-strategy@<algo>` when that unit
+   exists, or
+3. Have `stop_ec2`'s schedule pass `force:true` (loses the safety check —
+   not recommended).
+
+Until one of these is done, the market-day auto-stop of the strategy EC2
+will not complete while the watchdog is enabled.
+
 ## What I need back from you
 
 Paste the actual output of steps 1, 3 (`list-schedules`), and the manual

@@ -1,0 +1,26 @@
+# /etc/systemd/system/centralized-algo-strategy@.service
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now centralized-algo-strategy@example_strategy.service
+#
+# One templated unit per strategy (%i = algo name). START on boot / enable;
+# `systemctl stop` = graceful stop via the agent's stop-flag file (the algo's
+# GracefulShutdown finishes the current tick, flushes state, disconnects the
+# broker). Routine start/stop/restart still go through the API -> Lambda ->
+# SSM -> trading_agent.py path; this unit is for boot-persistence and is what
+# the watchdog treats as "operator intends this running".
+
+[Unit]
+Description=Centralized Algo - strategy %i (agent-managed, paper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/centralized-algo-agent START_ALGO %i
+ExecStop=/usr/local/bin/centralized-algo-agent STOP_ALGO %i
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

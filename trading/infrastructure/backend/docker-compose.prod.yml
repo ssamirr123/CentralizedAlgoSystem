@@ -1,0 +1,40 @@
+# Production overlay for the Backend EC2. Run from the repo checkout
+# (/opt/centralized-algo/app) so the base file's `build: .` resolves:
+#
+#   cd /opt/centralized-algo/app
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f trading/infrastructure/backend/docker-compose.prod.yml \
+#     up -d --build
+#
+# Differences from the repo-root docker-compose.yml:
+#   * backend is published on 127.0.0.1 only -- host Nginx is the only
+#     thing that talks to it. Nothing listens on 0.0.0.0 except Nginx
+#     (80/443). This is done via the base file's ${BACKEND_PORT} knob:
+#     put  BACKEND_PORT=127.0.0.1:8000  in /opt/centralized-algo/app/.env
+#     so "${BACKEND_PORT:-8000}:8000" renders as "127.0.0.1:8000:8000".
+#     (No compose `ports` override needed -> works on any compose v2.)
+#   * postgres keeps the base file's setup (no host port -- reachable only
+#     from the backend container over the private compose network) and
+#     gains an explicit host bind-mount for the data dir.
+#   * restart: unless-stopped on both -- a crash/reboot self-heals; the
+#     systemd unit brings the stack up at boot.
+#   * env comes from a root-owned, chmod 600 file OUTSIDE the repo:
+#       /etc/centralized-algo/backend.env
+#     never committed, never baked into the image. It contains NO AWS
+#     keys -- the EC2 instance role supplies AWS credentials.
+
+services:
+  postgres:
+    restart: unless-stopped
+    volumes:
+      - /var/lib/centralized-algo/pgdata:/var/lib/postgresql/data
+    env_file:
+      - /etc/centralized-algo/backend.env
+
+  backend:
+    restart: unless-stopped
+    env_file:
+      - /etc/centralized-algo/backend.env
+    environment:
+      APP_ENV: production

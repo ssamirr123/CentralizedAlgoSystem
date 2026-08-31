@@ -1,0 +1,4 @@
+# written by provision.sh — local pointers to the live stack, not secrets,
+# but environment-specific and not worth tracking
+.deploy-outputs
+.provision-tmp/
