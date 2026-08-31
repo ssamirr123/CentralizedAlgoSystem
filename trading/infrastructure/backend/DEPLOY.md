@@ -34,7 +34,7 @@ confirmed (per your own "don't assume it worked" rule).
 | Thing | Value |
 |---|---|
 | Instance | `i-0f344752a1ca2811b`  ·  name `algo-backend`  ·  **t3.medium**  ·  **running**  ·  launched today |
-| Public IP | `13.206.203.145` |
+| Public IP | **Elastic IP `13.232.95.211`** (was ephemeral `13.206.203.145` until Stage 17 — the old IP rotated on a stop/start and got reassigned elsewhere; an EIP is now attached so it is stable) |
 | AZ / VPC / subnet | `ap-south-1a` / `vpc-0100f18cab8c38e01` / `subnet-0acefe8fe1b871c81` |
 | Security group | `sg-04771e006e4097181` (`trading-sg`) — **only** inbound rule today: `tcp/22` from `122.171.17.136/32` |
 | Key pair | `samirec2key` |

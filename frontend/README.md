@@ -46,7 +46,8 @@ npm run dev                     # http://localhost:5173
 ```
 
 `npm run dev` proxies `/api`, `/strategies`, `/health` to
-`VITE_API_PROXY_TARGET` (default `http://13.206.203.145`) so the browser
+`VITE_API_PROXY_TARGET` (default `http://13.232.95.211`, the backend's
+Elastic IP) so the browser
 makes same-origin requests — the backend needs no CORS changes.
 
 ## Build

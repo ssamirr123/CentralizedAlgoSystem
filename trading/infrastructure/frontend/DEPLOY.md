@@ -100,11 +100,13 @@ screen issues process-control only; there is no live order execution.
 
 ## Known follow-ups (not blockers for this stage)
 
-- **EC2 origin is a public DNS name, not an Elastic IP.** CloudFront
-  can't use a bare IPv4 for a custom origin, so the config uses
-  `ec2-13-206-203-145.ap-south-1.compute.amazonaws.com`. If the instance
-  is stopped/started its public IP (and that name) change and the API
-  origin breaks. Attach an Elastic IP and update the origin `DomainName`.
+- **EC2 origin.** CloudFront can't use a bare IPv4 for a custom origin,
+  so the origin is the backend's auto DNS name. The backend now has
+  **Elastic IP `13.232.95.211`** →
+  `ec2-13-232-95-211.ap-south-1.compute.amazonaws.com`, pinned as
+  `API_ORIGIN_DNS` in `provision.sh`, so it survives stop/start. If the
+  EIP is ever reallocated, update that pin and re-run the origin repoint
+  (`aws cloudfront update-distribution`, `ec2-api` origin `DomainName`).
 - **CloudFront → EC2 is HTTP.** Fine inside AWS for paper, but for live
   put a real domain + ACM/Let's-Encrypt cert on the nginx box and switch
   the origin to `https-only`. (CloudFront won't do TLS to a bare IP or a

@@ -10,7 +10,7 @@ import { fileURLToPath, URL } from "node:url";
 // so `/api/*` is already same-origin there too.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const target = env.VITE_API_PROXY_TARGET || "http://13.206.203.145";
+  const target = env.VITE_API_PROXY_TARGET || "http://13.232.95.211";
   return {
     plugins: [react()],
     resolve: {
