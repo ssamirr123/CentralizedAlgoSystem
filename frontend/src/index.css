@@ -278,3 +278,23 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
 
 .bar-track { background: var(--bg-elev-2); border-radius: 4px; height: 8px; overflow: hidden; }
 .bar-fill { height: 100%; border-radius: 4px; }
+
+/* ---- entity cards (servers / algorithms) --------------------- */
+.entity-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.entity-card { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 15px 16px; display: flex; flex-direction: column; gap: 10px; }
+.entity-card .ec-head { display: flex; align-items: center; gap: 10px; }
+.entity-card .ec-head h3 { margin: 0; font-size: 14.5px; }
+.entity-card .ec-head .flex { flex: 1; }
+.entity-card .ec-meta { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 12.5px; color: var(--text-dim); }
+.entity-card .ec-meta dt { color: var(--text-faint); }
+.entity-card .ec-meta dd { margin: 0; color: var(--text-dim); }
+.entity-card .ec-stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; }
+.entity-card .ec-stats .v { font-weight: 700; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text); }
+.entity-card .ec-actions { display: flex; gap: 6px; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 2px; }
+.entity-card .ec-actions button { padding: 4px 10px; font-size: 12.5px; }
+
+.filters { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+.filters .field { margin-bottom: 0; min-width: 150px; }
+.filters .field.grow { flex: 1; min-width: 200px; }
+
+.detail-back { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; margin-bottom: 12px; background: none; border: none; padding: 0; color: var(--accent); }

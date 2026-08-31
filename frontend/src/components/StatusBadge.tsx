@@ -1,15 +1,21 @@
+const STATUS_CLASS: Record<string, string> = {
+  RUNNING: "running",
+  SUCCESS: "running",
+  UPDATED: "running",
+  STOPPED: "stopped",
+  PENDING: "stopped",
+  STARTING: "stopped",
+  STOPPING: "stopped",
+  RESTARTING: "stopped",
+  REBOOTING: "stopped",
+  ERROR: "error",
+  FAILED: "error",
+};
+
 export function StatusBadge({ status }: { status: string | null | undefined }) {
   const s = (status ?? "UNKNOWN").toUpperCase();
-  const cls =
-    s === "RUNNING"
-      ? "running"
-      : s === "STOPPED"
-        ? "stopped"
-        : s === "ERROR"
-          ? "error"
-          : "unknown";
   return (
-    <span className={`badge ${cls}`}>
+    <span className={`badge ${STATUS_CLASS[s] ?? "unknown"}`}>
       <span className="dot" />
       {s}
     </span>

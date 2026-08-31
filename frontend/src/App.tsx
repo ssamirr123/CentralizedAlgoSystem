@@ -4,6 +4,8 @@ import { useAuth } from "@/auth/AuthContext";
 import { Layout } from "@/components/Layout";
 import { LoginPage } from "@/pages/LoginPage";
 import { ChangePasswordPage } from "@/pages/ChangePasswordPage";
+import { ServerDetailPage } from "@/pages/ServerDetailPage";
+import { AlgoDetailPage } from "@/pages/AlgoDetailPage";
 import { NAV_ROUTES } from "@/routes";
 import type { Permission } from "@/lib/config";
 
@@ -49,6 +51,22 @@ export default function App() {
             <Layout>
               <Routes>
                 <Route path="/change-password" element={<ChangePasswordPage />} />
+                <Route
+                  path="servers/:serverId"
+                  element={
+                    <PermissionRoute permission="VIEW">
+                      <ServerDetailPage />
+                    </PermissionRoute>
+                  }
+                />
+                <Route
+                  path="algorithms/:algoId"
+                  element={
+                    <PermissionRoute permission="VIEW">
+                      <AlgoDetailPage />
+                    </PermissionRoute>
+                  }
+                />
                 {NAV_ROUTES.map(({ path, element: El, permission }) => (
                   <Route
                     key={path}

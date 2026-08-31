@@ -1,8 +1,17 @@
-import { useQuery, useMutation, keepPreviousData } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { POLL_INTERVAL_MS } from "@/lib/config";
 import { usePollInterval } from "@/realtime/RealtimeProvider";
 import * as api from "./endpoints";
-import type { AlgoAction } from "./types";
+import * as serversApi from "./servers";
+import * as algosApi from "./algos";
+import type {
+  AlgoAction,
+  AlgoCreate,
+  AlgoPatch,
+  ServerCreate,
+  ServerPatch,
+  ServerPowerAction,
+} from "./types";
 
 // While the realtime socket is connected, `poll` is false and these
 // queries update from the WS stream (+ a one-shot invalidate on connect).
@@ -86,3 +95,67 @@ export const useAlgoActionMutation = () =>
     mutationFn: (v: { action: AlgoAction; algoId: string; serverId: string; requestedBy?: string }) =>
       api.runAlgoAction(v.action, v.algoId, v.serverId, v.requestedBy),
   });
+
+// --- server management mutations ----------------------------------------
+export const useCreateServer = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ServerCreate) => serversApi.createServer(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["servers"] }),
+  });
+};
+
+export const useUpdateServer = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { serverId: string; body: ServerPatch }) => serversApi.updateServer(v.serverId, v.body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["servers"] }),
+  });
+};
+
+export const useDeleteServer = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (serverId: string) => serversApi.deleteServer(serverId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["servers"] }),
+  });
+};
+
+export const useServerPower = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { serverId: string; action: ServerPowerAction; force?: boolean }) =>
+      serversApi.powerServer(v.serverId, v.action, v.force),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["servers"] });
+      qc.invalidateQueries({ queryKey: ["server-status"] });
+    },
+  });
+};
+
+// --- algorithm management mutations -----------------------------------
+export const useCreateAlgo = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AlgoCreate) => algosApi.createAlgo(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["algos"] }),
+  });
+};
+
+export const useUpdateAlgo = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { algoId: string; serverId: string; body: AlgoPatch }) =>
+      algosApi.updateAlgo(v.algoId, v.serverId, v.body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["algos"] }),
+  });
+};
+
+export const useDeleteAlgo = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { algoId: string; serverId: string; force?: boolean }) =>
+      algosApi.deleteAlgo(v.algoId, v.serverId, v.force),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["algos"] }),
+  });
+};

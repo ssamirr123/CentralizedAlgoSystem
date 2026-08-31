@@ -55,9 +55,8 @@ export function StrategiesPage() {
       </QueryBoundary>
 
       <div className="inline-note" style={{ marginTop: 14 }}>
-        Registration, edits and deletes are backend operations
-        (<code>POST/PATCH/DELETE /api/algos</code>). This foundation is read-only for strategy lifecycle; use the
-        Commands screen to start/stop a registered strategy.
+        This is the read-only roster. Add / edit / delete and start / stop / restart are on the{" "}
+        <strong>Algorithms</strong> screen; the <strong>Commands</strong> screen also does process control.
       </div>
     </>
   );

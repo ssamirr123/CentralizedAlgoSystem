@@ -55,6 +55,7 @@ from trading.api.schemas import (
     PositionIn,
     ServerIn,
     ServerListEntry,
+    ServerPowerResponse,
     ServerStatusResponse,
     ServerUpdate,
     TradeAck,
@@ -488,6 +489,90 @@ def delete_server(
         user_agent=request.headers.get("user-agent"),
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+_SERVER_POWER = {
+    "start": ("start_ec2", audit.SERVER_START),
+    "stop": ("stop_ec2", audit.SERVER_STOP),
+    "restart": ("restart_ec2", audit.SERVER_RESTART),
+}
+
+
+def _run_server_power(
+    action: str, server_id: str, force: bool, request: Request, db: Session, principal: Principal
+) -> ServerPowerResponse:
+    """EC2 power control, routed React -> FastAPI -> Lambda -> EC2. Never
+    talks to AWS from anything but the orchestrator Lambda. The
+    orchestrator's own safe-stop guard (a trading process still alive
+    blocks stop/restart unless force=true) is authoritative -- this route
+    surfaces that block as a 409, it does not re-implement or bypass it."""
+    lambda_action, audit_action = _SERVER_POWER[action]
+    server = _resolve_server(db, server_id)
+
+    try:
+        result = invoke_orchestrator(
+            lambda_action, instance_id=server.ec2_instance_id, os_name=server.os,
+            server_name=server.name, force=force,
+        )
+    except LambdaInvokeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Could not reach Lambda: {exc}") from exc
+
+    audit.record(
+        db, actor=principal.actor, actor_label=principal.label, action=audit_action,
+        target=f"server:{server.name}", ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"force": force, "result_status": result.get("status"), "success": result.get("success")},
+    )
+
+    if not result.get("success"):
+        # A safe-stop block is a client-actionable condition (stop the
+        # algos first, or pass force=true), not a server fault -> 409.
+        if result.get("safe_stop") in ("blocked", "unverified"):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                result.get("error") or "Stop blocked: trading processes still alive on this server.",
+            )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            result.get("error") or f"{lambda_action} failed",
+        )
+
+    new_status = result.get("status", server.status)
+    server.status = new_status
+    db.commit()
+    rt.server_health(
+        server.name, status=new_status, ssm_status=None, healthy=None,
+        last_heartbeat=server.last_heartbeat.isoformat() if server.last_heartbeat else None,
+        source=f"power_{action}",
+    )
+    return ServerPowerResponse(
+        success=True, server_id=server.name, ec2_instance_id=server.ec2_instance_id,
+        status=new_status, message=result.get("message"),
+    )
+
+
+@router.post("/servers/{server_id}/start", response_model=ServerPowerResponse)
+def start_server(
+    server_id: str, request: Request, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> ServerPowerResponse:
+    return _run_server_power("start", server_id, False, request, db, principal)
+
+
+@router.post("/servers/{server_id}/stop", response_model=ServerPowerResponse)
+def stop_server(
+    server_id: str, request: Request, force: bool = False, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> ServerPowerResponse:
+    return _run_server_power("stop", server_id, force, request, db, principal)
+
+
+@router.post("/servers/{server_id}/restart", response_model=ServerPowerResponse)
+def restart_server(
+    server_id: str, request: Request, force: bool = False, db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.TRADING_CONTROL)),
+) -> ServerPowerResponse:
+    return _run_server_power("restart", server_id, force, request, db, principal)
 
 
 @router.post("/algos", response_model=AlgoRegisterResponse, status_code=status.HTTP_201_CREATED)

@@ -35,6 +35,11 @@ export function relativeAge(value: string | number | Date | null | undefined): s
   return `${Math.floor(h / 24)}d ago`;
 }
 
+/** Today's date in IST as YYYY-MM-DD (for /api/pnl/today?pnl_date=). */
+export function istDateToday(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(new Date());
+}
+
 export function isStale(value: string | number | Date | null | undefined): boolean {
   if (value == null) return true;
   const d = value instanceof Date ? value : new Date(value);

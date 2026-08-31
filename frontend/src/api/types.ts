@@ -132,6 +132,59 @@ export interface TradeEntry {
   order_id: string | null;
 }
 
+export interface ServerPowerResponse {
+  success: boolean;
+  server_id: string;
+  ec2_instance_id: string;
+  status: string;
+  message: string | null;
+  safe_stop: string | null;
+  running_processes: string[] | null;
+}
+
+// Request bodies — mirror trading/api/schemas.py ServerIn/ServerUpdate/AlgoIn/AlgoUpdate.
+export interface ServerCreate {
+  server_id: string;
+  ec2_instance_id: string;
+  region: string;
+  status?: string;
+  os?: string;
+  repo_path?: string;
+  auto_provision?: boolean;
+}
+
+export interface ServerPatch {
+  server_id?: string;
+  ec2_instance_id?: string;
+  region?: string;
+  status?: string;
+  os?: string;
+  repo_path?: string;
+}
+
+export interface AlgoCreate {
+  algo_id: string;
+  server_id: string;
+  script_path?: string | null;
+  status?: string;
+  enabled?: boolean;
+}
+
+export interface AlgoPatch {
+  script_path?: string;
+  status?: string;
+  enabled?: boolean;
+}
+
+export interface AlgoRegisterResponse {
+  algo: AlgoListEntry;
+  sync_attempted: boolean;
+  sync_success: boolean | null;
+  sync_message: string | null;
+}
+
+export type ServerPowerAction = "start" | "stop" | "restart";
+
 export type AlgoAction = "start" | "stop" | "restart" | "update";
 
 export interface AlgoActionRequest {
