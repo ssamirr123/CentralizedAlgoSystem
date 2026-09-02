@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""
+CAS log tailer — ships lines from an algo's local app.log to the control
+centre (POST /api/logs) WITHOUT the algo needing any log-shipping code.
+
+Runs as: cas-log-tailer <ALGO_NAME>
+Env: API_BASE_URL, SERVER_NAME, CONTROL_API_KEY   (see /etc/cas-log-tailer.env)
+
+Only forwards lines that look significant (errors, warnings, lifecycle /
+order markers). Suppresses repeated identical messages and caps the send
+rate so a crash-looping algo can't flood the API or the alerts feed.
+"""
+import datetime
+import json
+import os
+import sys
+import time
+import urllib.request
+
+ALGO = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("STRATEGY_NAME", "")
+SERVER = os.environ.get("SERVER_NAME", "Minakshi-Linux")
+API = os.environ.get("API_BASE_URL", "http://13.232.95.211").rstrip("/")
+KEY = os.environ.get("CONTROL_API_KEY", "")
+LOGROOT = f"/trading-app/trading/algos/{ALGO}/logs"
+
+if not ALGO or not KEY:
+    sys.stderr.write("cas-log-tailer: ALGO arg and CONTROL_API_KEY env are required\n")
+    sys.exit(2)
+
+ERROR_MARKERS = ("[ERROR]", " ERROR ", "TRACEBACK", "[FAILED]", "EXCEPTION", "CRITICAL")
+WARN_MARKERS = ("[WARN", " WARNING ", "[WARNING]")
+INFO_MARKERS = (
+    "[LOGIN]", "SOCKET IS OPEN", "[STARTUP]", "SESSION STARTED", "[ENTRY]", "[EXIT]",
+    "SQUARE-OFF", "SQUARE OFF", "KILL SWITCH", "ORDER PLACED", "ORDER FILLED",
+    "[RUN MODE]", "STRATEGY STARTED", "STRATEGY STOPPED", "SHUTTING DOWN",
+)
+
+# rate / dedupe controls
+MIN_REPEAT_INTERVAL = 120.0   # same message text: at most once per this many seconds
+MAX_PER_MIN = 20              # hard cap on ships per rolling minute
+
+
+def classify(line: str):
+    u = line.upper()
+    if any(m in u for m in ERROR_MARKERS):
+        return "ERROR"
+    if any(m in u for m in WARN_MARKERS):
+        return "WARNING"
+    if any(m in u for m in INFO_MARKERS):
+        return "INFO"
+    return None
+
+
+def today_file():
+    return os.path.join(LOGROOT, datetime.date.today().isoformat(), "app.log")
+
+
+def _event_name(line: str) -> str:
+    """A short (<=40 char) event tag for the indexed Log.event column.
+    Prefer the first [BRACKETED] marker in the line, else 'tail:<LEVEL>'."""
+    start = line.find("[", 11 if line[:1] == "[" else 0)
+    if start != -1:
+        end = line.find("]", start)
+        if 0 < end - start <= 32:
+            return ("tail " + line[start + 1:end]).strip()[:40]
+    return line[:40].strip()
+
+
+def ship(level, line):
+    body = json.dumps({
+        "algo_id": ALGO,
+        "server_id": SERVER,
+        "level": level[:10],
+        "event": (_event_name(line) or f"tail:{level}")[:40],
+        "details": {"source": "log-tailer", "line": line[:2000]},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{API}/api/logs", data=body, method="POST",
+        headers={"X-API-Key": KEY, "Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"cas-log-tailer: ship failed: {exc}\n")
+        return False
+
+
+def main():
+    last_sent = {}          # message text -> monotonic ts
+    recent = []             # monotonic ts of recent ships (for MAX_PER_MIN)
+    cur_path = None
+    fh = None
+    print(f"cas-log-tailer: {ALGO} -> {API}/api/logs (server={SERVER})", flush=True)
+
+    while True:
+        path = today_file()
+        if path != cur_path:
+            if fh:
+                fh.close()
+                fh = None
+            cur_path = path
+            # wait for the day's file to appear
+            for _ in range(30):
+                if os.path.exists(cur_path):
+                    break
+                time.sleep(2)
+            try:
+                fh = open(cur_path, "r", errors="replace")
+                fh.seek(0, os.SEEK_END)   # only new lines from here on
+            except FileNotFoundError:
+                fh = None
+                time.sleep(5)
+                continue
+
+        if fh is None:
+            time.sleep(5)
+            continue
+
+        line = fh.readline()
+        if not line:
+            # handle truncation / rotation
+            try:
+                if os.path.getsize(cur_path) < fh.tell():
+                    fh.seek(0)
+            except OSError:
+                pass
+            time.sleep(1.0)
+            continue
+
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+        level = classify(line)
+        if not level:
+            continue
+
+        now = time.monotonic()
+        # collapse the leading "[HH:MM:SS] " stamp for dedupe purposes
+        key = line[11:] if len(line) > 11 and line[0] == "[" and line[9:11] == "] " else line
+        if now - last_sent.get(key, -1e9) < MIN_REPEAT_INTERVAL:
+            continue
+        recent[:] = [t for t in recent if now - t < 60.0]
+        if len(recent) >= MAX_PER_MIN:
+            continue
+
+        if ship(level, line):
+            last_sent[key] = now
+            recent.append(now)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
