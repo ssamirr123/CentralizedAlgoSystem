@@ -1,0 +1,58 @@
+# gitleaks configuration for CentralizedAlgoSystem (Stage 20).
+# Scans the working tree, full Git history, and pull requests in CI.
+# Extends the upstream default rule set; the sections below only add
+# project-specific rules and allowlist known-safe placeholders.
+
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Project-specific detections
+# ---------------------------------------------------------------------------
+[[rules]]
+id = "angelone-inline-cred"
+description = "Hard-coded AngelOne clientid/apikey/mpin/TOTP in a strategy config"
+regex = '''(?i)\b(clientid|apikey|api_key|mpin|totp_secret)\s*=\s*['"][A-Za-z0-9@._\-]{4,}['"]'''
+path = '''trading/algos/.*/config\.py'''
+tags = ["broker", "angelone"]
+
+[[rules]]
+id = "breeze-inline-token"
+description = "Hard-coded ICICI Breeze api key / secret / session token"
+regex = '''(?i)\b(breeze_(api_key|secret_key|session_token)|icici_breeze_[a-z_]+)\s*[:=]\s*['"][A-Za-z0-9+/=._\-]{8,}['"]'''
+tags = ["broker", "breeze"]
+
+[[rules]]
+id = "control-api-key-literal"
+description = "Literal CONTROL_API_KEY / AUTH_SECRET_KEY assignment"
+regex = '''(?i)\b(CONTROL_API_KEY|AUTH_SECRET_KEY)\s*[:=]\s*['"][A-Za-z0-9+/=_\-]{12,}['"]'''
+tags = ["auth"]
+
+# ---------------------------------------------------------------------------
+# Allowlist -- placeholders, templates, tests, docs. These are NOT secrets.
+# ---------------------------------------------------------------------------
+[allowlist]
+description = "Known-safe placeholders and non-secret fixtures"
+paths = [
+  '''.*\.env\.example$''',
+  '''.*/dot-env\.example$''',
+  '''frontend/\.env\.production$''',
+  '''docs/.*''',
+  '''.*\.md$''',
+  '''tests/.*''',
+  '''\.gitleaks\.toml$''',
+]
+regexes = [
+  '''change-me''',
+  '''dev-control-key''',
+  '''user:pass@''',
+  '''algo:change-me@''',
+  '''123456789:ABCdefGhIJKlmNoPQRstuVWxyz''',   # telegram token placeholder in comments
+  '''<REDACTED>''',
+  '''<redacted>''',
+  '''<token>''',
+  '''<your-[a-z-]+>''',
+  '''test-secret-a+''',                           # tests/conftest.py AUTH_SECRET_KEY
+  '''FAKE(ID|KEY|TOTP|SECRET)''',
+]
+stopwords = ["example", "placeholder", "changeme", "change-me", "dummy", "sample"]
