@@ -6,6 +6,7 @@ import { useHealth } from "@/api/hooks";
 import { TradingModeBadge, TradingModeStripe } from "./TradingModeBadge";
 import { RealtimeIndicator } from "./RealtimeIndicator";
 import { AlertsBell } from "./AlertsBell";
+import { MarketTicker } from "./MarketTicker";
 
 function ConnIndicator() {
   const { data, isError, isLoading } = useHealth();
@@ -67,6 +68,7 @@ export function Layout({ children }: { children: ReactNode }) {
         <header className="topbar">
           <strong style={{ fontSize: 15 }}>{active?.label ?? "Trading Control Center"}</strong>
           <TradingModeBadge />
+          <MarketTicker />
           <div className="spacer" />
           <RealtimeIndicator />
           <ConnIndicator />

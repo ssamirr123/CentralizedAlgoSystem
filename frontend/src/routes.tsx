@@ -3,6 +3,7 @@ import type { Permission } from "@/lib/config";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { ServersPage } from "@/pages/ServersPage";
 import { AlgorithmsPage } from "@/pages/AlgorithmsPage";
+import { MarketPage } from "@/pages/MarketPage";
 import { StrategiesPage } from "@/pages/StrategiesPage";
 import { AlgoStatusPage } from "@/pages/AlgoStatusPage";
 import { HeartbeatsPage } from "@/pages/HeartbeatsPage";
@@ -27,6 +28,7 @@ export const NAV_ROUTES: NavRoute[] = [
   { path: "/", label: "Dashboard", element: DashboardPage, permission: "VIEW" },
   { path: "/servers", label: "Servers", element: ServersPage, permission: "VIEW" },
   { path: "/algorithms", label: "Algorithms", element: AlgorithmsPage, permission: "VIEW" },
+  { path: "/market", label: "Market", element: MarketPage, permission: "VIEW" },
   { path: "/strategies", label: "Strategies", element: StrategiesPage, permission: "VIEW" },
   { path: "/algo-status", label: "Algo Status", element: AlgoStatusPage, permission: "VIEW" },
   { path: "/heartbeats", label: "Heartbeats", element: HeartbeatsPage, permission: "VIEW" },

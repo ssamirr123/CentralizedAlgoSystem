@@ -192,3 +192,91 @@ export interface AlgoActionRequest {
   server_id: string;
   requested_by?: string | null;
 }
+
+// --- Stage 19 market-data engine -----------------------------------------
+export interface MarketIndexQuote {
+  symbol: string;
+  exchange: string;
+  ltp: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  prev_close: number | null;
+  change: number | null;
+  change_percent: number | null;
+  status: "live" | "stale" | "no_data" | string;
+  provider_timestamp: string | null;
+  received_at: string | null;
+}
+
+export interface MarketOptionQuote {
+  ltp: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  prev_close: number | null;
+  volume: number | null;
+  oi: number | null;
+  oi_change: number | null;
+  bid: number | null;
+  ask: number | null;
+  iv: number | null;
+  vwap: number | null;
+}
+export interface MarketOptionChainRow {
+  strike: number;
+  call: MarketOptionQuote | null;
+  put: MarketOptionQuote | null;
+}
+export interface MarketOptionChain {
+  underlying: string;
+  spot: number | null;
+  expiry: string;
+  atm_strike: number | null;
+  timestamp: string;
+  strikes: MarketOptionChainRow[];
+}
+
+export interface MarketCandle {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number | null;
+  oi: number | null;
+}
+
+export interface MarketSessionStatus {
+  provider: string;
+  enabled: boolean;
+  session_state: string;
+  feed_state: string;
+  credentials: {
+    source: string;
+    api_key_set: boolean;
+    secret_key_set: boolean;
+    session_token_set: boolean;
+    session_token_fingerprint: string | null;
+  };
+  last_session_check: string | null;
+  last_error: string | null;
+}
+
+export interface MarketHealth {
+  status: string;
+  provider: string;
+  session: string;
+  feed: string;
+  timezone: string;
+  start_time: string;
+  stop_time: string;
+  symbols: Record<string, { status: string; last_update: string | null }>;
+  option_chain: {
+    status: string;
+    expiry: string | null;
+    atm_strike: number | null;
+    contracts_subscribed: number;
+  };
+  last_error: string | null;
+}

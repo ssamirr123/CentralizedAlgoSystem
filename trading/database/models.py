@@ -326,3 +326,14 @@ class StrategyHeartbeat(Base):
         nullable=False,
         default=_utcnow,
     )
+
+
+# --- Stage 19 market-data engine ------------------------------------------
+# Registered on the same canonical Base so init_db() / Alembic autogenerate
+# see market_candles, option_contracts, option_candles. Defined in their
+# own module to keep this file focused on the control-centre schema.
+from trading.market_data.models import (  # noqa: E402,F401
+    MarketCandle,
+    OptionCandle,
+    OptionContract,
+)

@@ -23,9 +23,13 @@ TRADE = "trade"
 SERVER_HEALTH = "server_health"
 COMMAND = "command"
 ALERT = "alert"
+# Stage 19 market-data engine
+MARKET_QUOTE = "market_quote"
+MARKET_STATUS = "market_status"
 
 MONITORING_TYPES = frozenset(
-    {STRATEGY_STATUS, HEARTBEAT, PNL, POSITION, TRADE, SERVER_HEALTH, COMMAND, ALERT}
+    {STRATEGY_STATUS, HEARTBEAT, PNL, POSITION, TRADE, SERVER_HEALTH, COMMAND, ALERT,
+     MARKET_QUOTE, MARKET_STATUS}
 )
 
 # --- control frame types ---------------------------------------------

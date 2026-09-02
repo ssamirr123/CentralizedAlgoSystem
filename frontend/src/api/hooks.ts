@@ -159,3 +159,50 @@ export const useDeleteAlgo = () => {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["algos"] }),
   });
 };
+
+// --- market data (Stage 19) -------------------------------------------
+export const useMarketIndices = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["market-indices"], queryFn: api.getMarketIndices, refetchInterval: poll });
+};
+
+export const useMarketHealth = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["market-health"], queryFn: api.getMarketHealth, refetchInterval: poll || POLL_INTERVAL_MS });
+};
+
+export const useMarketSessionStatus = () =>
+  useQuery({ queryKey: ["market-session"], queryFn: api.getMarketSessionStatus });
+
+export const useNiftyExpiries = () =>
+  useQuery({ queryKey: ["nifty-expiries"], queryFn: api.getNiftyExpiries });
+
+export const useNiftyOptionChain = (expiry: string, range: number) => {
+  const poll = usePollInterval(5000);
+  return useQuery({
+    queryKey: ["nifty-option-chain", expiry, range],
+    queryFn: () => api.getNiftyOptionChain(expiry, range),
+    refetchInterval: poll || 5000,
+    placeholderData: keepPreviousData,
+  });
+};
+
+export const useMarketCandles = (symbol: string | null, interval = "1minute") =>
+  useQuery({
+    queryKey: ["market-candles", symbol, interval],
+    queryFn: () => api.getMarketCandles(symbol as string, interval),
+    enabled: !!symbol,
+    placeholderData: keepPreviousData,
+  });
+
+export const useUpdateMarketSession = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { session_token: string; api_key?: string; secret_key?: string }) =>
+      api.updateMarketSession(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market-session"] });
+      qc.invalidateQueries({ queryKey: ["market-health"] });
+    },
+  });
+};

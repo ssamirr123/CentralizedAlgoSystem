@@ -90,3 +90,22 @@ def alert(*, kind: str, severity: str, message: str, algo_id: str | None = None,
         "kind": kind, "severity": severity, "message": message,
         "algo_id": algo_id, "server_id": server_id, "detail": detail or {},
     })
+
+
+def market_quote(symbol: str, *, ltp: float | None, change: float | None = None,
+                 change_percent: float | None = None, kind: str = "index",
+                 timestamp: str | None = None, extra: dict | None = None) -> None:
+    """Stage 19: one index/option quote update for the dashboard ticker.
+    The market-data worker throttles these to MARKET_WS_UPDATE_INTERVAL_MS."""
+    _emit(events.MARKET_QUOTE, {
+        "symbol": symbol, "kind": kind, "ltp": ltp,
+        "change": change, "change_percent": change_percent,
+        "timestamp": timestamp, **(extra or {}),
+    })
+
+
+def market_status(*, feed_state: str, session_state: str, detail: dict | None = None) -> None:
+    """Stage 19: market-feed lifecycle transitions (CONNECTING/RUNNING/STALE/...)."""
+    _emit(events.MARKET_STATUS, {
+        "feed_state": feed_state, "session_state": session_state, **(detail or {}),
+    })
