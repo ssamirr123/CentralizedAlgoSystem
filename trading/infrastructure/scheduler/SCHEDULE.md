@@ -182,3 +182,60 @@ will not complete while the watchdog is enabled.
 
 Paste the actual output of steps 1, 3 (`list-schedules`), and the manual
 `start_all_algos` invoke in step 4.
+
+## Fleet EC2 power — replaces the single-instance StartEC2 / StopEC2
+
+`TradingSchedule-StartEC2` / `-StopEC2` only ever act on the Lambda's
+`INSTANCE_ID` env var (one hard-coded box). Any server added later via
+`POST /api/servers` was never powered on/off (e.g. `samir_linux` ran 24/7).
+
+Fix: orchestrator actions `start_all_ec2` / `stop_all_ec2` iterate every
+server in `GET /api/servers` (same pattern as `*_all_algos`), so a new
+server is auto-covered with no per-server rule. `stop_all_ec2` keeps each
+box's own safe-stop guard. The control-plane backend EC2 is **not**
+registered as a server, so it is never a target.
+
+```powershell
+$lambdaArn = "arn:aws:lambda:ap-south-1:471112713822:function:TradingOrchestrator"
+$roleArn   = "arn:aws:iam::471112713822:role/TradingSchedulerRole"
+
+# 1. redeploy the Lambda with the new actions
+cd trading/infrastructure/lambda
+Compress-Archive -Path orchestrator.py -DestinationPath orchestrator.zip -Force
+aws lambda update-function-code --function-name TradingOrchestrator `
+  --zip-file fileb://orchestrator.zip --region ap-south-1
+
+# 2. drop the single-instance EC2 schedules
+aws scheduler delete-schedule --name TradingSchedule-StartEC2 --region ap-south-1
+aws scheduler delete-schedule --name TradingSchedule-StopEC2  --region ap-south-1
+
+# 3. create the fleet schedules (same times: 08:30 / 16:00 IST, MON-FRI)
+aws scheduler create-schedule --name TradingSchedule-StartAllEC2 `
+  --schedule-expression "cron(30 8 ? * MON-FRI *)" `
+  --schedule-expression-timezone "Asia/Kolkata" `
+  --flexible-time-window '{"Mode":"OFF"}' `
+  --target "{\"Arn\":\"$lambdaArn\",\"RoleArn\":\"$roleArn\",\"Input\":\"{\\\"action\\\":\\\"start_all_ec2\\\"}\"}"
+
+aws scheduler create-schedule --name TradingSchedule-StopAllEC2 `
+  --schedule-expression "cron(0 16 ? * MON-FRI *)" `
+  --schedule-expression-timezone "Asia/Kolkata" `
+  --flexible-time-window '{"Mode":"OFF"}' `
+  --target "{\"Arn\":\"$lambdaArn\",\"RoleArn\":\"$roleArn\",\"Input\":\"{\\\"action\\\":\\\"stop_all_ec2\\\"}\"}"
+```
+
+Verify:
+```powershell
+aws lambda invoke --function-name TradingOrchestrator `
+  --cli-binary-format raw-in-base64-out `
+  --payload '{\"action\":\"start_all_ec2\"}' --region ap-south-1 out.json
+Get-Content out.json
+```
+Expect `results` with one entry per row in `GET /api/servers`
+(`server_name` + `status`). `stop_all_ec2` entries for a box with a live
+strategy come back `success:false, safe_stop:"blocked"` — expected; that
+box stays up until its algos are stopped (15:30 `stop_all_algos`).
+
+Note the Stage-15 coordination gap above still applies per box: the
+strategy watchdog units must be torn down (or `STOP_ALGO` must also
+`systemctl stop` them) for `stop_all_ec2` to actually power a box down at
+16:00.

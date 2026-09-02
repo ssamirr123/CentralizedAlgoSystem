@@ -1,0 +1,5 @@
+{
+  "Arn": "arn:aws:lambda:ap-south-1:471112713822:function:TradingOrchestrator",
+  "RoleArn": "arn:aws:iam::471112713822:role/TradingSchedulerRole",
+  "Input": "{\"action\":\"start_all_ec2\"}"
+}
