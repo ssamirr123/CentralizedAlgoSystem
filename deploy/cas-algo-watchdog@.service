@@ -1,0 +1,17 @@
+[Unit]
+Description=CAS algo watchdog for %i (detects a frozen strategy, dumps threads, restarts via the agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/trading-app
+EnvironmentFile=/etc/cas-sidecars.env
+ExecStart=/trading-app/venv/bin/python3 /usr/local/bin/cas-algo-watchdog %i
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

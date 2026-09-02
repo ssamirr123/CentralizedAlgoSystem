@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""
+CAS algo watchdog — recovers a strategy whose process is alive but FROZEN
+(deadlocked worker thread), without touching any strategy / broker code.
+
+Detection : process running AND its app.log untouched for > STALL_SECS,
+            during market hours only.
+Action    : 1) py-spy dump of all threads -> /trading-app/trading/logs/<algo>.stall-<ts>.txt
+               (evidence for whoever fixes the real lock bug)
+            2) agent STOP_ALGO + START_ALGO -> the strategy's own
+               state.load()/resume_monitors recovery path takes over.
+
+Run as    : cas-algo-watchdog <ALGO_NAME>
+Env       : SERVER_NAME, API_BASE_URL, CONTROL_API_KEY, plus optional
+            STALL_SECS (default 240), CHECK_EVERY (default 60),
+            COOLDOWN_SECS (default 900).
+"""
+import datetime
+import os
+import subprocess
+import sys
+import time
+
+ALGO = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("STRATEGY_NAME", "")
+if not ALGO:
+    sys.stderr.write("cas-algo-watchdog: ALGO arg required\n")
+    sys.exit(2)
+
+REPO = "/trading-app"
+VENV_PY = f"{REPO}/venv/bin/python3"
+PY_SPY = f"{REPO}/venv/bin/py-spy"
+LOGROOT = f"{REPO}/trading/algos/{ALGO}/logs"
+AGENT = [VENV_PY, "trading/agent/trading_agent.py"]
+
+STALL_SECS = int(os.environ.get("STALL_SECS", "240"))
+CHECK_EVERY = int(os.environ.get("CHECK_EVERY", "60"))
+COOLDOWN_SECS = int(os.environ.get("COOLDOWN_SECS", "900"))
+ACTIVE_START = (9, 14)     # a minute before the first timed action
+ACTIVE_END = (15, 30)      # scheduled stop_all_algos
+
+
+def log(msg):
+    print(f"[watchdog:{ALGO}] {msg}", flush=True)
+
+
+def today_log():
+    return os.path.join(LOGROOT, datetime.date.today().isoformat(), "app.log")
+
+
+def in_window(now):
+    if now.weekday() >= 5:
+        return False
+    hm = (now.hour, now.minute)
+    return ACTIVE_START <= hm <= ACTIVE_END
+
+
+def algo_pid():
+    r = subprocess.run(["pgrep", "-f", f"trading/algos/{ALGO}/main.py"],
+                       capture_output=True, text=True)
+    pids = r.stdout.split()
+    return pids[0] if pids else None
+
+
+def dump_threads(pid):
+    ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    out = f"{REPO}/trading/logs/{ALGO}.stall-{ts}.txt"
+    try:
+        with open(out, "w") as fh:
+            subprocess.run([PY_SPY, "dump", "--pid", str(pid)],
+                           stdout=fh, stderr=subprocess.STDOUT, timeout=45)
+        log(f"thread dump -> {out}")
+    except Exception as exc:  # noqa: BLE001
+        log(f"py-spy dump failed ({exc}) - continuing to restart")
+
+
+def recover():
+    env = dict(os.environ)
+    env.setdefault("SERVER_NAME", "Minakshi-Linux")
+    env["STRATEGY_NAME"] = ALGO
+    try:
+        subprocess.run(AGENT + ["STOP_ALGO", ALGO], cwd=REPO, env=env, timeout=120)
+    except Exception as exc:  # noqa: BLE001
+        log(f"STOP_ALGO error (continuing): {exc}")
+    time.sleep(3)
+    try:
+        subprocess.run(AGENT + ["START_ALGO", ALGO], cwd=REPO, env=env, timeout=180)
+        log("START_ALGO issued - strategy crash-recovery (state.load/resume_monitors) resumes")
+    except Exception as exc:  # noqa: BLE001
+        log(f"START_ALGO error: {exc}")
+
+
+def main():
+    log(f"stall>{STALL_SECS}s while running in {ACTIVE_START}-{ACTIVE_END} IST "
+        f"-> py-spy dump + agent restart (cooldown {COOLDOWN_SECS}s)")
+    last_action = 0.0
+    while True:
+        time.sleep(CHECK_EVERY)
+        now = datetime.datetime.now()
+        if not in_window(now):
+            continue
+        pid = algo_pid()
+        if not pid:
+            continue  # "not running" is the schedule's / agent's concern
+        try:
+            age = time.time() - os.path.getmtime(today_log())
+        except OSError:
+            continue
+        if age < STALL_SECS:
+            continue
+        if time.time() - last_action < COOLDOWN_SECS:
+            continue
+        log(f"STALLED: pid {pid} alive but app.log idle {age:.0f}s -> dump + restart")
+        dump_threads(pid)
+        recover()
+        last_action = time.time()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

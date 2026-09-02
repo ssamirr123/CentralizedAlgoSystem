@@ -1,0 +1,17 @@
+[Unit]
+Description=CAS log tailer -> POST /api/logs for %i (no algo code changes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+EnvironmentFile=/etc/cas-log-tailer.env
+ExecStart=/trading-app/venv/bin/python3 /usr/local/bin/cas-log-tailer %i
+Restart=always
+RestartSec=5
+# never let this touch the trading process
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
