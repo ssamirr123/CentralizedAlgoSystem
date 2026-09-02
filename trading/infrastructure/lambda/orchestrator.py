@@ -24,6 +24,12 @@ Actions:
                                                           enabled algo on every server (for EventBridge
                                                           Scheduler -- one static payload per schedule,
                                                           not one rule per algo or per server)
+    start_all_ec2, stop_all_ec2                       -- start_ec2/stop_ec2 for EVERY server registered
+                                                          in the control centre (GET /api/servers). One
+                                                          static EventBridge payload that auto-covers any
+                                                          server added later; stop_all_ec2 keeps each
+                                                          box's own safe-stop guard. The control-plane
+                                                          backend EC2 is not registered, so never a target.
     get_command_status                                -- poll a job_id from the above
     get_algo_status                                   -- convenience: STATUS + short bounded wait
     sync_repo                                         -- `git pull --ff-only` in repo_path, then (if
@@ -111,6 +117,7 @@ ALGO_ACTIONS = {
 }
 
 ALL_ALGOS_ACTIONS = {"start_all_algos", "stop_all_algos", "update_all_algos"}
+ALL_EC2_ACTIONS = {"start_all_ec2", "stop_all_ec2"}
 
 # get_algo_status polls briefly since STATUS is a fast local check on the
 # instance (no network calls, no download) — unlike start/stop/update,
@@ -603,6 +610,47 @@ def _action_all_algos_command(action: str, event: dict) -> dict:
     return {"success": all(r.get("success") for r in results), "results": results}
 
 
+def _action_all_ec2(action: str, event: dict) -> dict:
+    """start_ec2 / stop_ec2 applied to EVERY server registered in the
+    control centre (GET /api/servers), for EventBridge Scheduler -- one
+    static payload that auto-covers any server added later, no per-server
+    rule to manage. Same idea as _action_all_algos_command.
+
+    stop_all_ec2 keeps each box's own safe-stop guard (a live trading
+    process blocks that instance's stop unless force:true); one blocked
+    box does not stop the others. The control-plane backend EC2 is
+    deliberately NOT registered as a server, so it is never a target."""
+    api_base_url = _get_env("API_BASE_URL")
+    api_key = _get_env("CONTROL_API_KEY")
+    if not api_base_url or not api_key:
+        return _error("API_BASE_URL and CONTROL_API_KEY environment variables are required for *_all_ec2 actions")
+
+    try:
+        servers_by_name = _list_servers(api_base_url, api_key)
+    except AlgoListError as exc:
+        return _error(str(exc))
+
+    if not servers_by_name:
+        _log_event("ALL_EC2_NO_SERVERS", action=action)
+        return {"success": True, "results": [], "message": "no servers registered"}
+
+    results = []
+    for name, server in sorted(servers_by_name.items()):
+        instance_id = server.get("ec2_instance_id")
+        if not instance_id:
+            results.append(_error(f"server '{name}' has no ec2_instance_id", server_id=name))
+            continue
+        os_name = server.get("os", "linux")
+        if action == "start_all_ec2":
+            r = _action_start_ec2(instance_id, event)
+        else:
+            r = _action_stop_ec2(instance_id, event, os_name)
+        r["server_name"] = name
+        results.append(r)
+    _log_event("ALL_EC2_COMMAND_SENT", action=action, server_count=len(results))
+    return {"success": all(r.get("success") for r in results), "results": results}
+
+
 def _action_get_command_status(instance_id: str, event: dict) -> dict:
     command_id = event.get("job_id") or event.get("command_id")
     if not command_id:
@@ -990,6 +1038,13 @@ def lambda_handler(event: dict, context: Any) -> dict:
         # Iterates every enabled algo across every server itself -- no
         # single instance_id applies.
         result = _action_all_algos_command(action, event)
+        _log_event("LAMBDA_RESULT", action=action, result=result)
+        return result
+
+    if action in ALL_EC2_ACTIONS:
+        # Iterates every registered server (GET /api/servers) itself --
+        # no single instance_id applies. Auto-covers servers added later.
+        result = _action_all_ec2(action, event)
         _log_event("LAMBDA_RESULT", action=action, result=result)
         return result
 
