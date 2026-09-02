@@ -139,6 +139,59 @@ class Settings:
         default_factory=lambda: _env_int("REALTIME_CLIENT_TIMEOUT_SECONDS", 60)
     )
 
+    # --- Stage 19: market-data engine (ICICI Breeze) ------------------
+    # Opt-in: a normal backend deploy does NOT try to reach Breeze unless
+    # this is set. The worker + scheduler only start when it is true.
+    market_data_enabled: bool = field(default_factory=lambda: _env_bool("MARKET_DATA_ENABLED"))
+    market_data_provider: str = field(
+        default_factory=lambda: _env("MARKET_DATA_PROVIDER", "icici_breeze").lower()
+    )
+    market_data_timezone: str = field(
+        default_factory=lambda: _env("MARKET_DATA_TIMEZONE", "Asia/Kolkata")
+    )
+    market_data_start_time: str = field(
+        default_factory=lambda: _env("MARKET_DATA_START_TIME", "09:10")
+    )
+    market_data_stop_time: str = field(
+        default_factory=lambda: _env("MARKET_DATA_STOP_TIME", "15:45")
+    )
+    # Optional exchange-holiday list, "YYYY-MM-DD,YYYY-MM-DD" (Phase 15
+    # will replace this with a proper calendar; empty = weekday-only).
+    market_data_holidays: str = field(default_factory=lambda: _env("MARKET_DATA_HOLIDAYS"))
+    nifty_option_strike_range: int = field(
+        default_factory=lambda: _env_int("NIFTY_OPTION_STRIKE_RANGE", 10)
+    )
+    market_data_stale_seconds: int = field(
+        default_factory=lambda: _env_int("MARKET_DATA_STALE_SECONDS", 10)
+    )
+    market_ws_update_interval_ms: int = field(
+        default_factory=lambda: _env_int("MARKET_WS_UPDATE_INTERVAL_MS", 1000)
+    )
+    market_data_retention_days: int = field(
+        default_factory=lambda: _env_int("MARKET_DATA_RETENTION_DAYS", 365)
+    )
+    option_data_retention_days: int = field(
+        default_factory=lambda: _env_int("OPTION_DATA_RETENTION_DAYS", 180)
+    )
+    # ICICI Breeze credentials. Primary names are BREEZE_*; the older
+    # ICICI_BREEZE_* names (BrokerCredentials / the order stub) are
+    # accepted as a fallback so an existing env keeps working. Never
+    # logged, never returned by any API response.
+    breeze_enabled: bool = field(default_factory=lambda: _env_bool("BREEZE_ENABLED"))
+    breeze_api_key: str = field(
+        default_factory=lambda: _env("BREEZE_API_KEY") or _env("ICICI_BREEZE_API_KEY")
+    )
+    breeze_secret_key: str = field(
+        default_factory=lambda: _env("BREEZE_SECRET_KEY") or _env("ICICI_BREEZE_API_SECRET")
+    )
+    breeze_session_token: str = field(
+        default_factory=lambda: _env("BREEZE_SESSION_TOKEN") or _env("ICICI_BREEZE_SESSION_TOKEN")
+    )
+    # Optional: an AWS Secrets Manager secret ARN/name holding a JSON blob
+    # {"api_key","secret_key","session_token"}. When set it takes
+    # precedence over the env values above (read lazily via boto3).
+    breeze_secret_id: str = field(default_factory=lambda: _env("BREEZE_SECRET_ID"))
+
     # --- Stale-heartbeat watcher --------------------------------
     stale_threshold_minutes: float = field(
         default_factory=lambda: _env_float("STALE_THRESHOLD_MINUTES", 2.0)

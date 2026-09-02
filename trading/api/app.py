@@ -28,6 +28,7 @@ configure_logging()
 from trading.api.admin_routes import router as admin_router  # noqa: E402
 from trading.api.auth_routes import router as auth_router  # noqa: E402
 from trading.api.health import router as health_router  # noqa: E402
+from trading.api.market_routes import router as market_router  # noqa: E402
 from trading.api.realtime.ws import router as realtime_router  # noqa: E402
 from trading.api.routes import router as control_center_router  # noqa: E402
 from trading.api.security.bootstrap import bootstrap_admin  # noqa: E402
@@ -61,9 +62,35 @@ async def lifespan(_: FastAPI):
         watcher_task = asyncio.create_task(stale_heartbeat_watcher())
     else:
         logger.info("Background watcher disabled (serverless mode)")
+
+    # Stage 19 market-data engine: opt-in. Probe the Breeze session, then
+    # start the timezone-aware scheduler which drives the feed service's
+    # 09:10 / 15:45 IST startup / stop flows. Never blocks API startup.
+    md_settings = load_settings()
+    md_scheduler = None
+    if md_settings.market_data_enabled:
+        try:
+            from trading.market_data.scheduler import MarketDataScheduler
+            from trading.market_data.service import get_service
+            from trading.market_data.session import get_session_manager
+
+            result = get_session_manager().check()
+            logger.info("market_data.start session_check=%s", result.state.value)
+
+            svc = get_service()
+            md_scheduler = MarketDataScheduler(on_start=svc.on_start, on_stop=svc.on_stop)
+            md_scheduler.start()
+        except Exception:  # noqa: BLE001
+            logger.exception("market-data engine failed to start")
+
     yield
     if watcher_task is not None:
         watcher_task.cancel()
+    if md_scheduler is not None:
+        try:
+            await md_scheduler.shutdown()
+        except Exception:  # noqa: BLE001
+            logger.exception("market-data scheduler shutdown error")
 
 
 def _configure_cors(app: FastAPI) -> None:
@@ -116,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix="/api")  # /api/auth/*
     app.include_router(admin_router, prefix="/api")  # /api/admin/*
     app.include_router(control_center_router, prefix="/api")
+    app.include_router(market_router, prefix="/api")  # /api/market/* (Stage 19 market data)
     app.include_router(health_router, prefix="/api")  # GET /api/health, unauthenticated
     if load_settings().realtime_enabled:
         app.include_router(realtime_router, prefix="/api")  # WS /api/ws (Stage 19)

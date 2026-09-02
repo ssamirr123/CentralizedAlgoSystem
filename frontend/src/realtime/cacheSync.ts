@@ -3,11 +3,14 @@ import type { AlgoListEntry, ServerListEntry } from "@/api/types";
 import type {
   CommandData,
   HeartbeatData,
+  MarketQuoteData,
+  MarketStatusData,
   MonitoringEvent,
   PnlData,
   ServerHealthData,
   StrategyStatusData,
 } from "./protocol";
+import type { MarketIndexQuote } from "@/api/types";
 
 /**
  * Apply one realtime event to the react-query cache.
@@ -64,6 +67,30 @@ export function applyEventToCache(qc: QueryClient, ev: MonitoringEvent): void {
       // single refetch of the algo list.
       qc.invalidateQueries({ queryKey: ["algos"] });
       if (d.algo_id) qc.invalidateQueries({ queryKey: ["algo-status", d.algo_id, d.server_id] });
+      break;
+    }
+    case "market_quote": {
+      const d = ev.data as unknown as MarketQuoteData;
+      if (d.kind === "index") {
+        qc.setQueryData<MarketIndexQuote[]>(["market-indices"], (prev) =>
+          prev?.map((q) =>
+            q.symbol === d.symbol
+              ? { ...q, ltp: d.ltp, change: d.change, change_percent: d.change_percent, status: "live" }
+              : q,
+          ),
+        );
+      } else {
+        // option quotes changed -> the chain needs a resync
+        qc.invalidateQueries({ queryKey: ["nifty-option-chain"] });
+      }
+      break;
+    }
+    case "market_status": {
+      const d = ev.data as unknown as MarketStatusData;
+      qc.setQueryData<Record<string, unknown>>(["market-health"], (prev) =>
+        prev ? { ...prev, feed: d.feed_state, session: d.session_state } : prev,
+      );
+      qc.invalidateQueries({ queryKey: ["market-session"] });
       break;
     }
     // "alert" is handled by RealtimeContext -> realtimeStore, not the cache.

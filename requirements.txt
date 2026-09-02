@@ -16,3 +16,8 @@ PyJWT>=2.9.0
 # heartbeat / log-shipper / reporting agents (sync HTTP).
 pandas>=2.2.2
 requests>=2.32.0
+
+# Market-data engine (Stage 19). ICICI Breeze SDK. Imported lazily by
+# trading/market_data/providers/icici_breeze.py so the package still
+# imports (and the unit suite still runs) if this is absent.
+breeze-connect>=1.0.0

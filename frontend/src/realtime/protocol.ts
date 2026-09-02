@@ -9,6 +9,8 @@ export const MONITORING_EVENT_TYPES = [
   "server_health",
   "command",
   "alert",
+  "market_quote",
+  "market_status",
 ] as const;
 export type MonitoringEventType = (typeof MONITORING_EVENT_TYPES)[number];
 
@@ -106,4 +108,19 @@ export interface AlertData {
   algo_id: string | null;
   server_id: string | null;
   detail: Record<string, unknown>;
+}
+
+// Stage 19 market-data engine
+export interface MarketQuoteData {
+  symbol: string;
+  kind: "index" | "option" | string;
+  ltp: number | null;
+  change: number | null;
+  change_percent: number | null;
+  timestamp: string | null;
+}
+export interface MarketStatusData {
+  feed_state: string;
+  session_state: string;
+  reconnect_count?: number;
 }
