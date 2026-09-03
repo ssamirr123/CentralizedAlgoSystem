@@ -2,16 +2,25 @@
 # intentionally NOT ignored (they're templates with blank values).
 .env
 .env.*
+.env.local
 *.env
 !*.env.example
 !.env.example
 .streamlit/secrets.toml
+secrets/
+credentials/
+*.secret
 
 # AWS / cloud credential files, in case any tool ever writes one locally
 .aws/
 *.pem
 *.p12
 *.pfx
+*.key
+*.crt
+*.keystore
+id_rsa
+id_ed25519
 credentials.json
 
 # Python

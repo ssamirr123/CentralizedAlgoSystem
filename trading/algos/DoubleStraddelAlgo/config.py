@@ -21,11 +21,46 @@ DRY_RUN = _env_flag("BOT_DRY_RUN", "BOT_DY_RUN", default="true")
 
 # ============================ CREDENTIALS ============================
 #Samir
-#clientid = 'xxx'
-#apikey = 'xxx' #uMeU6nVC'
-#mpin = 'xxx'
-#token = 'xxx'
 
+
+def _angel_creds() -> dict:
+    """AngelOne credentials from the environment (Stage 20). Falls back to a
+    git-ignored trading/.env at the repo root so a strategy box that does not
+    inject them via systemd still works. Real values live there or in AWS
+    Secrets Manager -> env -- NEVER in this tracked file."""
+    import os
+    from pathlib import Path as _P
+
+    _envf = _P(__file__).resolve().parents[3] / "trading" / ".env"
+    if _envf.is_file():
+        for _raw in _envf.read_text(encoding="utf-8", errors="ignore").splitlines():
+            _raw = _raw.strip()
+            if _raw and not _raw.startswith("#") and "=" in _raw:
+                _k, _, _v = _raw.partition("=")
+                os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+
+    def _g(*names):
+        for _n in names:
+            _val = os.environ.get(_n, "").strip()
+            if _val:
+                return _val
+        return ""
+
+    return {
+        "clientid": _g("ANGELONE_CLIENT_ID"),
+        "apikey": _g("ANGELONE_API_KEY"),
+        "mpin": _g("ANGELONE_MPIN", "ANGELONE_PASSWORD"),
+        "token": _g("ANGELONE_TOTP_SECRET"),
+    }
+
+
+# ============================ CREDENTIALS ============================
+# Stage 20: sourced from the environment. NEVER hard-code real values here.
+_ANGEL = _angel_creds()
+clientid = _ANGEL["clientid"]
+apikey = _ANGEL["apikey"]
+mpin = _ANGEL["mpin"]
+token = _ANGEL["token"]
 
 # ============================ INSTRUMENT ============================
 INDEX_NAME   = 'NIFTY'

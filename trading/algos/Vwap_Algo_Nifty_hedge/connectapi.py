@@ -18,7 +18,7 @@ def makeconnection():
             print('Connection Established')
             return obj
         except Exception as e:
-            print(f'[ERROR] makeconnection attempt {attempt+1}/3: {e}')
+            print(f'[ERROR] makeconnection attempt {attempt + 1}/3: {type(e).__name__}')
             time.sleep(1)
     print('[FAILED] makeconnection – all attempts exhausted, returning None')
     return None

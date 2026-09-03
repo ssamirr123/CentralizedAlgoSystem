@@ -192,8 +192,15 @@ class BreezeSessionManager:
             return SessionCheck(SessionState.ERROR, now, f"provider init failed ({type(exc).__name__})")
         try:
             provider.connect()
-        except ProviderAuthError as exc:
-            return SessionCheck(SessionState.SESSION_REQUIRED, now, _sanitize(str(exc)))
+        except ProviderAuthError:
+            # Deliberately do NOT forward the provider's exception text --
+            # a fixed, safe message so a session token can never ride out
+            # in `detail` -> FEED_STATUS -> the API.
+            return SessionCheck(
+                SessionState.SESSION_REQUIRED, now,
+                "Breeze rejected the session (token missing, invalid or expired). "
+                "Provision today's token via POST /api/market/session.",
+            )
         except ProviderConnectionError as exc:
             return SessionCheck(SessionState.ERROR, now, _sanitize(str(exc)))
         except ProviderError as exc:
@@ -232,16 +239,15 @@ class BreezeSessionManager:
         )
 
 
-_TOKENISH = ("token", "secret", "api_key", "apikey", "session")
-
-
 def _sanitize(msg: str) -> str:
-    """Belt-and-braces: never let a credential-looking string through. The
-    provider already avoids this, but session-manager output is API-facing."""
-    low = msg.lower()
-    if any(t in low for t in _TOKENISH) and any(c.isalnum() for c in msg):
-        # keep the shape, drop anything that could be a value
-        return msg.split(":")[0][:160] if ":" in msg else msg[:160]
+    """Belt-and-braces for API-facing error text: run it through the
+    central log redactor, then cap the length."""
+    try:
+        from trading.common.logger import redact_text
+
+        msg = redact_text(msg)
+    except Exception:  # noqa: BLE001
+        pass
     return msg[:240]
 
 

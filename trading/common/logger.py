@@ -31,6 +31,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,63 @@ LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 
 _ROOT_HANDLER_NAME = "cas-root"
 _root_configured = False
+
+
+# --------------------------------------------------------------------------
+# Stage 20 -- secret redaction. Applied to every message + traceback that
+# passes through this module's formatters, so a credential accidentally
+# interpolated into a log line (or an exception string) never lands in
+# stdout / CloudWatch / a shipped log.
+# --------------------------------------------------------------------------
+_REDACTED = "<redacted>"
+_KEY = (
+    r"api[_-]?key|secret[_-]?key|secret|client[_-]?secret|password|passwd|pwd|mpin|"
+    r"totp[_-]?secret|totp|session[_-]?token|access[_-]?token|refresh[_-]?token|"
+    r"control[_-]?api[_-]?key|auth[_-]?secret[_-]?key|authorization|x-api-key|breeze[_-]?[a-z_]*"
+)
+_REDACTORS: list[tuple[re.Pattern[str], str]] = [
+    # Authorization: Bearer <jwt>  (before the generic key rule, which would
+    # otherwise just redact the word "Bearer" and leave the token)
+    (re.compile(r'((?:authorization["\']?\s*[:=]\s*)?bearer\s+)[A-Za-z0-9._\-]{10,}', re.IGNORECASE),
+     rf'\1{_REDACTED}'),
+    # key = value / "key": "value" / key: value  (keep the key, drop the value)
+    (re.compile(rf'((?:{_KEY})["\']?\s*[:=]\s*)(["\']?)([^\s"\',;)}}]{{3,}})(\2)', re.IGNORECASE),
+     rf'\1\2{_REDACTED}\4'),
+    # DSNs with an inline password:  scheme://user:pass@host
+    (re.compile(r'([a-z0-9+]+://[^\s:/@]+:)[^\s@/]+(@)', re.IGNORECASE), rf'\1{_REDACTED}\2'),
+    # AWS access key id
+    (re.compile(r'\bAKIA[0-9A-Z]{16}\b'), '<redacted-aws-key-id>'),
+    # PEM private key blocks
+    (re.compile(r'-----BEGIN[A-Z ]*PRIVATE KEY-----.*?-----END[A-Z ]*PRIVATE KEY-----', re.DOTALL),
+     '<redacted-private-key>'),
+]
+
+
+def redact_text(text: str) -> str:
+    """Best-effort scrub of credential-shaped substrings. Never raises."""
+    if not text:
+        return text
+    try:
+        for pattern, repl in _REDACTORS:
+            text = pattern.sub(repl, text)
+    except Exception:  # noqa: BLE001 - logging must never fail
+        return text
+    return text
+
+
+class SecretRedactionFilter(logging.Filter):
+    """Attach to any handler to scrub record args/msg before formatting."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        try:
+            msg = record.getMessage()
+            red = redact_text(msg)
+            if red != msg:
+                record.msg = red
+                record.args = ()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
 
 
 class JsonFormatter(logging.Formatter):
@@ -56,7 +114,7 @@ class JsonFormatter(logging.Formatter):
             "component": self._component,
             "server": self._server,
             "algo": self._algo,
-            "message": record.getMessage(),
+            "message": redact_text(record.getMessage()),
         }
         event = getattr(record, "event", None)
         if event:
@@ -65,7 +123,7 @@ class JsonFormatter(logging.Formatter):
         if details:
             payload["details"] = details
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            payload["exc_info"] = redact_text(self.formatException(record.exc_info))
         return json.dumps(payload, default=str)
 
 
@@ -79,7 +137,7 @@ class RootJsonFormatter(logging.Formatter):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_text(record.getMessage()),
         }
         event = getattr(record, "event", None)
         if event:
@@ -88,7 +146,7 @@ class RootJsonFormatter(logging.Formatter):
         if details:
             payload["details"] = details
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            payload["exc_info"] = redact_text(self.formatException(record.exc_info))
         return json.dumps(payload, default=str)
 
 
@@ -122,6 +180,7 @@ def configure_logging(*, level: str | None = None, force: bool = False) -> loggi
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.set_name(_ROOT_HANDLER_NAME)
     stream_handler.setFormatter(RootJsonFormatter())
+    stream_handler.addFilter(SecretRedactionFilter())
     root.addHandler(stream_handler)
 
     _root_configured = True
