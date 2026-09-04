@@ -92,6 +92,12 @@ def _breeze_date(d: date) -> str:
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def _strike_str(strike: float) -> str:
+    """Breeze builds its contract key by string concatenation, so a strike
+    must be "23950" not "23950.0" (the latter resolves to no feed)."""
+    return f"{strike:g}"
+
+
 class ICICIBreezeProvider(MarketDataProvider):
     name = "icici_breeze"
 
@@ -237,7 +243,7 @@ class ICICIBreezeProvider(MarketDataProvider):
             raw = self._require_client().get_quotes(
                 stock_code=(instrument.underlying or "").upper(), exchange_code=exch,
                 product_type="options", expiry_date=_breeze_date(instrument.expiry),
-                right=right, strike_price=str(instrument.strike),
+                right=right, strike_price=_strike_str(instrument.strike),
             )
         except ProviderError:
             raise
@@ -319,7 +325,7 @@ class ICICIBreezeProvider(MarketDataProvider):
                 stock_code=(instrument.underlying or "").upper(), exchange_code="NFO",
                 product_type="options", expiry_date=_breeze_date(instrument.expiry),
                 right=_OT_TO_RIGHT.get((instrument.option_type or "").upper(), ""),
-                strike_price=str(instrument.strike),
+                strike_price=_strike_str(instrument.strike),
             )
         else:
             raise ValueError(f"Unsupported instrument type for history: {instrument.instrument_type}")
@@ -417,7 +423,7 @@ class ICICIBreezeProvider(MarketDataProvider):
             # the ISO form _breeze_date() produces resolves to no feed (0 ticks).
             "product_type": "options", "expiry_date": inst.expiry.strftime("%d-%b-%Y"),
             "right": _OT_TO_RIGHT.get((inst.option_type or "").upper(), ""),
-            "strike_price": str(inst.strike),
+            "strike_price": _strike_str(inst.strike),
             "get_exchange_quotes": True, "get_market_depth": False,
         }
 
