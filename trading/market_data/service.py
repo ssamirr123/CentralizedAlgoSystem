@@ -364,15 +364,23 @@ class MarketDataService:
     def _resolve_tick(self, tick: dict) -> Instrument | None:
         """Map a raw option tick payload back to a known contract."""
         try:
-            underlying = str(tick.get("stock_code") or tick.get("stock_name") or "NIFTY").upper()
+            from trading.market_data.providers.icici_breeze import (
+                _parse_expiry,
+                _tick_symbol_to_internal,
+            )
+
+            # Breeze option ticks carry stock_name="NIFTY 50" (the feed
+            # display name), not the "NIFTY" the instrument master is keyed
+            # by -- normalise it the same way index ticks are.
+            underlying = _tick_symbol_to_internal(
+                str(tick.get("stock_code") or tick.get("stock_name") or "NIFTY")
+            )
             right = str(tick.get("right") or tick.get("option_type") or "").lower()
             ot = {"call": "CE", "ce": "CE", "put": "PE", "pe": "PE"}.get(right)
             strike = tick.get("strike_price") or tick.get("strike")
             expiry_raw = tick.get("expiry_date") or tick.get("expiry")
             if not (ot and strike and expiry_raw):
                 return None
-            from trading.market_data.providers.icici_breeze import _parse_expiry
-
             expiry = _parse_expiry(expiry_raw)
             if expiry is None:
                 return None
