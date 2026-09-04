@@ -598,10 +598,17 @@ def _nearest(sorted_values: Sequence[float], target: float | None) -> float | No
 
 
 def _tick_symbol_to_internal(sym: str) -> str:
-    s = sym.split("!")[-1].upper()  # "4.1!NIFTY" -> "NIFTY"
+    s = sym.split("!")[-1].upper()  # "4.1!NIFTY 50" -> "NIFTY 50"
     reverse = {v[0].upper(): k for k, v in _INDEX_CODES.items()}
     if s in reverse:
         return reverse[s]
-    aliases = {"NIFTY": "NIFTY", "CNXBAN": "BANKNIFTY", "BANKNIFTY": "BANKNIFTY",
-               "INDVIX": "INDIA_VIX", "BSESEN": "SENSEX", "SENSEX": "SENSEX"}
+    # Breeze streams NSE index ticks keyed by the feed-token display name
+    # ("4.1!NIFTY 50"), not the isec stock_code we subscribe with ("NIFTY").
+    # SENSEX happens to stream as "1.1!SENSEX" which already matches below.
+    aliases = {
+        "NIFTY": "NIFTY", "NIFTY 50": "NIFTY", "NIFTY50": "NIFTY", "CNXNIF": "NIFTY",
+        "CNXBAN": "BANKNIFTY", "BANKNIFTY": "BANKNIFTY", "NIFTY BANK": "BANKNIFTY", "NIFTYBANK": "BANKNIFTY",
+        "INDVIX": "INDIA_VIX", "INDIA VIX": "INDIA_VIX", "INDIAVIX": "INDIA_VIX", "NIFVIX": "INDIA_VIX",
+        "BSESEN": "SENSEX", "SENSEX": "SENSEX",
+    }
     return aliases.get(s, s)
