@@ -565,7 +565,11 @@ def _download_icici_security_master() -> list[dict]:  # pragma: no cover - netwo
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         for name in zf.namelist():
             upper = name.upper()
-            if "FONSE" not in upper and "NFO" not in upper and "FOBSE" not in upper:
+            if "FOBSE" in upper or ("BFO" in upper and "FONSE" not in upper):
+                exch = "BFO"
+            elif "FONSE" in upper or "NFO" in upper:
+                exch = "NFO"
+            else:
                 continue
             data = zf.read(name).decode("utf-8", errors="replace").splitlines()
             if not data:
@@ -573,12 +577,34 @@ def _download_icici_security_master() -> list[dict]:  # pragma: no cover - netwo
             header = data[0]
             delim = "," if header.count(",") >= header.count("|") else "|"
             for raw in csv.DictReader(data, delimiter=delim):
-                norm = {
-                    (k or "").strip().lower().replace(" ", "_"): (v.strip() if isinstance(v, str) else v)
+                # ICICI headers are single-word CamelCase ("ExpiryDate",
+                # "StrikePrice", "ShortName"): squash to a bare lowercase
+                # key so both those and any spaced/underscored variants
+                # collapse to the same name.
+                r = {
+                    "".join((k or "").split()).replace("_", "").lower():
+                        (v.strip() if isinstance(v, str) else v)
                     for k, v in raw.items()
                     if k
                 }
-                rows.append(norm)
+                ot = str(r.get("optiontype") or r.get("right") or "").strip().upper()
+                if ot not in ("CE", "PE", "CALL", "PUT"):
+                    continue  # futures / non-option rows
+                strike = r.get("strikeprice") or r.get("strike")
+                expiry = r.get("expirydate") or r.get("expiry")
+                if not strike or not expiry:
+                    continue
+                rows.append({
+                    "underlying": r.get("shortname") or r.get("symbol") or r.get("underlying") or "",
+                    "expiry": expiry,
+                    "strike": strike,
+                    "option_type": ot,
+                    "token": r.get("token") or "",
+                    "lot_size": r.get("lotsize") or r.get("minimumlotqty"),
+                    "tick_size": r.get("ticksize"),
+                    "exchange": exch,
+                    "symbol": r.get("exchangecode") or r.get("companyname") or "",
+                })
     return rows
 
 
