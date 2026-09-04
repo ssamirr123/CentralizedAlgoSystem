@@ -413,7 +413,9 @@ class ICICIBreezeProvider(MarketDataProvider):
                     "get_exchange_quotes": True, "get_market_depth": False}
         return {
             "exchange_code": "NFO", "stock_code": (inst.underlying or "").upper(),
-            "product_type": "options", "expiry_date": _breeze_date(inst.expiry),
+            # Streaming needs the security-master expiry format ("08-Sep-2026");
+            # the ISO form _breeze_date() produces resolves to no feed (0 ticks).
+            "product_type": "options", "expiry_date": inst.expiry.strftime("%d-%b-%Y"),
             "right": _OT_TO_RIGHT.get((inst.option_type or "").upper(), ""),
             "strike_price": str(inst.strike),
             "get_exchange_quotes": True, "get_market_depth": False,
