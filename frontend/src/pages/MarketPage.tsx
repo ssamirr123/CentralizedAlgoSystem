@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useMarketIndices } from "@/api/hooks";
 import { PageHeader } from "@/components/PageHeader";
 import { QueryBoundary } from "@/components/States";
@@ -17,9 +18,14 @@ export function MarketPage() {
         title="Market"
         description="Live index quotes + NIFTY option chain from ICICI Breeze (paper — market data only, no orders)."
         actions={
-          <button className="sm" onClick={() => indices.refetch()}>
-            Refresh
-          </button>
+          <>
+            <Link className="sm" to="/market/straddle-pulse">
+              Straddle Pulse
+            </Link>
+            <button className="sm" onClick={() => indices.refetch()}>
+              Refresh
+            </button>
+          </>
         }
       />
 

@@ -6,6 +6,7 @@ import { LoginPage } from "@/pages/LoginPage";
 import { ChangePasswordPage } from "@/pages/ChangePasswordPage";
 import { ServerDetailPage } from "@/pages/ServerDetailPage";
 import { AlgoDetailPage } from "@/pages/AlgoDetailPage";
+import { StraddlePulsePage } from "@/pages/StraddlePulsePage";
 import { NAV_ROUTES } from "@/routes";
 import type { Permission } from "@/lib/config";
 
@@ -64,6 +65,14 @@ export default function App() {
                   element={
                     <PermissionRoute permission="VIEW">
                       <AlgoDetailPage />
+                    </PermissionRoute>
+                  }
+                />
+                <Route
+                  path="market/straddle-pulse"
+                  element={
+                    <PermissionRoute permission="VIEW">
+                      <StraddlePulsePage />
                     </PermissionRoute>
                   }
                 />

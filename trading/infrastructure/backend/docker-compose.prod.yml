@@ -38,3 +38,9 @@ services:
       - /etc/centralized-algo/backend.env
     environment:
       APP_ENV: production
+    # breeze-connect does `os.makedirs("logs")` relative to CWD (/app) at
+    # import time; the image runs as non-root `appuser` and /app is not
+    # writable, so the market-data provider import blew up with
+    # PermissionError. Give it a writable, throwaway /app/logs.
+    tmpfs:
+      - /app/logs

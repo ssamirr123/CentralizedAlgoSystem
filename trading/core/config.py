@@ -161,6 +161,9 @@ class Settings:
     nifty_option_strike_range: int = field(
         default_factory=lambda: _env_int("NIFTY_OPTION_STRIKE_RANGE", 10)
     )
+    sensex_option_strike_range: int = field(
+        default_factory=lambda: _env_int("SENSEX_OPTION_STRIKE_RANGE", 10)
+    )
     market_data_stale_seconds: int = field(
         default_factory=lambda: _env_int("MARKET_DATA_STALE_SECONDS", 10)
     )
