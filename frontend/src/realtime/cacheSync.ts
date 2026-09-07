@@ -12,14 +12,13 @@ import type {
 } from "./protocol";
 import type { MarketIndexQuote } from "@/api/types";
 
-/**
- * Apply one realtime event to the react-query cache.
- *
- * High-frequency status fields are patched in place (no network). Lower-
- * frequency / structurally-tricky data (positions, trades, pnl history,
- * server list) is invalidated so react-query refetches once — that is a
- * targeted resync, not the polling fallback.
- */
+// The option chain gets a market_quote event per option tick — dozens per
+// second across the subscribed contracts. Invalidating the query on each
+// one triggers a refetch storm that trips the API rate limit. Coalesce
+// into at most one refetch per this interval (the hook also polls at 5s).
+const OPTION_CHAIN_RESYNC_MS = 3000;
+let optionChainResyncAt = 0;
+
 export function applyEventToCache(qc: QueryClient, ev: MonitoringEvent): void {
   switch (ev.type) {
     case "heartbeat": {
@@ -80,8 +79,13 @@ export function applyEventToCache(qc: QueryClient, ev: MonitoringEvent): void {
           ),
         );
       } else {
-        // option quotes changed -> the chain needs a resync
-        qc.invalidateQueries({ queryKey: ["nifty-option-chain"] });
+        // option quotes changed -> the chain needs a resync, but throttled
+        // (see OPTION_CHAIN_RESYNC_MS) so a burst of ticks is one refetch.
+        const now = Date.now();
+        if (now - optionChainResyncAt >= OPTION_CHAIN_RESYNC_MS) {
+          optionChainResyncAt = now;
+          qc.invalidateQueries({ queryKey: ["nifty-option-chain"] });
+        }
       }
       break;
     }
