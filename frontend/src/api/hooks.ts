@@ -195,6 +195,42 @@ export const useMarketCandles = (symbol: string | null, interval = "1minute") =>
     placeholderData: keepPreviousData,
   });
 
+// --- Straddle Pulse (NIFTY + SENSEX expiry-cycle model) --------------------
+export const useStraddleUnderlyings = () =>
+  useQuery({ queryKey: ["straddle-underlyings"], queryFn: api.getStraddleUnderlyings });
+
+export const useStraddleCycles = (underlying: string) =>
+  useQuery({ queryKey: ["straddle-cycles", underlying], queryFn: () => api.getStraddleCycles(underlying) });
+
+export const useCycleSessions = (cycleId: number | null) =>
+  useQuery({
+    queryKey: ["straddle-cycle-sessions", cycleId],
+    queryFn: () => api.getCycleSessions(cycleId as number),
+    enabled: cycleId != null,
+  });
+
+export const useSessionChart = (sessionId: number | null) => {
+  const poll = usePollInterval(15000);
+  return useQuery({
+    queryKey: ["straddle-session-chart", sessionId],
+    queryFn: () => api.getSessionChart(sessionId as number),
+    enabled: sessionId != null,
+    refetchInterval: poll || 15000,
+    placeholderData: keepPreviousData,
+  });
+};
+
+export const useSessionOI = (sessionId: number | null) => {
+  const poll = usePollInterval(15000);
+  return useQuery({
+    queryKey: ["straddle-session-oi", sessionId],
+    queryFn: () => api.getSessionOI(sessionId as number),
+    enabled: sessionId != null,
+    refetchInterval: poll || 15000,
+    placeholderData: keepPreviousData,
+  });
+};
+
 export const useUpdateMarketSession = () => {
   const qc = useQueryClient();
   return useMutation({

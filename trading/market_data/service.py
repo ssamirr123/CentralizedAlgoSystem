@@ -34,16 +34,23 @@ from trading.market_data.providers import ProviderError, create_market_data_prov
 from trading.market_data.schemas import IndexQuote, OptionQuote
 from trading.market_data.session import BreezeSessionManager, get_session_manager
 from trading.market_data.status import FEED_STATUS, FeedState, SessionState
+from trading.market_data.straddle_pulse import StraddlePulseEngine
 from trading.market_data.symbols import (
     INDEX_INSTRUMENTS,
     Instrument,
     index_instrument,
     make_option_symbol,
 )
+from trading.market_data.underlying_config import STRADDLE_PULSE_UNDERLYINGS, underlying_config
 
 logger = logging.getLogger("trading.market_data.service")
 
 _INDEX_SUBSCRIBE = ("NIFTY", "BANKNIFTY", "INDIA_VIX", "SENSEX")
+# Underlyings whose option universe / ATM straddle cycle is maintained
+# (Straddle Pulse). A superset of this could subscribe options for an
+# index with no listed option chain, so keep it explicit and separate
+# from _INDEX_SUBSCRIBE (which is spot ticks only).
+_OPTION_UNDERLYINGS = STRADDLE_PULSE_UNDERLYINGS
 
 
 class MarketDataService:
@@ -77,9 +84,13 @@ class MarketDataService:
         self._accepting = False
         self._flush_task: asyncio.Task | None = None
         self._contract_ids: dict[str, int] = {}      # internal option symbol -> option_contracts.id
-        self._option_universe: set[str] = set()
+        self._option_universe: dict[str, set[str]] = {u: set() for u in _OPTION_UNDERLYINGS}
         self._last_publish: dict[str, float] = {}
         self._reconnects = 0
+        self.straddle_pulse = StraddlePulseEngine(
+            master=self.master, cache=self.cache, session_factory=self._session_factory,
+            settings=self.settings,
+        )
 
     # --- scheduler hooks --------------------------------------------
     async def on_start(self) -> None:
@@ -116,7 +127,7 @@ class MarketDataService:
 
         # 6. load / refresh instrument master + persist contracts
         try:
-            self.master.refresh(self._provider, ("NIFTY",), as_of=self._clock().astimezone(_ist(s)).date())
+            self.master.refresh(self._provider, _OPTION_UNDERLYINGS, as_of=self._clock().astimezone(_ist(s)).date())
             self._persist_contracts()
         except ProviderError as exc:
             logger.warning("market_data.instrument_master refresh failed: %s", type(exc).__name__)
@@ -124,6 +135,15 @@ class MarketDataService:
         # 7-11. spot -> ATM -> expiries -> strike universe -> subscribe options
         await self._wait_first_tick()
         self._resubscribe_option_universe()
+
+        # Straddle Pulse: restart-safe recovery per underlying (spec section
+        # 30) -- ensure the active cycle/session exist and lock ATM
+        # immediately if it was already due while the process was down.
+        for underlying in _OPTION_UNDERLYINGS:
+            try:
+                self.straddle_pulse.recover(underlying)
+            except Exception:  # noqa: BLE001
+                logger.exception("straddle_pulse.recover_error underlying=%s", underlying)
 
         # 13-14. aggregation + persistence loop
         if self._flush_task is None or self._flush_task.done():
@@ -135,7 +155,7 @@ class MarketDataService:
                                reconnect_count=self._reconnects)
             self._publish_status(FeedState.RUNNING)
             logger.info("market_data.start done symbols_live=%d options=%d",
-                        self.cache.symbols_live(), len(self._option_universe))
+                        self.cache.symbols_live(), sum(len(s) for s in self._option_universe.values()))
         else:
             FEED_STATUS.update(feed_state=FeedState.CONNECTING)
             logger.warning("market_data.start no tick within %ss -- staying CONNECTING", self._first_tick_timeout)
@@ -170,7 +190,7 @@ class MarketDataService:
                  "reconnects": self._reconnects}
         self.cache.clear()
         self._contract_ids.clear()
-        self._option_universe.clear()
+        self._option_universe = {u: set() for u in _OPTION_UNDERLYINGS}
 
         # 7-8. mark STOPPED + daily stats
         FEED_STATUS.update(feed_state=FeedState.STOPPED, stopped_at=self._clock())
@@ -238,6 +258,7 @@ class MarketDataService:
                 self._persist(idx, opt)
                 self._check_staleness()
                 self._resubscribe_option_universe()
+                self.straddle_pulse.tick_all(self._clock().astimezone(_ist(self.settings)))
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -323,19 +344,20 @@ class MarketDataService:
         finally:
             db.close()
 
-    def _current_option_window(self) -> list[Instrument]:
-        spot_entry = self.cache.get_latest_quote("NIFTY")
+    def _current_option_window(self, underlying: str) -> list[Instrument]:
+        spot_entry = self.cache.get_latest_quote(underlying)
         spot = spot_entry.quote.ltp if spot_entry else None
-        expiry = oc.resolve_expiry(self.master, "NIFTY", "current")
+        expiry = oc.resolve_expiry(self.master, underlying, "current")
         if spot is None or expiry is None:
             return []
-        strikes = self.master.list_strikes("NIFTY", expiry)
+        strikes = self.master.list_strikes(underlying, expiry)
         atm = oc.nearest_strike(strikes, spot)
-        window = oc.select_strike_window(strikes, atm, self.settings.nifty_option_strike_range)
+        strike_range = underlying_config(underlying).strike_range(self.settings)
+        window = oc.select_strike_window(strikes, atm, strike_range)
         out: list[Instrument] = []
         for strike in window:
             for ot in ("CE", "PE"):
-                inst = self.master.resolve("NIFTY", expiry, strike, ot)
+                inst = self.master.resolve(underlying, expiry, strike, ot)
                 if inst is not None:
                     out.append(inst)
         return out
@@ -343,23 +365,27 @@ class MarketDataService:
     def _resubscribe_option_universe(self) -> None:
         if self._provider is None or not self._accepting:
             return
-        wanted = self._current_option_window()
-        wanted_syms = {i.internal_symbol for i in wanted}
-        add = [i for i in wanted if i.internal_symbol not in self._option_universe]
-        drop_syms = self._option_universe - wanted_syms
-        if add:
-            try:
-                self._provider.subscribe(add, self._on_tick, resolver=self._resolve_tick)
-            except Exception:  # noqa: BLE001
-                logger.warning("market_data option subscribe failed")
-        if drop_syms:
-            drop = [self.master.get(s) for s in drop_syms if self.master.get(s) is not None]
-            try:
-                self._provider.unsubscribe(drop)
-            except Exception:  # noqa: BLE001
-                pass
-        self._option_universe = wanted_syms
-        FEED_STATUS.update(option_contracts_subscribed=len(wanted_syms))
+        total_subscribed = 0
+        for underlying in _OPTION_UNDERLYINGS:
+            wanted = self._current_option_window(underlying)
+            wanted_syms = {i.internal_symbol for i in wanted}
+            current = self._option_universe.setdefault(underlying, set())
+            add = [i for i in wanted if i.internal_symbol not in current]
+            drop_syms = current - wanted_syms
+            if add:
+                try:
+                    self._provider.subscribe(add, self._on_tick, resolver=self._resolve_tick)
+                except Exception:  # noqa: BLE001
+                    logger.warning("market_data option subscribe failed underlying=%s", underlying)
+            if drop_syms:
+                drop = [self.master.get(s) for s in drop_syms if self.master.get(s) is not None]
+                try:
+                    self._provider.unsubscribe(drop)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._option_universe[underlying] = wanted_syms
+            total_subscribed += len(wanted_syms)
+        FEED_STATUS.update(option_contracts_subscribed=total_subscribed)
 
     def _resolve_tick(self, tick: dict) -> Instrument | None:
         """Map a raw option tick payload back to a known contract."""

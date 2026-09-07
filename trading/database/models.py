@@ -337,3 +337,10 @@ from trading.market_data.models import (  # noqa: E402,F401
     OptionCandle,
     OptionContract,
 )
+
+# --- Straddle Pulse (NIFTY + SENSEX expiry-cycle model) --------------------
+from trading.market_data.models import (  # noqa: E402,F401
+    DailySession,
+    ExpiryCycle,
+    OISnapshot,
+)

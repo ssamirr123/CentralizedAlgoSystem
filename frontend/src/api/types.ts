@@ -263,6 +263,71 @@ export interface MarketSessionStatus {
   last_error: string | null;
 }
 
+// --- Straddle Pulse (NIFTY + SENSEX expiry-cycle model) -------------------
+export interface StraddleUnderlying {
+  symbol: string;
+  spot_exchange: string;
+  option_exchange: string;
+}
+
+export interface StraddleCycle {
+  id: number;
+  underlying: string;
+  exchange: string;
+  expiry_date: string;
+  cycle_start_date: string;
+  cycle_end_date: string;
+  status: "ACTIVE" | "COMPLETED" | string;
+}
+
+export interface StraddleSession {
+  id: number;
+  cycle_id: number;
+  underlying: string;
+  trading_date: string;
+  spot_0916: number | null;
+  atm_strike: number | null;
+  atm_ce_symbol: string | null;
+  atm_pe_symbol: string | null;
+  session_status: "PENDING" | "LOCKED" | string;
+}
+
+export interface StraddleCandle {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number | null;
+  oi: number | null;
+}
+
+export interface StraddleSessionChart {
+  session_id: number;
+  underlying: string;
+  trading_date: string;
+  atm_strike: number | null;
+  spot: StraddleCandle[];
+  atm_ce: StraddleCandle[];
+  atm_pe: StraddleCandle[];
+}
+
+export interface StraddleOIPoint {
+  timestamp: string;
+  call_oi_total: number;
+  put_oi_total: number;
+  call_oi_change: number;
+  put_oi_change: number;
+  pcr: number | null;
+}
+
+export interface StraddleSessionOI {
+  session_id: number;
+  underlying: string;
+  trading_date: string;
+  points: StraddleOIPoint[];
+}
+
 export interface MarketHealth {
   status: string;
   provider: string;
