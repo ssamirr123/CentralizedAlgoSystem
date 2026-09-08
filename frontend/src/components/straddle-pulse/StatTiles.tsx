@@ -45,16 +45,19 @@ export function StatTiles({
         value={session.atm_strike != null ? session.atm_strike.toLocaleString("en-IN") : "—"}
         sub="daily 09:16"
       />
-      <Tile
-        label="ATM CE"
-        value={session.atm_strike != null ? `${session.atm_strike.toLocaleString("en-IN")} CE` : "—"}
-        sub={points[0] ? `open ${points[0].ce.toFixed(1)}` : session.atm_ce_symbol ?? undefined}
-      />
-      <Tile
-        label="ATM PE"
-        value={session.atm_strike != null ? `${session.atm_strike.toLocaleString("en-IN")} PE` : "—"}
-        sub={points[0] ? `open ${points[0].pe.toFixed(1)}` : session.atm_pe_symbol ?? undefined}
-      />
+      <div className="stat-tile">
+        <div className="stat-tile-label">ATM CE / PE</div>
+        <div className="stat-tile-ce-pe">
+          <div>
+            <div className="stat-tile-value">{session.atm_strike != null ? `${session.atm_strike.toLocaleString("en-IN")} CE` : "—"}</div>
+            <div className="stat-tile-sub">{points[0] ? `open ${points[0].ce.toFixed(1)}` : session.atm_ce_symbol ?? " "}</div>
+          </div>
+          <div>
+            <div className="stat-tile-value">{session.atm_strike != null ? `${session.atm_strike.toLocaleString("en-IN")} PE` : "—"}</div>
+            <div className="stat-tile-sub">{points[0] ? `open ${points[0].pe.toFixed(1)}` : session.atm_pe_symbol ?? " "}</div>
+          </div>
+        </div>
+      </div>
       <Tile label="Expiry" value={cycle.expiry_date} sub={`${dte} DTE`} />
       <Tile
         label="Straddle now"
