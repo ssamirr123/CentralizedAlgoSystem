@@ -120,16 +120,6 @@ export const getMarketIndices = () =>
 export const getMarketIndex = (symbol: string) =>
   apiRequest<import("./types").MarketIndexQuote>(`/api/market/indices/${encodeURIComponent(symbol)}`);
 
-export const getNiftyExpiries = () => apiRequest<string[]>("/api/market/nifty/expiries");
-
-export const getNiftyStrikes = (expiry = "current") =>
-  apiRequest<number[]>("/api/market/nifty/strikes", { query: { expiry } });
-
-export const getNiftyOptionChain = (expiry = "current", range?: number) =>
-  apiRequest<import("./types").MarketOptionChain>("/api/market/nifty/option-chain", {
-    query: { expiry, range },
-  });
-
 export const getMarketCandles = (symbol: string, interval = "1minute", limit = 375) =>
   apiRequest<import("./types").MarketCandle[]>(`/api/market/candles/${encodeURIComponent(symbol)}`, {
     query: { interval, limit },
