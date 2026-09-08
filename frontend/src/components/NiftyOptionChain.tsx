@@ -3,7 +3,7 @@ import { useNiftyExpiries, useNiftyOptionChain } from "@/api/hooks";
 import { QueryBoundary } from "@/components/States";
 import type { MarketOptionQuote } from "@/api/types";
 
-const RANGES = [5, 10, 20];
+const DEFAULT_RANGE = 10;
 
 function n(v: number | null | undefined, d = 2): string {
   return v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: d });
@@ -24,13 +24,13 @@ function Cells({ q }: { q: MarketOptionQuote | null }) {
 export function NiftyOptionChain() {
   const expiries = useNiftyExpiries();
   const [expiry, setExpiry] = useState("current");
-  const [range, setRange] = useState(10);
-  const chain = useNiftyOptionChain(expiry, range);
+  const chain = useNiftyOptionChain(expiry, DEFAULT_RANGE);
 
-  const expiryOptions = useMemo(
-    () => ["current", "next", ...(expiries.data ?? [])],
-    [expiries.data],
-  );
+  const expiryOptions = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const upcoming = (expiries.data ?? []).filter((e) => e >= today);
+    return ["current", "next", ...upcoming];
+  }, [expiries.data]);
 
   return (
     <div className="card">
@@ -41,16 +41,6 @@ export function NiftyOptionChain() {
             {expiryOptions.map((e) => (
               <option key={e} value={e}>
                 {e}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="field">
-          <label>Strike range</label>
-          <select value={range} onChange={(e) => setRange(Number(e.target.value))}>
-            {RANGES.map((r) => (
-              <option key={r} value={r}>
-                ATM ± {r}
               </option>
             ))}
           </select>
