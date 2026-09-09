@@ -16,6 +16,7 @@ the POST body, stored in-process, never returned by any response or log.
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -33,6 +34,8 @@ from trading.market_data.service import get_service
 from trading.market_data.session import get_session_manager
 from trading.market_data.status import FEED_STATUS, FeedState, SessionState, fingerprint
 from trading.market_data.symbols import INDEX_SYMBOLS, normalize_index_symbol, parse_option_symbol
+
+logger = logging.getLogger("trading.api.market_routes")
 
 router = APIRouter(
     prefix="/market",
@@ -109,7 +112,7 @@ def session_status(principal: Principal = Depends(_VIEW)) -> MarketSessionStatus
 
 
 @router.post("/session", response_model=MarketSessionStatusOut)
-def update_session(
+async def update_session(
     body: MarketSessionIn,
     request: Request,
     db: Session = Depends(get_db),
@@ -120,6 +123,14 @@ def update_session(
         session_token=body.session_token, api_key=body.api_key, secret_key=body.secret_key
     )
     check = mgr.check()
+    if check.state == SessionState.VALID:
+        # Rebuild the live feed's provider from these fresh credentials
+        # right away -- it otherwise keeps using whatever token it was
+        # built with until the process restarts (session tokens are daily).
+        try:
+            await get_service().reconnect()
+        except Exception:  # noqa: BLE001
+            logger.exception("market_data.session reconnect_after_update failed")
     audit.record(
         db,
         actor=principal.actor,

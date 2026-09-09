@@ -96,6 +96,28 @@ class MarketDataService:
     async def on_start(self) -> None:
         await self.startup_flow()
 
+    async def reconnect(self) -> None:
+        """Force the live feed to rebuild its provider from whatever
+        credentials are current and reconnect right away, instead of
+        waiting for the scheduler's next daily start/stop cycle. Called
+        after an admin posts a fresh Breeze session token via
+        POST /api/market/session."""
+        self.reset_provider()
+        await self.startup_flow()
+
+    def reset_provider(self) -> None:
+        """Drop the current Breeze provider so the next scheduler tick
+        (<= poll interval away) rebuilds it from whatever credentials are
+        current -- called after an admin posts a fresh session token so
+        that takes effect without a process restart, instead of the live
+        feed silently continuing to use whatever token it was built with."""
+        if self._provider is not None:
+            try:
+                self._provider.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            self._provider = None
+
     async def on_stop(self) -> None:
         await self.stop_flow()
 
@@ -184,6 +206,11 @@ class MarketDataService:
                 self._provider.disconnect()
             except Exception:  # noqa: BLE001
                 pass
+        # Breeze session tokens are daily -- never carry a stale provider
+        # (built with today's token) into tomorrow's startup_flow(). Drop
+        # it so the next start reconstructs from whatever credentials are
+        # current at that time.
+        self._provider = None
 
         # 6. clear cache
         stats = {"symbols_seen": len(self.cache.all_indices()) + len(self.cache.all_options()),

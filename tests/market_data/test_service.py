@@ -174,3 +174,57 @@ def test_reconnect_after_provider_drop(db_session):
     asyncio.run(svc._reconnect())
     assert prov.is_connected() is True
     assert FEED_STATUS.snapshot()["reconnect_count"] >= 1
+
+
+def test_stop_flow_drops_provider_so_next_start_rebuilds_it(db_session):
+    """Regression: a Breeze session token is daily -- stop_flow() must not
+    leave a stale provider (built with today's token) sitting around for
+    the next startup_flow() to silently reuse tomorrow."""
+    prov = FakeProvider()
+    svc = _svc(provider=prov)
+    svc._accepting = True
+    asyncio.run(svc.stop_flow())
+    assert svc._provider is None
+
+
+def test_reset_provider_disconnects_and_clears(db_session):
+    prov = FakeProvider()
+    svc = _svc(provider=prov)
+    prov.connect()
+    svc.reset_provider()
+    assert svc._provider is None
+    assert prov.disconnects == 1
+
+
+def test_reconnect_rebuilds_provider_from_current_credentials(db_session, monkeypatch):
+    """Regression: after an admin posts a fresh session token, the live
+    feed must rebuild its provider from it (not keep using whatever
+    provider/credentials it was originally built with)."""
+    old_prov = FakeProvider()
+    svc = _svc(provider=old_prov)
+    svc._accepting = True
+
+    new_prov = FakeProvider()
+    built_with: list = []
+
+    def fake_factory(name, **kw):
+        built_with.append(kw)
+        return new_prov
+
+    monkeypatch.setattr("trading.market_data.service.create_market_data_provider", fake_factory)
+
+    async def flow():
+        task = asyncio.create_task(svc.reconnect())
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            if new_prov.on_tick is not None:
+                break
+        new_prov.push_index("NIFTY", 25050)
+        await task
+
+    asyncio.run(flow())
+
+    assert svc._provider is new_prov  # rebuilt, not the original object
+    assert old_prov.disconnects == 1  # the stale one was torn down
+    assert built_with and built_with[0]["session_token"] == "t"  # FakeSession's current creds
+    asyncio.run(svc.stop_flow())
