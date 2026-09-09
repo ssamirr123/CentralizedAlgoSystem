@@ -21,11 +21,11 @@ def _trademanager():
     for token in (ce_token, pe_token):
         config.in_position[token] = False
         config.entry_price[token] = 0
-        config.risk_level_index[token] = 0
-        config.risk_disabled[token] = False
         config.cum_loss[token] = 0
         config.last_exit_time[token] = 0
         config.reentry_count[token] = 0
+    config.combined_risk_level_index = 0
+    config.day_stopped = False
 
     # 'WAIT_ARM' -> (CP>CV) -> 'ARMED' -> (CV>CP) -> fires entries, resets to 'WAIT_ARM'
     signal_state = 'WAIT_ARM'
@@ -38,9 +38,14 @@ def _trademanager():
     while True:
         dt = datetime.now()
 
-        # --- continuous (tick-level) risk checks -> exit only the losing leg ---
-        check_leg_risk(ce_symbol, ce_token, qty)
-        check_leg_risk(pe_symbol, pe_token, qty)
+        # --- continuous (tick-level) combined CE+PE premium risk ladder ---
+        if not day_done:
+            check_combined_risk(ce_symbol, ce_token, pe_symbol, pe_token, qty)
+            if config.day_stopped:
+                print('[MANAGER] Rule 3 stop reached - ending run for the day')
+                day_done = True
+                monitor.report('STOPPED')
+                break
 
         # --- stale feed watchdog (falls back to REST LTP polling) ---
         check_stale_feed(ce_token, ce_symbol)
@@ -95,33 +100,32 @@ def _trademanager():
 # Entry / re-entry
 # --------------------------------------------------------------------------- #
 def handle_trigger(ts, ce_symbol, ce_token, pe_symbol, pe_token, qty):
+    if config.day_stopped:
+        return
     if ts >= config.NO_NEW_ENTRY_AFTER:
         print(f'[SIGNAL] {ts} trigger ignored - past no-new-entry cutoff ({config.NO_NEW_ENTRY_AFTER})')
         return
     for symbol, token in ((ce_symbol, ce_token), (pe_symbol, pe_token)):
-        if config.in_position[token] or config.risk_disabled[token]:
+        if config.in_position[token]:
             continue
         # A leg that has already been exited at least once today (last_exit_time>0)
-        # is a RE-entry and is subject to the cooldown + max-reentries rules.
+        # is a RE-entry and is subject to the cooldown gate (see can_reenter).
         is_reentry = config.last_exit_time.get(token, 0) > 0
         if is_reentry and not can_reenter(token):
             continue
         enter_leg(symbol, token, qty)
         if is_reentry and config.in_position[token]:
             config.reentry_count[token] = config.reentry_count.get(token, 0) + 1
-            print(f'[REENTRY] {symbol} re-entry #{config.reentry_count[token]} '
-                  f'of max {config.MAX_REENTRIES_PER_LEG}')
+            print(f'[REENTRY] {symbol} re-entry #{config.reentry_count[token]}')
 
 
 def can_reenter(token):
-    """Configurable re-entry gate: not disabled, under the max-reentries cap,
-    and cooldown elapsed since the last SL exit (the re-entry itself is only
-    ever called from a fresh CV>CP trigger, see handle_trigger)."""
-    if config.risk_disabled[token]:
-        return False
-    if config.reentry_count.get(token, 0) >= config.MAX_REENTRIES_PER_LEG:
-        print(f'[REENTRY] token {token} blocked - max re-entries '
-              f'({config.MAX_REENTRIES_PER_LEG}) reached')
+    """Re-entry gate: the day hasn't been stopped by Rule 3, and the
+    cooldown has elapsed since the last exit (the re-entry itself is only
+    ever called from a fresh CV>CP trigger, see handle_trigger). The
+    combined-loss ladder (Rules 1-3) is what ultimately caps how many
+    times this can happen -- no separate re-entry count limit."""
+    if config.day_stopped:
         return False
     last_exit = config.last_exit_time.get(token, 0)
     if last_exit and (time.time() - last_exit) < config.REENTRY_COOLDOWN_SECONDS:
@@ -159,11 +163,6 @@ def exit_leg(symbol, token, qty, reason):
 
     if pnl < 0:
         config.cum_loss[token] = config.cum_loss.get(token, 0) + abs(pnl)
-    if reason.startswith('SL_LEVEL'):
-        config.risk_level_index[token] = config.risk_level_index.get(token, 0) + 1
-        if config.risk_level_index[token] >= len(config.RISK_LOSS_LEVELS):
-            config.risk_disabled[token] = True
-            print(f'[RISK] {symbol} DISABLED for the day (cumulative_loss={config.cum_loss[token]:.2f})')
 
     config.in_position[token] = False
     config.entry_price[token] = 0
@@ -173,24 +172,77 @@ def exit_leg(symbol, token, qty, reason):
     monitor.report('RUNNING')
 
 
-def check_leg_risk(symbol, token, qty):
-    """Checked on every loop iteration (not just candle close) so the ₹650/
-    1300/2000 ladder reacts to *actual* live P&L, per leg, per lot."""
+def _leg_unrealized_loss(token, qty):
+    """Current mark-to-market loss on this leg if it's open, else 0.
+    (short option: loss when the premium rises above entry)."""
     if not config.in_position.get(token):
-        return
+        return 0.0
     ltp = config.last_ltp.get(token)
+    entry = config.entry_price.get(token, 0)
     if ltp is None:
-        return
-    entry_price = config.entry_price.get(token, 0)
-    loss = max(0.0, (ltp - entry_price) * qty)   # short option: loss when price rises
-    level_index = config.risk_level_index.get(token, 0)
+        return 0.0
+    return max(0.0, (ltp - entry) * qty)
+
+
+def _combined_loss(ce_token, pe_token, qty):
+    """Rules 1-3: TOTAL combined CE+PE premium loss per lot -- realized
+    losses already booked today on either leg, plus live unrealized MTM
+    on whichever leg(s) are currently open."""
+    realized = config.cum_loss.get(ce_token, 0.0) + config.cum_loss.get(pe_token, 0.0)
+    unrealized = _leg_unrealized_loss(ce_token, qty) + _leg_unrealized_loss(pe_token, qty)
+    return realized + unrealized
+
+
+def _bigger_loser(ce_symbol, ce_token, pe_symbol, pe_token, qty):
+    """Whichever OPEN leg's premium has risen more since its own entry
+    (Rules 1/2: "if CE premium is increasing more -> CE is losing more")."""
+    candidates = [
+        (_leg_unrealized_loss(ce_token, qty), ce_symbol, ce_token),
+        (_leg_unrealized_loss(pe_token, qty), pe_symbol, pe_token),
+    ]
+    candidates = [c for c in candidates if config.in_position.get(c[2])]
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    return candidates[0][1], candidates[0][2]
+
+
+def check_combined_risk(ce_symbol, ce_token, pe_symbol, pe_token, qty):
+    """Rules 1-3, checked on every loop iteration (not just candle close):
+    watch the COMBINED CE+PE premium loss per lot, not each leg's own loss
+    in isolation.
+      Rule 1 (>=650) / Rule 2 (>=1300): exit ONLY the leg that's losing more,
+        keep the other running, allow that leg to re-enter later.
+      Rule 3 (>=2000): exit BOTH legs immediately, stop trading for the day.
+    """
+    level_index = config.combined_risk_level_index
     if level_index >= len(config.RISK_LOSS_LEVELS):
         return
+    combined_loss = _combined_loss(ce_token, pe_token, qty)
     threshold = config.RISK_LOSS_LEVELS[level_index] * config.num_lots
-    if loss >= threshold:
-        reason = f'SL_LEVEL_{level_index + 1}'
-        print(f'[RISK] {symbol} breached {reason} (loss={loss:.2f} >= {threshold:.2f}) -> exiting leg only')
-        exit_leg(symbol, token, qty, reason=reason)
+    if combined_loss < threshold:
+        return
+
+    if level_index >= len(config.RISK_LOSS_LEVELS) - 1:
+        # Rule 3: the top of the ladder -- exit both, stop for the day.
+        print(f'[RISK] Rule 3: combined loss {combined_loss:.2f} >= {threshold:.2f} '
+              f'- exiting BOTH legs, no more trading today')
+        if config.in_position.get(ce_token):
+            exit_leg(ce_symbol, ce_token, qty, reason='SL_LEVEL_3')
+        if config.in_position.get(pe_token):
+            exit_leg(pe_symbol, pe_token, qty, reason='SL_LEVEL_3')
+        config.combined_risk_level_index += 1
+        config.day_stopped = True
+        return
+
+    # Rule 1 / Rule 2: exit only the bigger loser, other leg keeps running.
+    loser_symbol, loser_token = _bigger_loser(ce_symbol, ce_token, pe_symbol, pe_token, qty)
+    if loser_token is None:
+        return
+    print(f'[RISK] Rule {level_index + 1}: combined loss {combined_loss:.2f} >= {threshold:.2f} '
+          f'- exiting losing leg {loser_symbol} only')
+    exit_leg(loser_symbol, loser_token, qty, reason=f'SL_LEVEL_{level_index + 1}')
+    config.combined_risk_level_index += 1
 
 
 # --------------------------------------------------------------------------- #

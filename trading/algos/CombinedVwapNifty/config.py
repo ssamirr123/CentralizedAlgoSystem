@@ -79,7 +79,7 @@ agent = None   # populated at startup with the StrategyHeartbeatAgent instance
 objconn = ''
 sws = ''
 slhit = {}                  # kept for parity with the reference project (unused directly;
-                             # risk exits are driven by actual P&L - see risk_disabled/cum_loss)
+                             # risk exits are driven by actual P&L - see combined_risk_level_index/cum_loss)
 qty = '65'                    # exchange quantity = lot_size * num_lots (set at startup)
 lot_size = 65
 num_lots = 1
@@ -100,18 +100,22 @@ pe_token = None
 
 # --- Session timing ---
 NO_NEW_ENTRY_AFTER = '15:00:00'     # no fresh entries / re-entries after this time
-EOD_SQUARE_OFF_TIME = '15:15:00'    # unconditional square-off of any open leg
+EOD_SQUARE_OFF_TIME = '15:25:00'    # unconditional square-off of any open leg
 
-# --- Risk ladder: cumulative loss (Rupees, PER LOT) that exits only the losing leg ---
+# --- Risk ladder: COMBINED CE+PE premium loss (Rupees, PER LOT), not each
+# leg's own loss in isolation. Rule 1 (650) and Rule 2 (1300) exit only
+# whichever leg is losing more; Rule 3 (2000) exits both and ends the day.
 RISK_LOSS_LEVELS = [650.0, 1300.0, 2000.0]
-MAX_REENTRIES_PER_LEG = len(RISK_LOSS_LEVELS)
 REENTRY_COOLDOWN_SECONDS = 60
+
+# Shared (not per-leg) combined-loss ladder state, reset at the start of
+# each day in manager.py.
+combined_risk_level_index = 0   # 0 -> watching for 650, 1 -> 1300, 2 -> 2000
+day_stopped = False             # True once Rule 3 fires: no more entries today
 
 # Per-leg risk/position state, keyed by token (populated in manager.py at startup)
 in_position = {}              # token -> bool
 entry_price = {}              # token -> float (avg fill price of current open leg)
-risk_level_index = {}         # token -> int, how many ladder levels already used today
-risk_disabled = {}            # token -> bool, True once all ladder levels are used
 cum_loss = {}                 # token -> float, cumulative realized loss today (this leg)
 last_exit_time = {}           # token -> epoch seconds of the last SL exit (cooldown gate)
 reentry_count = {}            # token -> int, how many RE-entries this leg has had today
