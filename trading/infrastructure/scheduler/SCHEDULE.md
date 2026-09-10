@@ -9,18 +9,22 @@ credentials, paste back real output at each step.
 08:30 IST  start_ec2
 08:50 IST  update_all_algos  <- git pull (10-min buffer before start)
 09:00 IST  start_all_algos   <- algos start at market open
-15:15 IST  stop_all_algos   <- "square-off" -- see note below
-15:30 IST  stop_all_algos   <- safety-net retry, idempotent if 15:15 already worked
+15:27 IST  stop_all_algos   <- "square-off" -- see note below (after each strategy's own
+                                final-exit logic, e.g. DoubleStraddelAlgo's FINAL_EXIT=15:25,
+                                so this is a safety net, not a race against it)
+15:30 IST  stop_all_algos   <- safety-net retry, idempotent if 15:27 already worked
 16:00 IST  stop_ec2
 ```
 
 Two deviations from the literal spec, both explained, neither faked:
 
-- **Square-off (15:15)**: a true "square off but keep the algo running"
+- **Square-off (15:27)**: a true "square off but keep the algo running"
   command would need a third command type beyond today's binary run/stop
   (a new IPC signal, a new strategy-interface hook) — real new plumbing,
   not scheduling infrastructure. What's actually wired: `stop_algo` at
-  15:15, which triggers each strategy's existing `on_stop()` — the
+  15:27 (after each strategy's own final-exit logic has had a chance to
+  run, e.g. DoubleStraddelAlgo's FINAL_EXIT=15:25 — a safety net, not a
+  race against it), which triggers each strategy's existing `on_stop()` — the
   correct extension point for real square-off logic once a real strategy
   has real positions to close. `strategy.py`'s example block already
   shows the reporting pattern for this.
@@ -102,7 +106,7 @@ aws scheduler create-schedule --name TradingSchedule-StartAlgos `
   --target "{\"Arn\":\"$lambdaArn\",\"RoleArn\":\"$roleArn\",\"Input\":\"{\\\"action\\\":\\\"start_all_algos\\\"}\"}""
 
 aws scheduler create-schedule --name TradingSchedule-SquareOff `
-  --schedule-expression "cron(15 15 ? * MON-FRI *)" `
+  --schedule-expression "cron(27 15 ? * MON-FRI *)" `
   --schedule-expression-timezone "Asia/Kolkata" `
   --flexible-time-window '{"Mode":"OFF"}' `
   --target "{\"Arn\":\"$lambdaArn\",\"RoleArn\":\"$roleArn\",\"Input\":\"{\\\"action\\\":\\\"stop_all_algos\\\"}\"}"
@@ -162,7 +166,7 @@ Deployed and verified against the EC2 backend (2026-08-29):
 **Coordination gap (needs a decision):** Stage 14's strategy box runs a
 systemd watchdog (`centralized-algo-strategy-watchdog@<algo>.timer`) that
 restarts the algo within ~20s whenever its unit is `active` but the
-process isn't RUNNING. So `stop_all_algos` at 15:15 / 15:30 stops the
+process isn't RUNNING. So `stop_all_algos` at 15:27 / 15:30 stops the
 *process*, the watchdog restarts it, and `stop_ec2` at 16:00 then hits
 the safe-stop guard and **refuses to stop the box** (correct, but the box
 never powers down). Pick one:

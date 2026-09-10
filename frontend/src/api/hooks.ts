@@ -174,19 +174,6 @@ export const useMarketHealth = () => {
 export const useMarketSessionStatus = () =>
   useQuery({ queryKey: ["market-session"], queryFn: api.getMarketSessionStatus });
 
-export const useNiftyExpiries = () =>
-  useQuery({ queryKey: ["nifty-expiries"], queryFn: api.getNiftyExpiries });
-
-export const useNiftyOptionChain = (expiry: string, range: number) => {
-  const poll = usePollInterval(5000);
-  return useQuery({
-    queryKey: ["nifty-option-chain", expiry, range],
-    queryFn: () => api.getNiftyOptionChain(expiry, range),
-    refetchInterval: poll || 5000,
-    placeholderData: keepPreviousData,
-  });
-};
-
 export const useMarketCandles = (symbol: string | null, interval = "1minute") =>
   useQuery({
     queryKey: ["market-candles", symbol, interval],

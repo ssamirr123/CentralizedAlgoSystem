@@ -5,7 +5,6 @@ import { QueryBoundary } from "@/components/States";
 import { IndexCard } from "@/components/IndexCard";
 import { MarketFeedStatus } from "@/components/MarketFeedStatus";
 import { MarketChart } from "@/components/MarketChart";
-import { NiftyOptionChain } from "@/components/NiftyOptionChain";
 
 const ORDER = ["NIFTY", "BANKNIFTY", "INDIA_VIX", "SENSEX"];
 
@@ -16,7 +15,7 @@ export function MarketPage() {
     <>
       <PageHeader
         title="Market"
-        description="Live index quotes + NIFTY option chain from ICICI Breeze (paper — market data only, no orders)."
+        description="Live index quotes from ICICI Breeze (paper — market data only, no orders)."
         actions={
           <>
             <Link className="sm" to="/market/straddle-pulse">
@@ -45,10 +44,6 @@ export function MarketPage() {
       <div className="grid cols-2" style={{ marginTop: 16 }}>
         <MarketFeedStatus />
         <MarketChart />
-      </div>
-
-      <div style={{ marginTop: 16 }}>
-        <NiftyOptionChain />
       </div>
     </>
   );

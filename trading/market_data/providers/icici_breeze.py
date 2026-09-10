@@ -512,7 +512,13 @@ _MASTER_ROW_KEYS = (
 
 
 def _row_to_instrument(row: dict, want_underlying: str) -> Instrument | None:
-    under = str(row.get("underlying") or row.get("stock_code") or row.get("short_name") or "").strip().upper()
+    raw_under = str(row.get("underlying") or row.get("stock_code") or row.get("short_name") or "").strip().upper()
+    # ICICI's security-master "underlying" column is its own internal
+    # short-code, not always the tradable name -- NFO/NIFTY rows happen to
+    # use "NIFTY" already, but BFO/SENSEX rows use "BSESEN" (the same code
+    # _INDEX_CODES/_tick_symbol_to_internal already normalize for ticks).
+    # Comparing the raw code directly silently drops every SENSEX row.
+    under = _tick_symbol_to_internal(raw_under) if raw_under else ""
     if not under or under != want_underlying:
         return None
     ot = str(row.get("option_type") or row.get("right") or "").strip().upper()
