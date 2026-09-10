@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -363,6 +364,65 @@ def status(algo_name: str) -> dict:
     }
 
 
+_UNTRACKED_CONFLICT_RE = re.compile(
+    r"untracked working tree files would be overwritten[^:]*:\n(.*?)\n(?:Please|Aborting)",
+    re.DOTALL,
+)
+
+
+def _conflicting_untracked_paths(stderr: str) -> list[str]:
+    match = _UNTRACKED_CONFLICT_RE.search(stderr or "")
+    if not match:
+        return []
+    return [line.strip() for line in match.group(1).splitlines() if line.strip()]
+
+
+def _pull_ff_only_with_conflict_recovery() -> dict:
+    """``git pull --ff-only``, self-healing exactly one failure mode: a
+    stray untracked file left in the working tree (e.g. from a one-off
+    manual copy) blocks the merge because origin is about to add a
+    tracked file at that same path. This is a real incident that
+    happened: it silently blocked every scheduled update for days with
+    no visible error anywhere an operator would normally look.
+
+    This deploy target's tree should always be able to mirror origin, so
+    if -- and only if -- every conflicting untracked file is verified
+    byte-identical to what's incoming, clear them and retry once.
+    Anything that doesn't verify as a clean match is left completely
+    alone and still fails loudly with git's own message; this must never
+    silently discard a real local change."""
+    def _run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+
+    result = _run("pull", "--ff-only")
+    if result.returncode == 0:
+        return {"self_healed": False, "cleared_paths": []}
+
+    conflicts = _conflicting_untracked_paths(result.stderr)
+    if not conflicts:
+        result.check_returncode()  # a different failure -- surface it as-is
+
+    _run("fetch", "origin").check_returncode()
+    branch = _run("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    remote_ref = f"origin/{branch}"
+
+    for rel_path in conflicts:
+        local_path = PROJECT_ROOT / rel_path
+        if not local_path.is_file():
+            result.check_returncode()
+        remote_blob = _run("show", f"{remote_ref}:{rel_path}")
+        if remote_blob.returncode != 0 or local_path.read_text(errors="replace") != remote_blob.stdout:
+            # Not a verified match -- could be a real, differing local
+            # file. Don't touch it; fail with the original git message.
+            result.check_returncode()
+
+    for rel_path in conflicts:
+        (PROJECT_ROOT / rel_path).unlink()
+
+    _run("pull", "--ff-only").check_returncode()
+    return {"self_healed": True, "cleared_paths": conflicts}
+
+
 def update_algo(algo_name: str) -> dict:
     _algo_main_path(algo_name)
 
@@ -382,7 +442,7 @@ def update_algo(algo_name: str) -> dict:
 
     try:
         previous_version = _git("rev-parse", "HEAD")
-        _git("pull", "--ff-only")
+        recovery = _pull_ff_only_with_conflict_recovery()
         new_version = _git("rev-parse", "HEAD")
     except subprocess.CalledProcessError as exc:
         return {
@@ -393,12 +453,18 @@ def update_algo(algo_name: str) -> dict:
 
     _write_state(algo_name, last_command="UPDATE", last_update_at=_now_iso(), version=new_version)
 
-    return {
+    out = {
         "algo": algo_name,
         "updated": previous_version != new_version,
         "previous_version": previous_version,
         "new_version": new_version,
     }
+    if recovery["self_healed"]:
+        out["warning"] = (
+            f"cleared {len(recovery['cleared_paths'])} stray untracked file(s) blocking the pull "
+            f"(verified byte-identical to the incoming version first): {recovery['cleared_paths']}"
+        )
+    return out
 
 
 def _tail_file(path: Path, lines: int) -> list[str]:
