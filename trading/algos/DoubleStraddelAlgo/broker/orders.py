@@ -13,6 +13,7 @@ import config
 import time
 import threading
 import websocket_feed as wf
+from broker import execution_bridge
 
 # --------------------------------------------------------------------------- #
 # Rate limiting
@@ -99,6 +100,10 @@ def place_limit(symbol, token, qty, side):
         price = _limit_price(token, side.upper(), 1)
         oid = f'DRYRUN-{int(time.time() * 1000)}'
         print(f'[DRY RUN] LIMIT {side} {symbol} qty={qty} price={price} id={oid}')
+        execution_bridge.mirror_place_order(
+            symbol=symbol, token=token, qty=qty, side=side, order_type='LIMIT',
+            price=price, reason='LIMIT', live_order_id=oid,
+        )
         return oid
 
     def _call(attempt):
@@ -129,6 +134,10 @@ def place_limit(symbol, token, qty, side):
         threading.Thread(
             target=_manage_pending, args=(oid, symbol, token, qty, side), daemon=True
         ).start()
+    execution_bridge.mirror_place_order(
+        symbol=symbol, token=token, qty=qty, side=side, order_type='LIMIT',
+        price=_limit_price(token, side.upper(), 1), reason='LIMIT', live_order_id=oid,
+    )
     return oid
 
 
@@ -137,6 +146,10 @@ def place_market(symbol, token, qty, side):
     if getattr(config, 'DRY_RUN', False):
         oid = f'DRYRUN-{int(time.time() * 1000)}'
         print(f'[DRY RUN] MARKET(EMERGENCY) {side} {symbol} qty={qty} id={oid}')
+        execution_bridge.mirror_place_order(
+            symbol=symbol, token=token, qty=qty, side=side, order_type='MARKET',
+            reason='MARKET_EMERGENCY', live_order_id=oid,
+        )
         return oid
 
     if not config.ALLOW_MARKET_EMERGENCY:
@@ -163,7 +176,12 @@ def place_market(symbol, token, qty, side):
         print(f'[ORDER] MARKET(EMERGENCY) {side} {symbol} qty={qty} id={oid}')
         return oid
 
-    return _retry(_call, f'place_market({symbol},{side})')
+    oid = _retry(_call, f'place_market({symbol},{side})')
+    execution_bridge.mirror_place_order(
+        symbol=symbol, token=token, qty=qty, side=side, order_type='MARKET',
+        reason='MARKET_EMERGENCY', live_order_id=oid,
+    )
+    return oid
 
 
 def modify_limit(orderid, symbol, token, qty, side, attempt=1):
@@ -195,6 +213,7 @@ def modify_limit(orderid, symbol, token, qty, side, attempt=1):
 def cancel(orderid):
     if getattr(config, 'DRY_RUN', False):
         print(f'[DRY RUN] CANCEL id={orderid}')
+        execution_bridge.mirror_cancel(orderid)
         return True
 
     def _call(_):
@@ -202,7 +221,9 @@ def cancel(orderid):
         print(f'[ORDER] CANCEL id={orderid}')
         return r or True
 
-    return _retry(_call, f'cancel({orderid})')
+    result = _retry(_call, f'cancel({orderid})')
+    execution_bridge.mirror_cancel(orderid)
+    return result
 
 
 def order_status(orderid):
@@ -314,6 +335,7 @@ def refresh_positions(force=False):
 
 def cancel_all_pending():
     """Cancel every open/pending order (deliverable: cancel all pending orders)."""
+    execution_bridge.mirror_cancel_all_pending()
     for o in refresh_orderbook():
         if str(o.get('status', '')).lower() in ('open', 'pending', 'trigger pending', 'modified'):
             cancel(o.get('orderid'))
@@ -326,6 +348,7 @@ def cancel_pending_for_tokens(tokens):
     Used at the 14:14 morning exit so Strategy-1 pending orders are cancelled
     without ever touching the hedge orders.
     """
+    execution_bridge.mirror_cancel_pending_for_tokens(tokens)
     wanted = {str(t) for t in tokens}
     for o in refresh_orderbook():
         if str(o.get('symboltoken')) in wanted and \
