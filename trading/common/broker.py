@@ -81,6 +81,17 @@ class BrokerAuthenticationError(RuntimeError):
     authentication failure the same way as a connectivity blip."""
 
 
+class ReadOnlyModeError(RuntimeError):
+    """Raised when a broker adapter constructed/configured in read-only
+    mode (see e.g. AngelOneBroker's ANGEL_READ_ONLY support) refuses a
+    mutating call (place_order/modify_order/cancel_order).
+
+    Deliberately independent of LiveTradingDisabledError/TRADING_MODE:
+    read-only mode is a separate, higher-priority safety gate intended for
+    manual read-only diagnostic tooling that must never be able to submit
+    a real order, regardless of what TRADING_MODE happens to be set to."""
+
+
 class BrokerRateLimitError(BrokerConnectionError):
     """Raised when a broker rejects a call for exceeding its own rate
     limit. Subclasses BrokerConnectionError (rate limits are a connectivity-

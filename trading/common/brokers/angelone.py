@@ -42,6 +42,7 @@ Known limitations (see also the Phase 2 final report):
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -60,9 +61,10 @@ from trading.common.broker import (
     OrderType,
     Position,
     Quote,
+    ReadOnlyModeError,
 )
 from trading.common.config import TradingConfig
-from trading.common.execution import OrderState
+from trading.common.execution import TERMINAL_STATUSES, OrderState
 
 _log = logging.getLogger(__name__)
 
@@ -96,6 +98,14 @@ _AUTH_ERROR_MARKERS = (
 _SCRIP_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 
 
+def _read_only_enabled_by_env() -> bool:
+    """ANGEL_READ_ONLY=true|1|yes|on enables read-only mode by default for
+    any AngelOneBroker constructed without an explicit read_only= override.
+    Used by trading/tools/angelone_readonly_validation.py as a defense-in-
+    depth belt-and-braces alongside that tool's own explicit read_only=True."""
+    return os.environ.get("ANGEL_READ_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class AccountInfo:
     """Not part of the BrokerClient ABC -- an additional, optional
@@ -121,6 +131,7 @@ class AngelOneBroker(BrokerClient):
         *,
         smart_api_factory: Callable[[str], Any] | None = None,
         instrument_resolver: Callable[[str], tuple[str, str]] | None = None,
+        read_only: bool | None = None,
     ) -> None:
         self._config = config
         # Both injectable purely for testability (see module docstring) --
@@ -132,10 +143,19 @@ class AngelOneBroker(BrokerClient):
         self._feed_token: str = ""
         self._refresh_token: str = ""
         self._scrip_master_cache = None  # lazily loaded by _default_instrument_resolver
+        # None -> resolved from ANGEL_READ_ONLY at construction time. An
+        # explicit True/False always wins over the environment. Checked
+        # BEFORE is_live in every mutating method below, so it can never be
+        # bypassed by TRADING_MODE=live -- see ReadOnlyModeError's docstring.
+        self._read_only = read_only if read_only is not None else _read_only_enabled_by_env()
 
     def __repr__(self) -> str:
         # Never include self._config.credentials or any session token here.
-        return f"AngelOneBroker(connected={self._connected})"
+        return f"AngelOneBroker(connected={self._connected}, read_only={self._read_only})"
+
+    @property
+    def is_read_only(self) -> bool:
+        return self._read_only
 
     # -- construction helpers (overridable for tests) ----------------------- #
     @staticmethod
@@ -198,16 +218,24 @@ class AngelOneBroker(BrokerClient):
         if not self._connected or self._smart_api is None:
             raise BrokerConnectionError("AngelOneBroker is not connected. Call connect() first.")
 
-    def _fetch_order_row(self, order_id: str) -> dict | None:
+    def _all_order_rows(self) -> list[dict]:
         try:
             response = self._smart_api.orderBook()
         except Exception as exc:
             raise self._classify_error(exc, context="orderBook") from exc
-        rows = self._extract_data(response, context="orderBook", allow_empty=True)
-        for row in rows:
+        return self._extract_data(response, context="orderBook", allow_empty=True)
+
+    def _fetch_order_row(self, order_id: str) -> dict | None:
+        for row in self._all_order_rows():
             if str(row.get("orderid")) == str(order_id):
                 return row
         return None
+
+    def _require_not_read_only(self, operation: str) -> None:
+        if self._read_only:
+            raise ReadOnlyModeError(
+                f"AngelOneBroker is in read-only mode (ANGEL_READ_ONLY): {operation}() is blocked."
+            )
 
     # -- BrokerClient: connection lifecycle ----------------------------------- #
     def connect(self) -> None:
@@ -279,6 +307,7 @@ class AngelOneBroker(BrokerClient):
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
     ) -> OrderResult:
+        self._require_not_read_only("place_order")
         if not self._config.is_live:
             raise LiveTradingDisabledError(
                 "Refusing to place a real AngelOne order: TRADING_MODE is not 'live'. "
@@ -320,6 +349,7 @@ class AngelOneBroker(BrokerClient):
         return OrderResult(order_id=str(order_id), symbol=symbol, side=side, quantity=quantity, status="OPEN")
 
     def cancel_order(self, order_id: str) -> bool:
+        self._require_not_read_only("cancel_order")
         if not self._config.is_live:
             raise LiveTradingDisabledError("Refusing to cancel a real AngelOne order: TRADING_MODE is not 'live'.")
         self._require_connected()
@@ -356,6 +386,35 @@ class AngelOneBroker(BrokerClient):
                 _log.warning("AngelOneBroker.get_positions: skipping malformed position row")
         return positions
 
+    def resolve_instrument(self, symbol: str) -> tuple[str, str]:
+        """Public wrapper around this adapter's Angel-specific instrument
+        resolution (tradingsymbol -> (exchange, symboltoken)). Not part of
+        the BrokerClient ABC -- exists for read-only diagnostic tooling
+        (see trading/tools/angelone_readonly_validation.py) that needs to
+        validate/compare resolution without reaching into a private method."""
+        return self._instrument_resolver(symbol)
+
+    def get_order_book(self) -> list[OrderState]:
+        """Every order Angel currently has on file for this session,
+        normalized. Not part of the BrokerClient ABC -- read-only, optional,
+        adapter-specific. See get_order() for a single known-id lookup."""
+        self._require_connected()
+        states = []
+        for row in self._all_order_rows():
+            order_id = str(row.get("orderid", ""))
+            quantity = int(float(row.get("quantity", 0) or 0))
+            filled = int(float(row.get("filledshares", 0) or 0))
+            status = _ANGEL_STATUS_MAP.get(str(row.get("status", "")).strip().lower(), "OPEN")
+            states.append(
+                OrderState(order_id=order_id, status=status, filled_quantity=filled,
+                           remaining_quantity=max(quantity - filled, 0))
+            )
+        return states
+
+    def get_open_orders(self) -> list[OrderState]:
+        """Subset of get_order_book() whose status is not yet terminal."""
+        return [state for state in self.get_order_book() if state.status not in TERMINAL_STATUSES]
+
     # -- optional hooks StrategyExecutionEngine duck-types for -------------------- #
     def get_order(self, order_id: str) -> OrderState:
         row = self._fetch_order_row(order_id)
@@ -371,6 +430,7 @@ class AngelOneBroker(BrokerClient):
         )
 
     def modify_order(self, order_id: str, quantity: int, limit_price: float) -> bool:
+        self._require_not_read_only("modify_order")
         self._require_connected()
         row = self._fetch_order_row(order_id)
         if row is None:
