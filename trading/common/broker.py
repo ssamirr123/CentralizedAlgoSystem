@@ -71,6 +71,25 @@ class LiveTradingDisabledError(RuntimeError):
     """Raised when a real order is attempted while TRADING_MODE != 'live'."""
 
 
+class BrokerAuthenticationError(RuntimeError):
+    """Raised when a broker rejects a login/session attempt at runtime
+    (bad password, expired/invalid TOTP, revoked session, ...). Distinct
+    from BrokerConfigError, which is for structurally missing credentials
+    before any call is even attempted -- this is for a call the broker
+    itself refused. Not automatically retryable: an adapter may classify a
+    specific case as retryable, but the generic default is not to retry an
+    authentication failure the same way as a connectivity blip."""
+
+
+class BrokerRateLimitError(BrokerConnectionError):
+    """Raised when a broker rejects a call for exceeding its own rate
+    limit. Subclasses BrokerConnectionError (rate limits are a connectivity-
+    type, retryable failure) so callers that already treat
+    BrokerConnectionError as retryable get sane behavior for free, while
+    still being able to special-case rate limits (e.g. a longer backoff)
+    where useful."""
+
+
 class BrokerClient(ABC):
     """Common interface every broker adapter must implement."""
 
