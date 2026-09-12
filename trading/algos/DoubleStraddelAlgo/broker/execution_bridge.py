@@ -20,6 +20,14 @@ or timing:
   - cancellation (cancel/cancel_all_pending/cancel_pending_for_tokens) is
     NOT converted into an OrderIntent -- cancelling isn't a new trade
     intent -- it is mirrored as a structured SHADOW_CANCEL_* log event only.
+  - every mirrored order additionally runs compare_with_legacy() (see
+    below), a pure, side-effect-free function that reconstructs the shape
+    broker/orders.py's real Angel placeOrder params would take for the
+    SAME raw inputs and checks the new OrderIntent agrees with it
+    field-by-field. The result (`match: bool`, `differences: [...]`) is
+    attached to the shadow log record under "comparison" -- this is the
+    "existing order vs new OrderIntent" comparison tooling, and it never
+    calls a broker or submits anything.
 
 CRITICAL SAFETY MECHANISM -- read before changing anything below:
 
@@ -77,6 +85,7 @@ from trading.common.broker_manager import BrokerManager
 from trading.common.brokers.paper_broker import PaperBroker
 from trading.common.config import BrokerCredentials, TradingConfig
 from trading.common.execution import ExecutionConfig, StrategyExecutionEngine
+from trading.common.instrument import Instrument
 from trading.common.order_intent import OrderIntent
 from trading.common.risk_manager import RiskManager
 from trading.common.strategy_assignment import StrategyAssignment
@@ -173,12 +182,29 @@ def _reset_stack_for_tests(stack: "_ShadowStack | None" = None) -> None:
         _stack = stack
 
 
+def _to_instrument(symbol: str) -> Instrument:
+    """Minimal, best-effort Instrument for the given Angel tradingsymbol.
+
+    Deliberately shallow: only option_type is derived (from the symbol's
+    own CE/PE suffix, which needs no external lookup). underlying/expiry/
+    strike are NOT parsed here, even though DoubleStraddelAlgo/
+    strategy/expiry.py already knows how -- duplicating that positional
+    parsing here would be a second, independently-maintained place that
+    assumes Angel's exact symbol layout, and getting it subtly wrong would
+    be worse than leaving it blank. Documented limitation, not fixed here.
+    """
+    suffix = symbol[-2:] if len(symbol) >= 2 else ""
+    option_type = suffix if suffix in ("CE", "PE") else ""
+    return Instrument(symbol=symbol, exchange="NFO", option_type=option_type)
+
+
 def _to_order_intent(symbol, side, qty, order_type, price, trigger_price, reason, token) -> OrderIntent:
     return OrderIntent(
         strategy_id=STRATEGY_ID,
         account_id=ACCOUNT_ID,
         symbol=str(symbol),
         exchange="NFO",
+        instrument=_to_instrument(str(symbol)),
         side=OrderSide(str(side).upper()),
         quantity=int(qty),
         order_type=OrderType(str(order_type).upper()),
@@ -193,6 +219,53 @@ def _to_order_intent(symbol, side, qty, order_type, price, trigger_price, reason
     )
 
 
+def compare_with_legacy(symbol, token, qty, side, order_type, price, intent: OrderIntent) -> dict:
+    """Pure comparison tool: 'existing order vs new OrderIntent', without
+    ever submitting anything anywhere.
+
+    Reconstructs the shape broker/orders.py's real Angel placeOrder params
+    would take for these SAME raw inputs (the exact inputs the OrderIntent
+    was itself built from -- see _to_order_intent), then checks the
+    OrderIntent's own fields agree with it field-by-field. This answers
+    "would the new broker-agnostic layer generate the same trading
+    instruction as the existing Angel-specific implementation?" without
+    needing orders.py to hand over its actual internal params dict (which
+    lives inside a retry closure and varies its `price` field per retry
+    attempt -- comparing against the same reference-price computation the
+    mirror itself already uses is the honest, safe answer, not a live
+    capture of exactly what was sent on whichever attempt succeeded).
+    """
+    order_type_upper = str(order_type).upper()
+    legacy = {
+        "tradingsymbol": str(symbol),
+        "symboltoken": str(token),
+        "transactiontype": str(side).upper(),
+        "ordertype": order_type_upper,
+        "quantity": str(qty),
+        "price": str(price) if order_type_upper == "LIMIT" and price is not None else "0",
+    }
+
+    differences: list[str] = []
+    if intent.symbol != legacy["tradingsymbol"]:
+        differences.append(f"symbol: intent={intent.symbol!r} legacy={legacy['tradingsymbol']!r}")
+    if intent.metadata.get("angelone_symboltoken") != legacy["symboltoken"]:
+        differences.append(
+            f"symboltoken: intent={intent.metadata.get('angelone_symboltoken')!r} legacy={legacy['symboltoken']!r}"
+        )
+    if intent.side.value != legacy["transactiontype"]:
+        differences.append(f"side: intent={intent.side.value!r} legacy={legacy['transactiontype']!r}")
+    if intent.order_type.value != legacy["ordertype"]:
+        differences.append(f"order_type: intent={intent.order_type.value!r} legacy={legacy['ordertype']!r}")
+    if intent.quantity != int(legacy["quantity"]):
+        differences.append(f"quantity: intent={intent.quantity!r} legacy={legacy['quantity']!r}")
+    if legacy["ordertype"] == "LIMIT":
+        intent_price = str(intent.limit_price) if intent.limit_price is not None else None
+        if intent_price != legacy["price"]:
+            differences.append(f"price: intent={intent_price!r} legacy={legacy['price']!r}")
+
+    return {"match": not differences, "differences": differences, "legacy": legacy}
+
+
 def _assert_no_secrets(record: dict) -> None:
     text = str(record).lower()
     for marker in _FORBIDDEN_LOG_MARKERS:
@@ -200,7 +273,9 @@ def _assert_no_secrets(record: dict) -> None:
             raise ValueError(f"shadow log record contains forbidden marker: {marker}")
 
 
-def _log_comparison(intent: OrderIntent, risk_result, execution_result, live_order_id, note: str = "") -> None:
+def _log_comparison(
+    intent: OrderIntent, risk_result, execution_result, live_order_id, note: str = "", comparison: dict | None = None,
+) -> None:
     record = {
         "strategy": intent.strategy_id,
         "operation": "place_order",
@@ -211,6 +286,9 @@ def _log_comparison(intent: OrderIntent, risk_result, execution_result, live_ord
         "order_type": intent.order_type.value,
         "price": intent.limit_price,
         "trigger_price": intent.trigger_price,
+        "correlation_id": intent.correlation_id,
+        "client_order_id": intent.client_order_id,
+        "timestamp": intent.created_at,
         "reason": intent.reason,
         "shadow_mode": "paper",
         "broker": "angelone",
@@ -222,6 +300,7 @@ def _log_comparison(intent: OrderIntent, risk_result, execution_result, live_ord
             if execution_result is None
             else {"success": execution_result.success, "status": execution_result.status, "message": execution_result.message}
         ),
+        "comparison": comparison,
         "note": note,
     }
     _assert_no_secrets(record)
@@ -230,11 +309,15 @@ def _log_comparison(intent: OrderIntent, risk_result, execution_result, live_ord
 
 def _mirror_place_order(symbol, token, qty, side, order_type, price, trigger_price, reason, live_order_id) -> None:
     intent = _to_order_intent(symbol, side, qty, order_type, price, trigger_price, reason, token)
+    comparison = compare_with_legacy(symbol, token, qty, side, order_type, price, intent)
     stack = _get_stack()
 
     risk_result = stack.risk_manager.validate(intent)
     if not risk_result.allowed:
-        _log_comparison(intent, risk_result, execution_result=None, live_order_id=live_order_id, note="risk_rejected")
+        _log_comparison(
+            intent, risk_result, execution_result=None, live_order_id=live_order_id,
+            note="risk_rejected", comparison=comparison,
+        )
         return
 
     try:
@@ -244,11 +327,11 @@ def _mirror_place_order(symbol, token, qty, side, order_type, price, trigger_pri
         # Never bypassed, never retried through another path.
         _log_comparison(
             intent, risk_result, execution_result=None, live_order_id=live_order_id,
-            note="blocked_by_live_trading_guard",
+            note="blocked_by_live_trading_guard", comparison=comparison,
         )
         return
 
-    _log_comparison(intent, risk_result, execution_result, live_order_id)
+    _log_comparison(intent, risk_result, execution_result, live_order_id, comparison=comparison)
 
 
 def mirror_place_order(

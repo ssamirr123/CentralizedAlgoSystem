@@ -32,8 +32,15 @@ from __future__ import annotations
 
 from typing import Callable
 
+from trading.common.alerts import AlertManager
 from trading.common.broker import BrokerClient, BrokerConnectionError, create_broker
 from trading.common.config import TradingConfig
+from trading.common.observability import (
+    EVENT_BROKER_CONNECTED,
+    EVENT_BROKER_DISCONNECTED,
+    AuditTrail,
+    MetricsRegistry,
+)
 from trading.common.trading_account import ConnectionState, TradingAccount
 
 
@@ -41,10 +48,32 @@ class UnknownAccountError(KeyError):
     """Raised when an account_id has no registered TradingAccount."""
 
 
+class BrokerUnavailableError(RuntimeError):
+    """Raised when an account's broker_id has been explicitly marked
+    unavailable (e.g. its adapter isn't implemented yet -- Dhan/ICICI as of
+    Phase 7 -- or it's mid-outage). Distinct from an individual ACCOUNT
+    being disabled (TradingAccount.enabled=False): this is a statement
+    about the BROKER TYPE, independent of which account uses it."""
+
+
 class BrokerManager:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        metrics_registry: MetricsRegistry | None = None,
+        audit_trail: AuditTrail | None = None,
+        alerts: AlertManager | None = None,
+    ) -> None:
         self._accounts: dict[str, TradingAccount] = {}
         self._factories: dict[str, Callable[[], BrokerClient]] = {}
+        # broker_id -> (available, reason). A broker_id never explicitly
+        # registered here defaults to available=True -- existing callers
+        # that never call set_broker_availability() see no behavior change.
+        self._broker_availability: dict[str, tuple[bool, str]] = {}
+        # Phase 13 observability -- all optional, all default None.
+        self._metrics_registry = metrics_registry
+        self._audit_trail = audit_trail
+        self._alerts = alerts
 
     def register_account(
         self,
@@ -61,6 +90,8 @@ class BrokerManager:
             account.connection_state = (
                 ConnectionState.CONNECTED if broker_client.is_connected() else ConnectionState.DISCONNECTED
             )
+            if self._metrics_registry is not None:
+                self._metrics_registry.record_account_status(account.account_id, account.connection_state.value)
         elif broker_factory is not None:
             self._factories[account.account_id] = broker_factory
 
@@ -94,12 +125,62 @@ class BrokerManager:
             try:
                 client = factory()
                 client.connect()
-            except Exception:
+            except Exception as exc:
                 account.connection_state = ConnectionState.ERROR
+                if self._metrics_registry is not None:
+                    self._metrics_registry.record_account_status(account_id, ConnectionState.ERROR.value)
+                    self._metrics_registry.record_error(f"broker:{account.broker_id}")
+                if self._audit_trail is not None:
+                    self._audit_trail.append(
+                        EVENT_BROKER_DISCONNECTED, strategy_id="", account_id=account_id,
+                        broker_id=account.broker_id, error=str(exc),
+                    )
+                if self._alerts is not None:
+                    self._alerts.broker_disconnected(account.broker_id, reason=str(exc))
                 raise
             account.broker_client = client
             account.connection_state = ConnectionState.CONNECTED
+            if self._metrics_registry is not None:
+                self._metrics_registry.record_broker_heartbeat(account.broker_id)
+                self._metrics_registry.record_account_status(account_id, ConnectionState.CONNECTED.value)
+            if self._audit_trail is not None:
+                self._audit_trail.append(
+                    EVENT_BROKER_CONNECTED, account_id=account_id, broker_id=account.broker_id,
+                )
         return account.broker_client
 
     def accounts(self) -> list[TradingAccount]:
         return list(self._accounts.values())
+
+    def broker_ids(self) -> list[str]:
+        """All broker_ids known to this manager: every registered account's
+        broker_id, plus any broker_id explicitly given an availability
+        record via set_broker_availability() even if no account currently
+        uses it. Read-only, additive -- lets a caller (e.g. Phase 11's
+        control-center API) enumerate brokers without reaching into this
+        class's private state."""
+        ids = {account.broker_id for account in self._accounts.values()}
+        ids.update(self._broker_availability.keys())
+        return sorted(ids)
+
+    def broker_status(self, broker_id: str) -> tuple[bool, str]:
+        """(available, reason) for a broker_id -- the same pair
+        is_broker_available()/require_broker_available() already consult,
+        exposed as a read for callers that want both the flag and the
+        human-readable reason at once."""
+        return self._broker_availability.get(broker_id, (True, ""))
+
+    # -- broker-level (not account-level) availability ---------------------------- #
+    def set_broker_availability(self, broker_id: str, available: bool, reason: str = "") -> None:
+        """Mark a broker TYPE (e.g. "dhan", "icici_breeze") as available or
+        not -- e.g. because its adapter isn't implemented yet, or it's
+        mid-outage. Independent of any specific account's own enabled flag."""
+        self._broker_availability[broker_id] = (available, reason)
+
+    def is_broker_available(self, broker_id: str) -> bool:
+        return self._broker_availability.get(broker_id, (True, ""))[0]
+
+    def require_broker_available(self, broker_id: str) -> None:
+        available, reason = self._broker_availability.get(broker_id, (True, ""))
+        if not available:
+            raise BrokerUnavailableError(f"Broker '{broker_id}' is unavailable: {reason or 'not configured'}")

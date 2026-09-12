@@ -17,10 +17,25 @@ own hard-coded-empty-credentials design (see execution_bridge.py's module
 docstring) already guarantees AngelOneBroker.connect() can never reach the
 network; several tests below use a fake BrokerClient instead, purely to
 prove the wiring/translation without depending on that safety mechanism.
+
+CREDENTIAL-LEAK GUARD: importing `config` below (DoubleStraddelAlgo's own
+config.py) triggers its `_angel_creds()`, which falls back to reading a
+real trading/.env file when the ANGELONE_* env vars aren't already set --
+and conftest.py's env-clearing only clears the process env, not that file.
+If a real trading/.env exists on the machine running these tests (as it
+now does whenever Phase 5A/5B credentials have been configured), that
+fallback would call os.environ.setdefault(...) with REAL credentials,
+leaking them into the shared pytest process environment for the rest of
+the session -- this is exactly what broke two unrelated Phase 2 tests in
+tests/common/test_angelone_broker.py the first time a real trading/.env
+was added. Setting dummy values for all four vars BEFORE importing
+`config` makes _angel_creds() see them as "already set" and skip the
+trading/.env fallback entirely, regardless of what that file contains.
 """
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -33,6 +48,15 @@ _ALGO_ROOT = _REPO_ROOT / "trading" / "algos" / "DoubleStraddelAlgo"
 for _p in (str(_REPO_ROOT), str(_ALGO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+# See "CREDENTIAL-LEAK GUARD" above -- must happen before `import config`.
+for _var, _dummy in (
+    ("ANGELONE_API_KEY", "test-dummy-api-key"),
+    ("ANGELONE_CLIENT_ID", "test-dummy-client-id"),
+    ("ANGELONE_MPIN", "0000"),
+    ("ANGELONE_TOTP_SECRET", "JBSWY3DPEHPK3PXP"),  # syntactically valid base32 seed, not a real secret
+):
+    os.environ.setdefault(_var, _dummy)
 
 import config  # noqa: E402  (DoubleStraddelAlgo/config.py, bare-import style)
 from broker import execution_bridge, orders  # noqa: E402
@@ -514,3 +538,148 @@ def test_no_credential_leakage_across_all_shadow_log_output(caplog):
     all_text = " ".join(r.getMessage().lower() for r in caplog.records)
     for marker in FORBIDDEN_LOG_TEXT:
         assert marker not in all_text
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic conversion: same strategy/market state -> reproducible intent
+# --------------------------------------------------------------------------- #
+def test_conversion_is_deterministic_for_identical_inputs():
+    from broker.execution_bridge import _to_order_intent
+
+    args = ("NIFTY19MAY2623700CE", "SELL", 65, "LIMIT", 125.5, None, "ENTRY", "48521")
+    a = _to_order_intent(*args)
+    b = _to_order_intent(*args)
+
+    # Content fields must be reproducible byte-for-byte.
+    assert a.strategy_id == b.strategy_id
+    assert a.account_id == b.account_id
+    assert a.symbol == b.symbol
+    assert a.exchange == b.exchange
+    assert a.side == b.side
+    assert a.quantity == b.quantity
+    assert a.order_type == b.order_type
+    assert a.limit_price == b.limit_price
+    assert a.trigger_price == b.trigger_price
+    assert a.reason == b.reason
+    assert a.metadata["angelone_symboltoken"] == b.metadata["angelone_symboltoken"]
+    assert a.instrument == b.instrument
+
+    # Identity fields are intentionally unique per intent, not reproducible.
+    assert a.client_order_id != b.client_order_id
+    assert a.correlation_id != b.correlation_id
+
+
+def test_conversion_changes_only_when_inputs_change():
+    from broker.execution_bridge import _to_order_intent
+
+    base = _to_order_intent("NIFTY19MAY2623700CE", "SELL", 65, "LIMIT", 125.5, None, "ENTRY", "48521")
+    different_side = _to_order_intent("NIFTY19MAY2623700CE", "BUY", 65, "LIMIT", 125.5, None, "ENTRY", "48521")
+    different_qty = _to_order_intent("NIFTY19MAY2623700CE", "SELL", 50, "LIMIT", 125.5, None, "ENTRY", "48521")
+
+    assert base.side != different_side.side
+    assert base.quantity != different_qty.quantity
+
+
+# --------------------------------------------------------------------------- #
+# Instrument population
+# --------------------------------------------------------------------------- #
+def test_instrument_derives_option_type_from_symbol_suffix():
+    from broker.execution_bridge import _to_instrument
+
+    ce = _to_instrument("NIFTY19MAY2623700CE")
+    pe = _to_instrument("NIFTY19MAY2623700PE")
+
+    assert ce.option_type == "CE"
+    assert ce.exchange == "NFO"
+    assert ce.is_option is True
+    assert pe.option_type == "PE"
+
+
+def test_order_intent_carries_the_instrument():
+    from broker.execution_bridge import _to_order_intent
+
+    intent = _to_order_intent("NIFTY19MAY2623700CE", "SELL", 65, "LIMIT", 125.5, None, "ENTRY", "48521")
+
+    assert intent.instrument is not None
+    assert intent.instrument.symbol == "NIFTY19MAY2623700CE"
+    assert intent.instrument.option_type == "CE"
+
+
+# --------------------------------------------------------------------------- #
+# Comparison tooling: existing order vs new OrderIntent, no submission
+# --------------------------------------------------------------------------- #
+def test_compare_with_legacy_reports_match_for_consistent_translation():
+    from broker.execution_bridge import _to_order_intent, compare_with_legacy
+
+    args = ("NIFTY19MAY2623700CE", "48521", 65, "SELL", "LIMIT", 125.5)
+    intent = _to_order_intent(args[0], args[3], args[2], args[4], args[5], None, "ENTRY", args[1])
+
+    result = compare_with_legacy(*args, intent=intent)
+
+    assert result["match"] is True
+    assert result["differences"] == []
+    assert result["legacy"]["tradingsymbol"] == "NIFTY19MAY2623700CE"
+    assert result["legacy"]["transactiontype"] == "SELL"
+
+
+def test_compare_with_legacy_detects_a_side_mismatch():
+    from broker.execution_bridge import _to_order_intent, compare_with_legacy
+
+    intent = _to_order_intent("NIFTY19MAY2623700CE", "SELL", 65, "LIMIT", 125.5, None, "ENTRY", "48521")
+    # Deliberately compare against a DIFFERENT side to prove mismatches are detected.
+    result = compare_with_legacy("NIFTY19MAY2623700CE", "48521", 65, "BUY", "LIMIT", 125.5, intent=intent)
+
+    assert result["match"] is False
+    assert any("side" in d for d in result["differences"])
+
+
+def test_compare_with_legacy_detects_a_quantity_mismatch():
+    from broker.execution_bridge import _to_order_intent, compare_with_legacy
+
+    intent = _to_order_intent("NIFTY19MAY2623700CE", "SELL", 65, "LIMIT", 125.5, None, "ENTRY", "48521")
+    result = compare_with_legacy("NIFTY19MAY2623700CE", "48521", 999, "SELL", "LIMIT", 125.5, intent=intent)
+
+    assert result["match"] is False
+    assert any("quantity" in d for d in result["differences"])
+
+
+def test_compare_with_legacy_detects_a_price_mismatch():
+    from broker.execution_bridge import _to_order_intent, compare_with_legacy
+
+    intent = _to_order_intent("NIFTY19MAY2623700CE", "SELL", 65, "LIMIT", 125.5, None, "ENTRY", "48521")
+    result = compare_with_legacy("NIFTY19MAY2623700CE", "48521", 65, "SELL", "LIMIT", 999.0, intent=intent)
+
+    assert result["match"] is False
+    assert any("price" in d for d in result["differences"])
+
+
+def test_compare_with_legacy_market_orders_ignore_price():
+    from broker.execution_bridge import _to_order_intent, compare_with_legacy
+
+    intent = _to_order_intent("NIFTY19MAY2623700CE", "SELL", 65, "MARKET", None, None, "EXIT", "48521")
+    result = compare_with_legacy("NIFTY19MAY2623700CE", "48521", 65, "SELL", "MARKET", None, intent=intent)
+
+    assert result["match"] is True
+
+
+def test_compare_with_legacy_never_calls_any_broker():
+    """Structural guard: compare_with_legacy is a pure function -- it must
+    not import or reference any broker/network primitive."""
+    import inspect
+
+    from broker.execution_bridge import compare_with_legacy
+
+    source = inspect.getsource(compare_with_legacy)
+    for forbidden in ("smart_api", "SmartConnect", "place_order", "connect(", "._get_stack"):
+        assert forbidden not in source
+
+
+def test_shadow_log_record_includes_the_comparison_result(caplog):
+    broker = RecordingBroker(place_order_status="COMPLETE")
+    execution_bridge._reset_stack_for_tests(_stack_with_broker(broker))
+
+    with caplog.at_level(logging.INFO, logger="DoubleStraddelAlgo.shadow"):
+        orders.place_limit("NIFTY19MAY2623700CE", "48521", 65, "SELL")
+        _wait_for_shadow()
+
+    assert any("'match': True" in r.getMessage() for r in caplog.records)

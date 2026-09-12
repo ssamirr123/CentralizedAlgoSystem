@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
 from trading.common.broker import OrderSide, OrderType
+from trading.common.instrument import Instrument
 
 
 class ProductType(str, Enum):
@@ -57,6 +59,23 @@ class OrderIntent:
     reason: str = ""
     client_order_id: str = field(default_factory=lambda: f"OI-{uuid.uuid4().hex[:12]}")
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Optional structured instrument reference (see trading.common.instrument) --
+    # symbol/exchange above remain the primary, always-populated fields;
+    # this is an additional, optional richer identity when the caller has one.
+    instrument: Instrument | None = None
+    # correlation_id ties this intent to a broader unit of work (e.g. a
+    # multi-leg entry) across logs/systems; defaults to a fresh id per
+    # intent since most callers don't have a broader correlation to supply.
+    correlation_id: str = field(default_factory=lambda: f"CORR-{uuid.uuid4().hex[:12]}")
+    # idempotency_key is deliberately NOT auto-generated: it only means
+    # something when the CALLER derives it deterministically from "what
+    # makes two intents the same request" (e.g. strategy_id+symbol+side+a
+    # time bucket). Empty string means "no idempotency dedup requested".
+    # Phase 1 only carries this field -- no component yet reads or enforces
+    # it; that is future ExecutionEngine/RiskManager work, not implemented
+    # here.
+    idempotency_key: str = ""
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def __post_init__(self) -> None:
         # Accept either the enum member or its plain string value (e.g.

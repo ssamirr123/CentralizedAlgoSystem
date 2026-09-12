@@ -15,6 +15,17 @@ import { LogsPage } from "@/pages/LogsPage";
 import { RiskPage } from "@/pages/RiskPage";
 import { SystemHealthPage } from "@/pages/SystemHealthPage";
 import { AdminPage } from "@/pages/AdminPage";
+import { TccOverviewPage } from "@/pages/TccOverviewPage";
+import { TccStrategiesPage } from "@/pages/TccStrategiesPage";
+import { TccAccountsPage } from "@/pages/TccAccountsPage";
+import { TccBrokersPage } from "@/pages/TccBrokersPage";
+import { TccAssignmentsPage } from "@/pages/TccAssignmentsPage";
+import { TccOrdersPage } from "@/pages/TccOrdersPage";
+import { TccPositionsPage } from "@/pages/TccPositionsPage";
+import { TccPnlPage } from "@/pages/TccPnlPage";
+import { TccRiskPage } from "@/pages/TccRiskPage";
+import { TccLogsPage } from "@/pages/TccLogsPage";
+import { TccSystemHealthPage } from "@/pages/TccSystemHealthPage";
 
 export interface NavRoute {
   path: string;
@@ -40,4 +51,19 @@ export const NAV_ROUTES: NavRoute[] = [
   { path: "/risk", label: "Risk", element: RiskPage, permission: "VIEW" },
   { path: "/system-health", label: "System Health", element: SystemHealthPage, permission: "VIEW" },
   { path: "/admin", label: "Administration", element: AdminPage, permission: "ADMIN" },
+
+  // --- Trading Control Center: broker-agnostic execution framework (Phase 12) ---
+  // Distinct nav section from the legacy telemetry pages above (see
+  // docs/phase-12-react-control-center-report.md's naming-collision note).
+  { path: "/execution", label: "Execution Overview", element: TccOverviewPage, permission: "VIEW" },
+  { path: "/execution/strategies", label: "Execution Strategies", element: TccStrategiesPage, permission: "VIEW" },
+  { path: "/execution/accounts", label: "Trading Accounts", element: TccAccountsPage, permission: "VIEW" },
+  { path: "/execution/brokers", label: "Brokers", element: TccBrokersPage, permission: "VIEW" },
+  { path: "/execution/assignments", label: "Strategy Assignments", element: TccAssignmentsPage, permission: "VIEW" },
+  { path: "/execution/orders", label: "Orders", element: TccOrdersPage, permission: "VIEW" },
+  { path: "/execution/positions", label: "Execution Positions", element: TccPositionsPage, permission: "VIEW" },
+  { path: "/execution/pnl", label: "Execution P&L", element: TccPnlPage, permission: "VIEW" },
+  { path: "/execution/risk", label: "Execution Risk", element: TccRiskPage, permission: "VIEW" },
+  { path: "/execution/logs", label: "Execution Logs", element: TccLogsPage, permission: "ADMIN" },
+  { path: "/execution/system-health", label: "Execution Health", element: TccSystemHealthPage, permission: "VIEW" },
 ];

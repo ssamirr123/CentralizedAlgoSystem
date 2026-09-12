@@ -96,12 +96,12 @@ def _config(live: bool = False) -> TradingConfig:
     )
 
 
-def _broker(config: TradingConfig | None = None, fake: FakeSmartApi | None = None):
+def _broker(config: TradingConfig | None = None, fake: FakeSmartApi | None = None, instrument_resolver=None):
     fake = fake or FakeSmartApi("ak")
     broker = AngelOneBroker(
         config or _config(),
         smart_api_factory=lambda api_key: fake,
-        instrument_resolver=lambda symbol: ("NFO", "99999"),
+        instrument_resolver=instrument_resolver or (lambda symbol: ("NFO", "99999")),
     )
     return broker, fake
 
@@ -123,7 +123,13 @@ def test_connect_fails_when_session_response_reports_failure():
     assert broker.is_connected() is False
 
 
-def test_connect_fails_when_credentials_missing():
+def test_connect_fails_when_credentials_missing(monkeypatch):
+    # Explicit, not just "ambient env happens to be clean" -- another test
+    # module importing DoubleStraddelAlgo's config.py can legitimately set
+    # these (to safe dummy values, deliberately, to stop a real trading/.env
+    # from leaking) for the rest of the pytest session.
+    for var in ("ANGELONE_API_KEY", "ANGELONE_CLIENT_ID", "ANGELONE_PASSWORD", "ANGELONE_MPIN", "ANGELONE_TOTP_SECRET"):
+        monkeypatch.delenv(var, raising=False)
     config = TradingConfig(credentials=BrokerCredentials())  # nothing set
     broker, _ = _broker(config=config)
 
@@ -207,6 +213,85 @@ def test_get_quote_converts_a_broker_reported_failure():
 
     with pytest.raises(BrokerConnectionError):
         broker.get_quote("NIFTY30JUL2625000CE")
+
+
+# -- Instrument lookup ------------------------------------------------------------- #
+def test_resolve_instrument_returns_exchange_and_token():
+    broker, _ = _broker()  # instrument_resolver=lambda symbol: ("NFO", "99999")
+    broker.connect()
+
+    exchange, token = broker.resolve_instrument("NIFTY30JUL2625000CE")
+
+    assert exchange == "NFO"
+    assert token == "99999"
+
+
+def test_resolve_instrument_failure_propagates_as_a_plain_lookup_error():
+    def _not_found(symbol):
+        raise ValueError(f"AngelOneBroker: symbol '{symbol}' not found in the NFO scrip master")
+
+    broker, _ = _broker(instrument_resolver=_not_found)
+    broker.connect()
+
+    with pytest.raises(ValueError):
+        broker.resolve_instrument("NOT-A-REAL-SYMBOL")
+
+
+# -- Order book (listing, not a single known id) ------------------------------------ #
+def test_get_order_book_normalization_multiple_rows():
+    fake = FakeSmartApi("ak")
+    fake.orders["AO-1"] = {"orderid": "AO-1", "status": "complete", "quantity": "50", "filledshares": "50"}
+    fake.orders["AO-2"] = {"orderid": "AO-2", "status": "open", "quantity": "65", "filledshares": "20"}
+    broker, _ = _broker(fake=fake)
+    broker.connect()
+
+    book = broker.get_order_book()
+
+    by_id = {s.order_id: s for s in book}
+    assert len(book) == 2
+    assert by_id["AO-1"].status == "COMPLETE"
+    assert by_id["AO-2"].status == "OPEN"
+    assert by_id["AO-2"].remaining_quantity == 45
+
+
+def test_get_order_book_empty_is_handled():
+    broker, _ = _broker()
+    broker.connect()
+
+    assert broker.get_order_book() == []
+
+
+def test_get_open_orders_excludes_terminal_statuses():
+    fake = FakeSmartApi("ak")
+    fake.orders["AO-1"] = {"orderid": "AO-1", "status": "complete", "quantity": "50", "filledshares": "50"}
+    fake.orders["AO-2"] = {"orderid": "AO-2", "status": "trigger pending", "quantity": "65", "filledshares": "0"}
+    broker, _ = _broker(fake=fake)
+    broker.connect()
+
+    open_orders = broker.get_open_orders()
+
+    assert [s.order_id for s in open_orders] == ["AO-2"]
+
+
+def test_get_order_book_raises_generic_error_when_broker_reports_failure():
+    fake = FakeSmartApi("ak")
+    fake.orderBook = lambda: {"status": False, "message": "session expired"}
+    broker, _ = _broker(fake=fake)
+    broker.connect()
+
+    with pytest.raises(BrokerConnectionError):
+        broker.get_order_book()
+
+
+def test_get_order_book_treats_missing_data_key_as_empty_not_an_error():
+    """Angel's orderBook() legitimately omits/nulls "data" when there are no
+    orders -- get_order_book() must treat that as [] , not raise."""
+    fake = FakeSmartApi("ak")
+    fake.orderBook = lambda: {"status": True}  # no "data" key at all
+    broker, _ = _broker(fake=fake)
+    broker.connect()
+
+    assert broker.get_order_book() == []
 
 
 # -- Orders: translation -------------------------------------------------------- #
@@ -409,6 +494,37 @@ def test_get_positions_allows_empty_data():
 
 
 # -- Errors ------------------------------------------------------------------------ #
+def test_broker_timeout_is_classified_as_connection_error():
+    """A raw socket/request timeout from the SDK must be converted into the
+    generic BrokerConnectionError vocabulary, not leaked as a bare
+    TimeoutError -- callers should never need to know Angel raises this."""
+    fake = FakeSmartApi("ak")
+
+    def _timeout(*args, **kwargs):
+        raise TimeoutError("Request timed out after 10s")
+
+    fake.ltpData = _timeout
+    broker, _ = _broker(fake=fake)
+    broker.connect()
+
+    with pytest.raises(BrokerConnectionError):
+        broker.get_quote("NIFTY30JUL2625000CE")
+
+
+def test_broker_timeout_during_order_book_is_classified():
+    fake = FakeSmartApi("ak")
+
+    def _timeout():
+        raise TimeoutError("Request timed out after 10s")
+
+    fake.orderBook = _timeout
+    broker, _ = _broker(fake=fake)
+    broker.connect()
+
+    with pytest.raises(BrokerConnectionError):
+        broker.get_order_book()
+
+
 def test_rate_limit_error_is_classified():
     fake = FakeSmartApi("ak")
     fake.place_order_exception = RuntimeError("Access denied because of exceeding access rate")
@@ -460,7 +576,9 @@ def test_exception_messages_never_include_credentials():
         assert secret not in text
 
 
-def test_config_error_message_never_includes_partial_credentials():
+def test_config_error_message_never_includes_partial_credentials(monkeypatch):
+    for var in ("ANGELONE_API_KEY", "ANGELONE_PASSWORD", "ANGELONE_MPIN", "ANGELONE_TOTP_SECRET"):
+        monkeypatch.delenv(var, raising=False)
     config = TradingConfig(credentials=BrokerCredentials(angelone_client_id="C123"))
     broker, _ = _broker(config=config)
 

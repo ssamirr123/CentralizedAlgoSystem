@@ -67,3 +67,18 @@ export function pnlSign(value: number | null | undefined): "pos" | "neg" | "zero
   if (value == null || Number.isNaN(value) || value === 0) return "zero";
   return value > 0 ? "pos" : "neg";
 }
+
+// --- Trading Control Center execution framework (Phase 12) ------------
+const BROKER_LABELS: Record<string, string> = {
+  angelone: "Angel One",
+  dhan: "Dhan",
+  icici_breeze: "ICICI Breeze",
+};
+
+/** Human-readable broker name for a broker_id, falling back to the raw id
+ * for any broker this map doesn't know about yet (never throws, never
+ * hides an unrecognized broker). */
+export function brokerLabel(brokerId: string | null | undefined): string {
+  if (!brokerId) return "—";
+  return BROKER_LABELS[brokerId] ?? brokerId;
+}

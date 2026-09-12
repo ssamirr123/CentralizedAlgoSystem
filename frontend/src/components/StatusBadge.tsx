@@ -10,6 +10,14 @@ const STATUS_CLASS: Record<string, string> = {
   REBOOTING: "stopped",
   ERROR: "error",
   FAILED: "error",
+  // Phase 10/12 StrategyStatus values (trading/common/strategy.py)
+  DISABLED: "stopped",
+  ENABLED: "stopped",
+  SHADOW: "stopped",
+  // Phase 1/12 ConnectionState values (trading/common/trading_account.py)
+  CONNECTED: "running",
+  CONNECTING: "stopped",
+  DISCONNECTED: "stopped",
 };
 
 export function StatusBadge({ status }: { status: string | null | undefined }) {

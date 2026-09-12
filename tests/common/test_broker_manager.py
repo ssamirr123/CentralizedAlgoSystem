@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from trading.common.broker_manager import BrokerManager, UnknownAccountError
+from trading.common.broker_manager import BrokerManager, BrokerUnavailableError, UnknownAccountError
 from trading.common.brokers.paper_broker import PaperBroker
 from trading.common.trading_account import ConnectionState, TradingAccount
 
@@ -85,3 +85,37 @@ def test_accounts_lists_every_registered_account():
 
     ids = {a.account_id for a in manager.accounts()}
     assert ids == {"A", "B"}
+
+
+# --------------------------------------------------------------------------- #
+# Broker-level (not account-level) availability -- Phase 7
+# --------------------------------------------------------------------------- #
+def test_broker_defaults_to_available_when_never_registered():
+    manager = BrokerManager()
+    assert manager.is_broker_available("dhan") is True
+    manager.require_broker_available("dhan")  # must not raise
+
+
+def test_broker_marked_unavailable_is_reported_correctly():
+    manager = BrokerManager()
+    manager.set_broker_availability("dhan", False, reason="adapter not implemented yet")
+
+    assert manager.is_broker_available("dhan") is False
+    with pytest.raises(BrokerUnavailableError, match="not implemented yet"):
+        manager.require_broker_available("dhan")
+
+
+def test_broker_availability_is_independent_per_broker_id():
+    manager = BrokerManager()
+    manager.set_broker_availability("dhan", False, reason="not implemented")
+
+    assert manager.is_broker_available("angelone") is True
+    manager.require_broker_available("angelone")  # must not raise
+
+
+def test_broker_availability_can_be_re_enabled():
+    manager = BrokerManager()
+    manager.set_broker_availability("dhan", False)
+    manager.set_broker_availability("dhan", True)
+
+    assert manager.is_broker_available("dhan") is True

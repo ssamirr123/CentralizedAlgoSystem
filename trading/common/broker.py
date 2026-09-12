@@ -104,6 +104,15 @@ class BrokerRateLimitError(BrokerConnectionError):
 class BrokerClient(ABC):
     """Common interface every broker adapter must implement."""
 
+    # Phase 13 observability: True only for adapters that NEVER reach a
+    # real broker order API (ShadowBroker, ConnectedShadowBroker) --
+    # StrategyExecutionEngine reads this to classify a fill as
+    # record_simulated_fill() vs record_real_fill() without needing to
+    # import those specific classes (avoiding a layering dependency from
+    # the generic execution engine onto specific broker adapters). Every
+    # real adapter (Angel/Dhan/ICICI/Zerodha/Paper) inherits the default.
+    is_simulated: bool = False
+
     @abstractmethod
     def connect(self) -> None:
         """Establish the broker session. Raise BrokerConnectionError on failure."""
@@ -164,6 +173,11 @@ def create_broker(config: TradingConfig) -> BrokerClient:
 
         return ICICIBreezeBroker(config)
 
+    if name == "dhan":
+        from trading.common.brokers.dhan import DhanBroker
+
+        return DhanBroker(config)
+
     raise ValueError(
-        f"Unknown BROKER '{name}'. Expected one of: paper, zerodha, angelone, icici_breeze."
+        f"Unknown BROKER '{name}'. Expected one of: paper, zerodha, angelone, icici_breeze, dhan."
     )
