@@ -27,6 +27,8 @@ configure_logging()
 
 from trading.api.admin_routes import router as admin_router  # noqa: E402
 from trading.api.auth_routes import router as auth_router  # noqa: E402
+from trading.api.execution_routes import router as execution_router  # noqa: E402
+from trading.api.execution_state import build_execution_state  # noqa: E402
 from trading.api.health import router as health_router  # noqa: E402
 from trading.api.market_routes import router as market_router  # noqa: E402
 from trading.api.realtime.ws import router as realtime_router  # noqa: E402
@@ -141,9 +143,16 @@ def create_app() -> FastAPI:
             response.headers.setdefault(k, v)
         return response
 
+    # Phase 11: one ExecutionState per app instance -- see
+    # trading/api/execution_state.py's module docstring for why this is
+    # built fresh here (test isolation) rather than as a module-level
+    # global. Never connects to a broker or touches a credential.
+    app.state.execution = build_execution_state()
+
     app.include_router(auth_router, prefix="/api")  # /api/auth/*
     app.include_router(admin_router, prefix="/api")  # /api/admin/*
     app.include_router(control_center_router, prefix="/api")
+    app.include_router(execution_router, prefix="/api")  # Phase 11: /api/strategies|accounts|brokers|assignments|risk|execution|system/*
     app.include_router(market_router, prefix="/api")  # /api/market/* (Stage 19 market data)
     app.include_router(straddle_pulse_router, prefix="/api")  # /api/market/straddle-pulse/*
     app.include_router(health_router, prefix="/api")  # GET /api/health, unauthenticated

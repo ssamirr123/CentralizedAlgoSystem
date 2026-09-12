@@ -151,3 +151,58 @@ export const getSessionChart = (sessionId: number) =>
 
 export const getSessionOI = (sessionId: number) =>
   apiRequest<import("./types").StraddleSessionOI>(`/api/market/straddle-pulse/sessions/${sessionId}/oi`);
+
+// --- Trading Control Center execution framework (Phase 11/12) --------
+// trading/api/execution_routes.py -- the broker-agnostic execution
+// framework's own API, distinct from the legacy algos/positions/pnl/logs
+// endpoints above. See api/types.ts's matching comment.
+export const listExecutionStrategies = () =>
+  apiRequest<import("./types").ExecutionStrategy[]>("/api/strategies");
+
+export const getExecutionStrategy = (strategyId: string) =>
+  apiRequest<import("./types").ExecutionStrategy>(`/api/strategies/${encodeURIComponent(strategyId)}`);
+
+export const startExecutionStrategy = (strategyId: string) =>
+  apiRequest<import("./types").ExecutionStrategy>(`/api/strategies/${encodeURIComponent(strategyId)}/start`, {
+    method: "POST",
+  });
+
+export const stopExecutionStrategy = (strategyId: string) =>
+  apiRequest<import("./types").ExecutionStrategy>(`/api/strategies/${encodeURIComponent(strategyId)}/stop`, {
+    method: "POST",
+  });
+
+export const listExecutionAccounts = () =>
+  apiRequest<import("./types").ExecutionAccount[]>("/api/accounts");
+
+export const listExecutionBrokers = () =>
+  apiRequest<import("./types").ExecutionBroker[]>("/api/brokers");
+
+export const listExecutionAssignments = () =>
+  apiRequest<import("./types").ExecutionAssignment[]>("/api/assignments");
+
+export const createExecutionAssignment = (body: import("./types").ExecutionAssignmentCreate) =>
+  apiRequest<import("./types").ExecutionAssignment>("/api/assignments", { method: "POST", body });
+
+export const listExecutionModes = () =>
+  apiRequest<import("./types").ExecutionModeOption[]>("/api/execution-modes");
+
+export const getRiskStatus = () => apiRequest<import("./types").RiskStatus>("/api/risk/status");
+
+export const getRiskLimits = () => apiRequest<import("./types").RiskLimits>("/api/risk/limits");
+
+export const setKillSwitch = (engaged: boolean, reason?: string) =>
+  apiRequest<import("./types").KillSwitchState>("/api/risk/kill-switch", {
+    method: "POST",
+    body: { engaged, reason: reason ?? "" },
+  });
+
+export const listExecutionOrders = () => apiRequest<import("./types").ExecutionOrder[]>("/api/execution/orders");
+
+export const listExecutionPositions = () =>
+  apiRequest<import("./types").ExecutionPosition[]>("/api/execution/positions");
+
+export const getExecutionPnl = () => apiRequest<import("./types").ExecutionPnl>("/api/execution/pnl");
+
+export const getExecutionSystemStatus = () =>
+  apiRequest<import("./types").ExecutionSystemStatus>("/api/system/status");

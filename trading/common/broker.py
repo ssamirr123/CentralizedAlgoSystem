@@ -71,8 +71,47 @@ class LiveTradingDisabledError(RuntimeError):
     """Raised when a real order is attempted while TRADING_MODE != 'live'."""
 
 
+class BrokerAuthenticationError(RuntimeError):
+    """Raised when a broker rejects a login/session attempt at runtime
+    (bad password, expired/invalid TOTP, revoked session, ...). Distinct
+    from BrokerConfigError, which is for structurally missing credentials
+    before any call is even attempted -- this is for a call the broker
+    itself refused. Not automatically retryable: an adapter may classify a
+    specific case as retryable, but the generic default is not to retry an
+    authentication failure the same way as a connectivity blip."""
+
+
+class ReadOnlyModeError(RuntimeError):
+    """Raised when a broker adapter constructed/configured in read-only
+    mode (see e.g. AngelOneBroker's ANGEL_READ_ONLY support) refuses a
+    mutating call (place_order/modify_order/cancel_order).
+
+    Deliberately independent of LiveTradingDisabledError/TRADING_MODE:
+    read-only mode is a separate, higher-priority safety gate intended for
+    manual read-only diagnostic tooling that must never be able to submit
+    a real order, regardless of what TRADING_MODE happens to be set to."""
+
+
+class BrokerRateLimitError(BrokerConnectionError):
+    """Raised when a broker rejects a call for exceeding its own rate
+    limit. Subclasses BrokerConnectionError (rate limits are a connectivity-
+    type, retryable failure) so callers that already treat
+    BrokerConnectionError as retryable get sane behavior for free, while
+    still being able to special-case rate limits (e.g. a longer backoff)
+    where useful."""
+
+
 class BrokerClient(ABC):
     """Common interface every broker adapter must implement."""
+
+    # Phase 13 observability: True only for adapters that NEVER reach a
+    # real broker order API (ShadowBroker, ConnectedShadowBroker) --
+    # StrategyExecutionEngine reads this to classify a fill as
+    # record_simulated_fill() vs record_real_fill() without needing to
+    # import those specific classes (avoiding a layering dependency from
+    # the generic execution engine onto specific broker adapters). Every
+    # real adapter (Angel/Dhan/ICICI/Zerodha/Paper) inherits the default.
+    is_simulated: bool = False
 
     @abstractmethod
     def connect(self) -> None:
@@ -134,6 +173,11 @@ def create_broker(config: TradingConfig) -> BrokerClient:
 
         return ICICIBreezeBroker(config)
 
+    if name == "dhan":
+        from trading.common.brokers.dhan import DhanBroker
+
+        return DhanBroker(config)
+
     raise ValueError(
-        f"Unknown BROKER '{name}'. Expected one of: paper, zerodha, angelone, icici_breeze."
+        f"Unknown BROKER '{name}'. Expected one of: paper, zerodha, angelone, icici_breeze, dhan."
     )
