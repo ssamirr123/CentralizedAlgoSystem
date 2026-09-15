@@ -55,6 +55,7 @@ from trading.common.idempotency_store import (
 from trading.common.kill_switch import CentralKillSwitch
 from trading.common.live_canary import LiveCanaryGuard
 from trading.common.observability import (
+    EVENT_AUTHORIZATION_STATE_GATE,
     EVENT_BROKER_ORDER_PLACED,
     EVENT_EXECUTION_RESULT,
     EVENT_FILL,
@@ -68,7 +69,69 @@ from trading.common.observability import (
 from trading.common.order_intent import OrderIntent
 from trading.common.risk_manager import RiskContext, RiskManager
 from trading.common.strategy_assignment import StrategyAssignment, UnknownAssignmentError
-from trading.common.trading_account import ExecutionMode
+from trading.common.trading_account import (
+    AccountAuthorizationError,
+    AccountAuthorizationState,
+    ExecutionMode,
+    TradingAccount,
+)
+
+# Phase 15B.1 hard gate: what TradingAccount.authorization_state (Phase 15B)
+# must be for a given ExecutionMode before RiskManager or any broker-facing
+# gate ever runs. DISABLED/KILLED block every mode unconditionally --
+# checked first, independent of the mode-specific table below. Any mode not
+# named here (i.e. PAPER/SHADOW) requires nothing beyond "not
+# DISABLED/KILLED", since simulated execution was never gated on live
+# authorization and READ_ONLY (every new account's own safe default) must
+# remain sufficient for it.
+_REQUIRED_AUTHORIZATION_STATES: dict[ExecutionMode, frozenset[AccountAuthorizationState]] = {
+    ExecutionMode.LIVE: frozenset({AccountAuthorizationState.LIVE_AUTHORIZED}),
+    ExecutionMode.LIVE_CANARY: frozenset(
+        {AccountAuthorizationState.CANARY_READY, AccountAuthorizationState.LIVE_AUTHORIZED}
+    ),
+}
+
+
+def _check_authorization_state(account: TradingAccount, mode: ExecutionMode) -> None:
+    """Phase 15B.1: the account's own authorization_state must permit this
+    specific execution_mode. This is a NEW, additional hard gate -- it
+    supplements, and runs strictly before, every existing gate (RiskManager,
+    LiveCanaryGuard, CentralKillSwitch, RiskLimits.is_live_ready()); it
+    replaces none of them, and passing it is NEVER sufficient on its own
+    for an order to reach a broker.
+
+    Raises AccountAuthorizationError (never returns a value) on any
+    rejection -- execute() catches this and converts it into a rejected
+    ExecutionResult, exactly like UnknownAssignmentError/UnknownAccountError
+    are already handled. Fail-closed: an execution_mode with no entry in
+    _REQUIRED_AUTHORIZATION_STATES (i.e. PAPER/SHADOW) is permitted through
+    this specific gate as long as the account isn't DISABLED/KILLED --
+    anything else this method doesn't recognize is handled by execute()'s
+    own pre-existing "unrecognized execution_mode" rejection further down,
+    not by silently approving it here."""
+    state = account.authorization_state
+    if not isinstance(state, AccountAuthorizationState):
+        # Defensive: TradingAccount.__post_init__ already coerces/validates
+        # this at construction time, so this should be unreachable -- but a
+        # gate that trusts an untyped value is exactly the class of bug this
+        # phase exists to close. Fail closed rather than assume.
+        raise AccountAuthorizationError(
+            account.account_id, str(state), "authorization_state is missing or not a recognized AccountAuthorizationState"
+        )
+    if state in (AccountAuthorizationState.DISABLED, AccountAuthorizationState.KILLED):
+        raise AccountAuthorizationError(
+            account.account_id, state.value, "no execution permitted in any mode"
+        )
+    if not account.enabled:
+        raise AccountAuthorizationError(account.account_id, state.value, "account is disabled")
+
+    required = _REQUIRED_AUTHORIZATION_STATES.get(mode)
+    if required is not None and state not in required:
+        allowed = ", ".join(sorted(s.value for s in required))
+        raise AccountAuthorizationError(
+            account.account_id, state.value,
+            f"{mode.value} execution requires authorization_state in {{{allowed}}}",
+        )
 
 # Statuses that mean "nothing left to manage" across brokers. Adapters may
 # use their own vocabulary beyond this (e.g. "TRIGGER PENDING" is NOT
@@ -402,12 +465,15 @@ class StrategyExecutionEngine:
 
     # -- OrderIntent entry point --------------------------------------------- #
     def execute(self, intent: OrderIntent, context: RiskContext | None = None) -> ExecutionResult:
-        """Full pipeline (Phase 14.6 order, fail-closed at every step):
+        """Full pipeline (Phase 15B.1 order, fail-closed at every step):
 
             0. Central kill switch (Blocker fix)          -- unconditional, every mode
             1. Idempotency replay (Blocker D)              -- authoritative persistent store
-            2. RiskManager.validate()                      -- unchanged, 15 checks
-            3. Resolve TradingAccount                       -- needed for mode branching below
+            2. Resolve TradingAccount + AuthorizationState hard gate (Phase 15B.1) --
+               NEW: runs BEFORE RiskManager, using the account's own
+               TradingAccount.authorization_state (Phase 15B). Independent of,
+               and in addition to, every gate below it.
+            3. RiskManager.validate()                      -- unchanged, 15 checks
             4. Mode-specific structural gate (Blocker A/E):
                  LIVE_CANARY -> REQUIRE a valid, authorizing LiveCanaryGuard
                  LIVE        -> REQUIRE RiskLimits.is_live_ready()
@@ -456,6 +522,50 @@ class StrategyExecutionEngine:
             if replay is not None:
                 return replay
 
+        started = time.monotonic()
+
+        # -- 2: resolve TradingAccount + AuthorizationState hard gate (Phase 15B.1). ---- #
+        # Moved ahead of RiskManager (previously resolved only at old step 3,
+        # after the risk check) specifically so this NEW gate can run before
+        # RiskManager ever sees the intent -- matching the required pipeline
+        # order: StrategyExecutionEngine -> AuthorizationState Gate ->
+        # RiskManager -> ExecutionMode/LiveCanaryGuard -> Idempotency -> Broker.
+        try:
+            account_id = self._strategy_assignment.get_account_id(intent.strategy_id)
+        except UnknownAssignmentError as exc:
+            return self._fail(intent, str(exc), started=started)
+
+        try:
+            account = self._broker_manager.get_account(account_id)
+        except UnknownAccountError as exc:
+            return self._fail(intent, str(exc), started=started)
+
+        try:
+            _check_authorization_state(account, account.execution_mode)
+        except AccountAuthorizationError as exc:
+            if self._audit_trail is not None:
+                self._obs(
+                    "audit_trail", "append(AUTHORIZATION_STATE_GATE)",
+                    lambda: self._audit_trail.append(
+                        EVENT_AUTHORIZATION_STATE_GATE, correlation_id=cid, strategy_id=sid, account_id=account_id,
+                        authorization_state=exc.authorization_state, execution_mode=account.execution_mode.value,
+                        passed=False, reason=exc.reason,
+                    ),
+                )
+            if self._metrics is not None:
+                self._obs("metrics", "record_order_rejected", lambda: self._metrics.record_order_rejected(sid, str(exc)))
+            return self._fail(intent, str(exc), started=started)
+
+        if self._audit_trail is not None:
+            self._obs(
+                "audit_trail", "append(AUTHORIZATION_STATE_GATE)",
+                lambda: self._audit_trail.append(
+                    EVENT_AUTHORIZATION_STATE_GATE, correlation_id=cid, strategy_id=sid, account_id=account_id,
+                    authorization_state=account.authorization_state.value,
+                    execution_mode=account.execution_mode.value, passed=True, reason="",
+                ),
+            )
+
         if self._metrics is not None:
             self._obs("metrics", "record_order_intent", lambda: self._metrics.record_order_intent(sid))
         if self._audit_trail is not None:
@@ -468,9 +578,7 @@ class StrategyExecutionEngine:
                 ),
             )
 
-        started = time.monotonic()
-
-        # -- 2: RiskManager -- unchanged, always all 15 checks. ---- #
+        # -- 3: RiskManager -- unchanged, always all 15 checks. ---- #
         check = self._risk_manager.validate(intent, context)
         if self._audit_trail is not None:
             self._obs(
@@ -490,16 +598,8 @@ class StrategyExecutionEngine:
         if self._metrics is not None:
             self._obs("metrics", "record_order_approved", lambda: self._metrics.record_order_approved(sid))
 
-        # -- 3: resolve the TradingAccount (metadata only -- does not connect). ---- #
-        try:
-            account_id = self._strategy_assignment.get_account_id(intent.strategy_id)
-        except UnknownAssignmentError as exc:
-            return self._fail(intent, str(exc), started=started)
-
-        try:
-            account = self._broker_manager.get_account(account_id)
-        except UnknownAccountError as exc:
-            return self._fail(intent, str(exc), started=started)
+        # account/account_id were already resolved at step 2 above, ahead of
+        # the AuthorizationState gate.
 
         # -- 4: mode-specific structural gate (Blocker A + Blocker E). ---- #
         mode = account.execution_mode

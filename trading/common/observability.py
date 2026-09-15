@@ -70,6 +70,7 @@ _log = logging.getLogger("trading.observability")
 # convention trading/api/security/audit.py already established.
 # --------------------------------------------------------------------------
 EVENT_ORDER_INTENT_CREATED = "ORDER_INTENT_CREATED"
+EVENT_AUTHORIZATION_STATE_GATE = "AUTHORIZATION_STATE_GATE"
 EVENT_RISK_DECISION = "RISK_DECISION"
 EVENT_LIVE_CANARY_AUTHORIZATION = "LIVE_CANARY_AUTHORIZATION"
 EVENT_EXECUTION_RESULT = "EXECUTION_RESULT"

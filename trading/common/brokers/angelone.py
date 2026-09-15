@@ -35,9 +35,16 @@ Known limitations (see also the Phase 2 final report):
   - Stop-loss/trigger orders aren't representable through today's
     BrokerClient.place_order() signature (no OrderType.STOP, no
     trigger_price parameter), so this adapter only implements MARKET/LIMIT.
-  - get_account_info()/get_funds() are best-effort: no existing code in
-    this repo exercises SmartAPI's getProfile()/rmsLimit() calls, so their
-    exact response-field mapping is unverified against a live account.
+  - get_account_info()/get_funds() were originally best-effort (no existing
+    code in this repo exercised SmartAPI's getProfile()/rmsLimit() calls
+    against a live account). Phase 15C.2.1 verified get_funds()'s three
+    mapped fields (availablecash/utiliseddebits/availablelimitmargin)
+    against a REAL rmsLimit() response -- see
+    docs/phase-15c-2-1-funds-mapping-report.md. get_account_info()'s
+    mapping (clientcode/name/email) was also confirmed correct via the same
+    session's real getProfile() call. Every OTHER rmsLimit() field
+    (collateral, m2munrealized, utilisedspan, ...) remains unmapped and
+    unverified -- out of scope for that diagnostic.
 """
 from __future__ import annotations
 
@@ -118,10 +125,24 @@ class AccountInfo:
 
 @dataclass(frozen=True)
 class FundsSnapshot:
-    """See AccountInfo -- optional, adapter-specific, not part of BrokerClient."""
+    """See AccountInfo -- optional, adapter-specific, not part of BrokerClient.
+
+    Phase 15C.2.1: field mapping verified against a REAL rmsLimit() response
+    (see get_funds() below for the exact raw field names and the diagnostic
+    report at docs/phase-15c-2-1-funds-mapping-report.md) -- this is no
+    longer "best-effort, unverified" for available_cash/used_margin/
+    available_margin specifically. Every other rmsLimit() field
+    (collateral, m2munrealized, utilisedspan, ...) remains unmapped/
+    unverified -- only these three were in scope for this diagnostic."""
 
     available_cash: float
     used_margin: float
+    # availablelimitmargin in Angel's raw response -- the account's total
+    # remaining tradeable limit, a DIRECT field (not derived/computed here),
+    # distinct from available_cash (the cash component only). Defaults to
+    # 0.0 so every pre-existing FundsSnapshot(available_cash=..., used_margin=...)
+    # construction site (adapter code and tests) is unaffected.
+    available_margin: float = 0.0
 
 
 class AngelOneBroker(BrokerClient):
@@ -469,13 +490,33 @@ class AngelOneBroker(BrokerClient):
         )
 
     def get_funds(self) -> FundsSnapshot:
+        """Phase 15C.2.1: field mapping verified against a real rmsLimit()
+        response (docs/phase-15c-2-1-funds-mapping-report.md) --
+
+            availablecash       -> available_cash   (rupees, decimal string, e.g. "0.0000")
+            utiliseddebits      -> used_margin       (rupees, decimal string)
+            availablelimitmargin -> available_margin (rupees, decimal string; a direct
+                                                        field, not derived/computed here)
+
+        All three are confirmed real SmartAPI field names -- not guessed.
+        Every value returned by rmsLimit() is a decimal STRING, not a
+        number; float() converts it. A missing key falls back to 0 (`or 0`)
+        the same way this method always has. A MALFORMED value (a string
+        float() cannot parse, e.g. "N/A") now raises BrokerConnectionError
+        instead of an uncaught, unclassified ValueError -- fail closed with
+        the same error vocabulary this adapter already uses everywhere
+        else, never silently treated as a valid 0.0."""
         self._require_connected()
         try:
             response = self._smart_api.rmsLimit()
         except Exception as exc:
             raise self._classify_error(exc, context="get_funds") from exc
         data = self._extract_data(response, context="get_funds")
-        return FundsSnapshot(
-            available_cash=float(data.get("availablecash", 0) or 0),
-            used_margin=float(data.get("utiliseddebits", 0) or 0),
-        )
+        try:
+            return FundsSnapshot(
+                available_cash=float(data.get("availablecash", 0) or 0),
+                used_margin=float(data.get("utiliseddebits", 0) or 0),
+                available_margin=float(data.get("availablelimitmargin", 0) or 0),
+            )
+        except (TypeError, ValueError) as exc:
+            raise BrokerConnectionError(f"AngelOne get_funds: malformed funds field in response: {exc}") from exc

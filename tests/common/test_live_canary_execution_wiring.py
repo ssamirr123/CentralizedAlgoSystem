@@ -25,7 +25,7 @@ from trading.common.observability import AuditTrail, EVENT_LIVE_CANARY_AUTHORIZA
 from trading.common.order_intent import OrderIntent
 from trading.common.risk_manager import RiskContext, RiskManager
 from trading.common.strategy_assignment import StrategyAssignment
-from trading.common.trading_account import ExecutionMode, TradingAccount
+from trading.common.trading_account import AccountAuthorizationState, ExecutionMode, TradingAccount
 
 STRATEGY_ID = "DoubleStraddelAlgo"
 ACCOUNT_ID = "ANGEL_CANARY"
@@ -69,7 +69,15 @@ def _build_stack(*, limits: CanaryLimits | None = None, live: bool = True):
     broker = AngelOneBroker(config, smart_api_factory=lambda k: fake, instrument_resolver=lambda s: ("NFO", "99999"), read_only=False)
 
     broker_manager = BrokerManager(metrics_registry=metrics, audit_trail=audit_trail, alerts=alerts)
-    account = TradingAccount(account_id=ACCOUNT_ID, account_name="Angel (canary)", broker_id="angelone", execution_mode=ExecutionMode.LIVE_CANARY)
+    # Phase 15B.1: authorization_state=CANARY_READY grants exactly what
+    # LIVE_CANARY requires from the new AuthorizationState gate -- this
+    # module tests LiveCanaryGuard's own checks further down the pipeline,
+    # which requires actually reaching them (same precedent as Phase 14.6
+    # Blocker E's LIVE-ready RiskLimits requirement).
+    account = TradingAccount(
+        account_id=ACCOUNT_ID, account_name="Angel (canary)", broker_id="angelone",
+        execution_mode=ExecutionMode.LIVE_CANARY, authorization_state=AccountAuthorizationState.CANARY_READY,
+    )
     broker_manager.register_account(account, broker_client=broker)  # already "connected" (fake)
     broker.connect()
 

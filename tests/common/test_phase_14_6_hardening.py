@@ -23,10 +23,24 @@ from trading.common.observability import AuditTrail, MetricsRegistry
 from trading.common.order_intent import OrderIntent
 from trading.common.risk_manager import RiskLimits, RiskManager
 from trading.common.strategy_assignment import StrategyAssignment
-from trading.common.trading_account import ExecutionMode, TradingAccount
+from trading.common.trading_account import AccountAuthorizationState, ExecutionMode, TradingAccount
 
 STRATEGY_ID = "DoubleStraddelAlgo"
 SYMBOL = "NIFTY15SEP2623400CE"
+
+# Phase 15B.1: TradingAccount.authorization_state is now a hard gate inside
+# execute(), checked before RiskManager. Every test below exercises
+# LIVE/LIVE_CANARY execution and expects it to reach the gates further down
+# the pipeline (RiskManager, LiveCanaryGuard, kill switch, idempotency,
+# broker response validation) -- exactly what this module was written to
+# test -- so _stack() below grants exactly the authorization each mode
+# requires by default, the same way it already supplies a LIVE-ready
+# RiskLimits by default. This does not weaken the new gate: it configures
+# it, matching the Phase 14.6 Blocker E precedent for RiskLimits.
+_DEFAULT_AUTH_STATE_FOR_MODE = {
+    ExecutionMode.LIVE: AccountAuthorizationState.LIVE_AUTHORIZED,
+    ExecutionMode.LIVE_CANARY: AccountAuthorizationState.CANARY_READY,
+}
 
 
 class FakeSmartApi:
@@ -49,6 +63,7 @@ def _stack(
     *,
     account_id: str = "ANGEL_ACCT",
     execution_mode: ExecutionMode = ExecutionMode.LIVE,
+    authorization_state: AccountAuthorizationState | None = None,
     risk_limits: RiskLimits | None = None,
     canary_guard: LiveCanaryGuard | None = None,
     central_kill_switch: CentralKillSwitch | None = None,
@@ -66,7 +81,15 @@ def _stack(
     broker = AngelOneBroker(config, smart_api_factory=lambda k: fake, instrument_resolver=lambda s: ("NFO", "99999"), read_only=False)
 
     broker_manager = BrokerManager()
-    account = TradingAccount(account_id=account_id, account_name="Angel", broker_id="angelone", execution_mode=execution_mode)
+    resolved_auth_state = (
+        authorization_state
+        if authorization_state is not None
+        else _DEFAULT_AUTH_STATE_FOR_MODE.get(execution_mode, AccountAuthorizationState.READ_ONLY)
+    )
+    account = TradingAccount(
+        account_id=account_id, account_name="Angel", broker_id="angelone", execution_mode=execution_mode,
+        authorization_state=resolved_auth_state,
+    )
     broker_manager.register_account(account, broker_client=broker)
     broker.connect()
 

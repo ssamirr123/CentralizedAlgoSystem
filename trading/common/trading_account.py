@@ -27,11 +27,66 @@ from typing import Any
 from trading.common.broker import BrokerClient
 
 
+class AccountAuthorizationError(RuntimeError):
+    """Phase 15B.1 -- raised when a TradingAccount's authorization_state
+    does not permit a requested operation. Carries structured, non-secret
+    identifying fields (account_id, authorization_state, reason) rather
+    than requiring callers to parse a message string. Never includes, and
+    must never be constructed with, any credential value -- see this
+    module's own Security note.
+
+    Raised by trading.common.execution's AuthorizationState gate and
+    caught there (converted to a rejected ExecutionResult, never allowed to
+    propagate out of execute() as an unhandled exception) -- also available
+    for any other caller (e.g. a future admin API) that wants the same
+    structured, fail-closed authorization check."""
+
+    def __init__(self, account_id: str, authorization_state: str, reason: str) -> None:
+        self.account_id = account_id
+        self.authorization_state = authorization_state
+        self.reason = reason
+        super().__init__(f"account '{account_id}' (authorization_state={authorization_state}): {reason}")
+
+
 class ConnectionState(str, Enum):
     DISCONNECTED = "DISCONNECTED"
     CONNECTING = "CONNECTING"
     CONNECTED = "CONNECTED"
     ERROR = "ERROR"
+
+
+class AccountAuthorizationState(str, Enum):
+    """Phase 15B section 15 -- explicitly separates "this account exists"
+    from "this account is authorized for live trading". Independent of
+    ExecutionMode (which describes how an intent is *routed*) and of
+    `enabled` (administrative on/off): this is specifically about how much
+    trust has been granted to this account's credentials today.
+
+    DISABLED         -- account must not be used for anything, including reads.
+    READ_ONLY         -- the only state a brand-new account may safely start in;
+                         read/query operations only, no mutation of any kind.
+    CANARY_READY      -- has passed whatever manual review is required to be
+                         considered for LIVE_CANARY (see trading.common.live_canary);
+                         still requires LiveCanaryGuard's own authorize() to allow
+                         any specific order.
+    LIVE_AUTHORIZED   -- has passed the full human-authorization gate for
+                         unrestricted LIVE trading (see docs/phase-15-* reports).
+    KILLED            -- irreversible for this TradingAccount instance (mirrors
+                         LiveCanaryGuard.emergency_shutdown()'s own no-undo
+                         design) -- once set, no code path in this class can
+                         clear it; a fresh TradingAccount must be constructed.
+
+    NOTE (documented limitation, see docs/phase-15b-architecture-plan.md
+    Section 11): StrategyExecutionEngine.execute() does NOT yet consult this
+    field. It exists as a standalone, tested account-level state machine;
+    wiring it into the actual execution gate is explicitly deferred, not
+    silently skipped."""
+
+    DISABLED = "DISABLED"
+    READ_ONLY = "READ_ONLY"
+    CANARY_READY = "CANARY_READY"
+    LIVE_AUTHORIZED = "LIVE_AUTHORIZED"
+    KILLED = "KILLED"
 
 
 class ExecutionMode(str, Enum):
@@ -75,6 +130,18 @@ class TradingAccount:
     # from (e.g. "env:ANGELONE_*", "secretsmanager:angel-main") -- see the
     # module docstring's Security note. Never a credential value itself.
     credential_reference: str = ""
+    # Phase 15B additions -- all optional/defaulted so no existing
+    # TradingAccount(...) construction call anywhere in this codebase or
+    # its tests needs to change.
+    owner_id: str = ""  # who this account belongs to (e.g. "SAMIR", "WIFE") -- see TradingAccountRouter
+    display_name: str = ""
+    account_type: str = ""  # free-form label (e.g. "individual", "canary") -- informational only
+    # Independent of the adapter-level read_only flag each broker adapter
+    # already carries -- this is the account's OWN declared read-only
+    # status, consulted by create_broker_for_account() as the default for
+    # adapters that accept a read_only= constructor argument.
+    read_only: bool = True
+    authorization_state: AccountAuthorizationState = AccountAuthorizationState.READ_ONLY
     metadata: dict[str, Any] = field(default_factory=dict)
     # Populated by BrokerManager once connected. repr=False so this never
     # gets printed/logged incidentally (see module docstring).
@@ -85,11 +152,26 @@ class TradingAccount:
         # attribute assignment is enough to coerce a plain string into the
         # enum -- unlike OrderIntent's frozen __post_init__.
         self.execution_mode = ExecutionMode(self.execution_mode)
+        self.authorization_state = AccountAuthorizationState(self.authorization_state)
 
     def is_available(self) -> bool:
         """True only when the account is both administratively enabled AND
         actually holds a live, connected BrokerClient."""
         return self.enabled and self.connection_state == ConnectionState.CONNECTED
+
+    def is_live_authorized(self) -> bool:
+        """True only in the single most-trusted state. KILLED always wins
+        over anything else -- see set_killed()."""
+        return self.authorization_state == AccountAuthorizationState.LIVE_AUTHORIZED and self.enabled
+
+    def set_killed(self, reason: str = "") -> None:
+        """Irreversible in intent (mirrors LiveCanaryGuard.emergency_shutdown()'s
+        own design -- see AccountAuthorizationState's docstring): no
+        "un-kill" method exists anywhere on this class. Once called, every
+        future is_live_authorized() check on this instance returns False,
+        since KILLED is never equal to LIVE_AUTHORIZED."""
+        self.authorization_state = AccountAuthorizationState.KILLED
+        self.metadata["kill_reason"] = reason or self.metadata.get("kill_reason", "")
 
     def __repr__(self) -> str:
         return (

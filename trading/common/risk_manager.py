@@ -192,9 +192,19 @@ class RiskContext:
 
 
 class RiskManager:
-    def __init__(self, strategy_assignment: StrategyAssignment, limits: RiskLimits | None = None) -> None:
+    def __init__(
+        self,
+        strategy_assignment: StrategyAssignment,
+        limits: RiskLimits | None = None,
+        account_limits: dict[str, RiskLimits] | None = None,
+    ) -> None:
         self._strategy_assignment = strategy_assignment
         self._limits = limits or RiskLimits()
+        # Phase 15B section 12: optional per-account overrides. An
+        # account_id not present here simply falls back to self._limits --
+        # so a caller that never passes this argument sees zero behavior
+        # change from before this field existed.
+        self._account_limits: dict[str, RiskLimits] = dict(account_limits or {})
         self._lock = threading.Lock()
         self._seen_idempotency_keys: set[str] = set()
         # Phase 14.6: per-calendar-day order counter backing
@@ -202,12 +212,28 @@ class RiskManager:
         # never limits another's.
         self._orders_today: dict[tuple[str, date], int] = {}
 
-    def get_limits(self) -> RiskLimits:
+    def get_limits(self, account_id: str | None = None) -> RiskLimits:
         """Read-only accessor for the configured RiskLimits -- additive,
         for callers (e.g. Phase 11's control-center API) that need to
         display current thresholds without reaching into this class's
-        private state."""
+        private state. account_id is optional and defaults to the manager's
+        single default RiskLimits, preserving the exact pre-Phase-15B
+        zero-argument call shape."""
+        if account_id is not None:
+            return self._limits_for(account_id)
         return self._limits
+
+    def set_account_limits(self, account_id: str, limits: RiskLimits) -> None:
+        """Registers account-specific RiskLimits (Phase 15B section 12).
+        Overwrites any existing override for this account_id."""
+        self._account_limits[account_id] = limits
+
+    def _limits_for(self, account_id: str) -> RiskLimits:
+        """The RiskLimits that actually govern this account_id: its own
+        override if one was registered via set_account_limits(), otherwise
+        the manager's single default -- never a silently-unlimited default,
+        since self._limits itself always exists (see __init__)."""
+        return self._account_limits.get(account_id, self._limits)
 
     def validate(self, intent: OrderIntent, context: RiskContext | None = None) -> RiskCheckResult:
         context = context or RiskContext()
@@ -304,14 +330,14 @@ class RiskManager:
     def _check_max_order_quantity(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
         if intent.quantity <= 0:
             return RiskCheckOutcome("MAX_ORDER_QUANTITY", False, "quantity must be positive")
-        limit = self._limits.max_order_quantity
+        limit = self._limits_for(intent.account_id).max_order_quantity
         if limit is not None and intent.quantity > limit:
             return RiskCheckOutcome("MAX_ORDER_QUANTITY", False, f"quantity {intent.quantity} exceeds max_order_quantity {limit}")
         return RiskCheckOutcome("MAX_ORDER_QUANTITY", True)
 
     # -- 5: maximum position quantity ------------------------------------------------ #
     def _check_max_position_quantity(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
-        limit = self._limits.max_position_quantity
+        limit = self._limits_for(intent.account_id).max_position_quantity
         if limit is None:
             return RiskCheckOutcome("MAX_POSITION_QUANTITY", True)
         signed = intent.quantity if intent.side == OrderSide.BUY else -intent.quantity
@@ -325,7 +351,7 @@ class RiskManager:
 
     # -- 6: maximum strategy exposure -------------------------------------------------- #
     def _check_max_strategy_exposure(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
-        limit = self._limits.max_strategy_exposure
+        limit = self._limits_for(intent.account_id).max_strategy_exposure
         if limit is None:
             return RiskCheckOutcome("MAX_STRATEGY_EXPOSURE", True)
         order_value = self._order_value(intent, context)
@@ -339,7 +365,7 @@ class RiskManager:
 
     # -- 7: maximum account exposure --------------------------------------------------- #
     def _check_max_account_exposure(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
-        limit = self._limits.max_account_exposure
+        limit = self._limits_for(intent.account_id).max_account_exposure
         if limit is None:
             return RiskCheckOutcome("MAX_ACCOUNT_EXPOSURE", True)
         order_value = self._order_value(intent, context)
@@ -353,7 +379,7 @@ class RiskManager:
 
     # -- 8: maximum daily loss ------------------------------------------------------------ #
     def _check_max_daily_loss(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
-        limit = self._limits.max_daily_loss
+        limit = self._limits_for(intent.account_id).max_daily_loss
         if limit is None:
             return RiskCheckOutcome("MAX_DAILY_LOSS", True)
         if context.daily_pnl <= -abs(limit):
@@ -365,7 +391,7 @@ class RiskManager:
 
     # -- 9: maximum strategy loss ------------------------------------------------------------- #
     def _check_max_strategy_loss(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
-        limit = self._limits.max_strategy_loss
+        limit = self._limits_for(intent.account_id).max_strategy_loss
         if limit is None:
             return RiskCheckOutcome("MAX_STRATEGY_LOSS", True)
         if context.strategy_pnl <= -abs(limit):
@@ -408,7 +434,7 @@ class RiskManager:
 
     # -- 14: order value limit ----------------------------------------------------------------------- #
     def _check_order_value_limit(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
-        limit = self._limits.max_order_value
+        limit = self._limits_for(intent.account_id).max_order_value
         if limit is None:
             return RiskCheckOutcome("ORDER_VALUE_LIMIT", True)
         value = self._order_value(intent, context)
@@ -420,7 +446,7 @@ class RiskManager:
 
     # -- 15 (Phase 14.6): maximum number of orders per day ------------------------------------------------- #
     def _check_max_orders_per_day(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
-        limit = self._limits.max_orders_per_day
+        limit = self._limits_for(intent.account_id).max_orders_per_day
         if limit is None:
             return RiskCheckOutcome("MAX_ORDERS_PER_DAY", True)
         key = (intent.strategy_id, (context.now or datetime.now(timezone.utc)).date())

@@ -25,6 +25,7 @@ from trading.common.brokers.shadow_broker import ShadowBroker
 from trading.common.config import BrokerCredentials, TradingConfig
 from trading.common.execution import ExecutionConfig, StrategyExecutionEngine
 from trading.common.observability import (
+    EVENT_AUTHORIZATION_STATE_GATE,
     EVENT_BROKER_CONNECTED,
     EVENT_BROKER_ORDER_PLACED,
     EVENT_EXECUTION_RESULT,
@@ -113,8 +114,11 @@ def test_full_order_lifecycle_is_traceable_by_correlation_id():
 
     trace = audit_trail.trace(intent.correlation_id)
     event_types = [r.event_type for r in trace]
+    # Phase 15B.1: AUTHORIZATION_STATE_GATE is now the first event in every
+    # trace, emitted before RiskManager ever runs -- see execute()'s own
+    # docstring for the updated pipeline order.
     assert event_types == [
-        EVENT_ORDER_INTENT_CREATED, EVENT_RISK_DECISION, EVENT_EXECUTION_RESULT,
+        EVENT_AUTHORIZATION_STATE_GATE, EVENT_ORDER_INTENT_CREATED, EVENT_RISK_DECISION, EVENT_EXECUTION_RESULT,
         EVENT_BROKER_ORDER_PLACED, EVENT_FILL,
     ]
     # Every record in the trace carries the strategy_id too -- not just the
@@ -163,7 +167,9 @@ def test_risk_rejected_intent_stops_the_trace_after_risk_decision():
     trace = audit_trail.trace(intent.correlation_id)
     # ALERT_RISK_BREACH also carries this correlation_id -- the alert
     # itself is part of this order's own trace, not a separate stream.
-    assert [r.event_type for r in trace] == [EVENT_ORDER_INTENT_CREATED, EVENT_RISK_DECISION, "ALERT_RISK_BREACH"]
+    assert [r.event_type for r in trace] == [
+        EVENT_AUTHORIZATION_STATE_GATE, EVENT_ORDER_INTENT_CREATED, EVENT_RISK_DECISION, "ALERT_RISK_BREACH",
+    ]
 
     snap = metrics.snapshot()
     assert snap.counters[f"orders_rejected:{STRATEGY_ID}"] == 1
