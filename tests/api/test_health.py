@@ -6,7 +6,14 @@ from unittest.mock import patch
 
 from sqlalchemy.exc import OperationalError
 
-_KEYS = {"status", "service", "timestamp", "database"}
+# Phase 15D-DR (Area A): app_version/git_sha/deployment_id/environment were
+# added deliberately -- deployment identity in the same response, never a
+# statement about trading authorization (see trading/api/health.py's
+# module docstring and the separate GET /api/ready endpoint).
+_KEYS = {
+    "status", "service", "timestamp", "database", "app_version", "git_sha", "deployment_id", "environment",
+    "clock_drift",  # Phase 15D.8
+}
 
 
 def test_health_connected(client):
@@ -17,6 +24,7 @@ def test_health_connected(client):
     assert body["status"] == "ok"
     assert body["service"] == "centralized-algo-backend"
     assert body["database"] == "connected"
+    assert body["clock_drift"] == "not_checked"  # no reference clock configured by default
     datetime.fromisoformat(body["timestamp"].replace("Z", "+00:00"))  # parses
 
 

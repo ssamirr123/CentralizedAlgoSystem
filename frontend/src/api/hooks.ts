@@ -229,3 +229,109 @@ export const useUpdateMarketSession = () => {
     },
   });
 };
+
+// --- Trading Control Center execution framework (Phase 11/12) --------
+export const useExecutionStrategies = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-strategies"], queryFn: api.listExecutionStrategies, refetchInterval: poll });
+};
+
+export const useExecutionStrategy = (strategyId: string | null) =>
+  useQuery({
+    queryKey: ["exec-strategy", strategyId],
+    queryFn: () => api.getExecutionStrategy(strategyId as string),
+    enabled: !!strategyId,
+  });
+
+export const useStartExecutionStrategy = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (strategyId: string) => api.startExecutionStrategy(strategyId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["exec-strategies"] });
+      qc.invalidateQueries({ queryKey: ["exec-system-status"] });
+    },
+  });
+};
+
+export const useStopExecutionStrategy = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (strategyId: string) => api.stopExecutionStrategy(strategyId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["exec-strategies"] });
+      qc.invalidateQueries({ queryKey: ["exec-system-status"] });
+    },
+  });
+};
+
+export const useExecutionAccounts = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-accounts"], queryFn: api.listExecutionAccounts, refetchInterval: poll });
+};
+
+export const useExecutionBrokers = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-brokers"], queryFn: api.listExecutionBrokers, refetchInterval: poll });
+};
+
+export const useExecutionAssignments = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-assignments"], queryFn: api.listExecutionAssignments, refetchInterval: poll });
+};
+
+export const useCreateExecutionAssignment = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: import("./types").ExecutionAssignmentCreate) => api.createExecutionAssignment(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["exec-assignments"] });
+      qc.invalidateQueries({ queryKey: ["exec-system-status"] });
+    },
+  });
+};
+
+export const useExecutionModes = () =>
+  useQuery({ queryKey: ["exec-modes"], queryFn: api.listExecutionModes, staleTime: Infinity });
+
+export const useRiskStatus = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-risk-status"], queryFn: api.getRiskStatus, refetchInterval: poll });
+};
+
+export const useRiskLimits = () =>
+  useQuery({ queryKey: ["exec-risk-limits"], queryFn: api.getRiskLimits });
+
+export const useSetKillSwitch = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { engaged: boolean; reason?: string }) => api.setKillSwitch(v.engaged, v.reason),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["exec-risk-status"] });
+      qc.invalidateQueries({ queryKey: ["exec-system-status"] });
+    },
+  });
+};
+
+export const useExecutionOrders = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-orders"], queryFn: api.listExecutionOrders, refetchInterval: poll });
+};
+
+export const useExecutionPositions = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-positions"], queryFn: api.listExecutionPositions, refetchInterval: poll });
+};
+
+export const useExecutionPnl = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-pnl"], queryFn: api.getExecutionPnl, refetchInterval: poll });
+};
+
+export const useExecutionSystemStatus = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["exec-system-status"], queryFn: api.getExecutionSystemStatus, refetchInterval: poll });
+};
+
+export const useExecutionAuditLog = (q: { actor?: string; action?: string; outcome?: string; limit?: number } = {}) =>
+  useQuery({ queryKey: ["exec-audit", q], queryFn: () => api.getAudit(q) });

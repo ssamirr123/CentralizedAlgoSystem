@@ -1,0 +1,213 @@
+"""
+TradingAccount -- a specific brokerage account, not merely "a broker".
+
+Two accounts can share the same broker_id (e.g. ANGEL_MAIN and ANGEL_BACKUP
+both broker_id="angelone") yet be entirely separate logins/capital/sessions.
+Strategies are assigned to an account_id (see strategy_assignment.py),
+never to a broker directly -- that's what makes "Algo1 -> Dhan, Algo2 ->
+Shoonya" (and later, swapped) a config change instead of a code change.
+
+Security: this object never stores or exposes secrets (passwords, MPIN,
+TOTP seed, API secret, access/refresh tokens). Credential resolution stays
+wherever it already lives today (env vars / TradingConfig.credentials);
+this class only carries the non-secret identity/config needed to look up
+and hold a live BrokerClient for one account. `credential_reference` below
+is a NON-secret pointer to where credentials live (e.g. "env:ANGELONE_*"
+or a secrets-manager ARN/name) -- it must never itself be, or contain, a
+secret value. broker_client is excluded from repr() so printing/logging a
+TradingAccount can never leak whatever a real adapter's session object
+might otherwise expose.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+from trading.common.broker import BrokerClient
+
+
+class AccountAuthorizationError(RuntimeError):
+    """Phase 15B.1 -- raised when a TradingAccount's authorization_state
+    does not permit a requested operation. Carries structured, non-secret
+    identifying fields (account_id, authorization_state, reason) rather
+    than requiring callers to parse a message string. Never includes, and
+    must never be constructed with, any credential value -- see this
+    module's own Security note.
+
+    Raised by trading.common.execution's AuthorizationState gate and
+    caught there (converted to a rejected ExecutionResult, never allowed to
+    propagate out of execute() as an unhandled exception) -- also available
+    for any other caller (e.g. a future admin API) that wants the same
+    structured, fail-closed authorization check."""
+
+    def __init__(self, account_id: str, authorization_state: str, reason: str) -> None:
+        self.account_id = account_id
+        self.authorization_state = authorization_state
+        self.reason = reason
+        super().__init__(f"account '{account_id}' (authorization_state={authorization_state}): {reason}")
+
+
+class ConnectionState(str, Enum):
+    DISCONNECTED = "DISCONNECTED"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    ERROR = "ERROR"
+
+
+class AccountAuthorizationState(str, Enum):
+    """Phase 15B section 15 -- explicitly separates "this account exists"
+    from "this account is authorized for live trading". Independent of
+    ExecutionMode (which describes how an intent is *routed*) and of
+    `enabled` (administrative on/off): this is specifically about how much
+    trust has been granted to this account's credentials today.
+
+    DISABLED         -- account must not be used for anything, including reads.
+    READ_ONLY         -- the only state a brand-new account may safely start in;
+                         read/query operations only, no mutation of any kind.
+    CANARY_READY      -- has passed whatever manual review is required to be
+                         considered for LIVE_CANARY (see trading.common.live_canary);
+                         still requires LiveCanaryGuard's own authorize() to allow
+                         any specific order.
+    LIVE_AUTHORIZED   -- has passed the full human-authorization gate for
+                         unrestricted LIVE trading (see docs/phase-15-* reports).
+    KILLED            -- irreversible for this TradingAccount instance (mirrors
+                         LiveCanaryGuard.emergency_shutdown()'s own no-undo
+                         design) -- once set, no code path in this class can
+                         clear it; a fresh TradingAccount must be constructed.
+
+    NOTE (documented limitation, see docs/phase-15b-architecture-plan.md
+    Section 11): StrategyExecutionEngine.execute() does NOT yet consult this
+    field. It exists as a standalone, tested account-level state machine;
+    wiring it into the actual execution gate is explicitly deferred, not
+    silently skipped."""
+
+    DISABLED = "DISABLED"
+    READ_ONLY = "READ_ONLY"
+    CANARY_READY = "CANARY_READY"
+    LIVE_AUTHORIZED = "LIVE_AUTHORIZED"
+    KILLED = "KILLED"
+
+
+class ExecutionMode(str, Enum):
+    """Per-account execution mode -- deliberately independent of the
+    process-wide TRADING_MODE env var, since a single process can hold
+    more than one TradingAccount with different modes (e.g. one PAPER
+    account and one SHADOW account at once).
+
+    LIVE_CANARY (Phase 14) is a DISTINCT mode from LIVE -- real orders
+    reach a real broker in both, but LIVE_CANARY additionally requires
+    every intent to pass trading.common.live_canary.LiveCanaryGuard's
+    authorization (dedicated account, tiny quantity/value caps, daily
+    order cap, mandatory idempotency, kill switch, ...) between
+    RiskManager and StrategyExecutionEngine. Introducing it as its own
+    enum member -- rather than overloading LIVE with a "canary" flag
+    elsewhere -- means every existing execution_mode == LIVE check
+    (ConnectedShadowBroker's fail-closed construction guard, the
+    frontend's LIVE_EXECUTION_ENABLED gate, etc.) does NOT accidentally
+    treat a canary account as unrestricted LIVE, and vice versa."""
+
+    LIVE = "LIVE"
+    LIVE_CANARY = "LIVE_CANARY"
+    PAPER = "PAPER"
+    SHADOW = "SHADOW"
+
+
+@dataclass
+class TradingAccount:
+    account_id: str
+    account_name: str
+    broker_id: str
+    enabled: bool = True
+    connection_state: ConnectionState = ConnectionState.DISCONNECTED
+    # Free-form deployment/environment label (e.g. "production", "staging",
+    # "dev") -- informational, not a safety gate. The actual safety gates
+    # remain TradingConfig.is_live and, for AngelOneBroker specifically,
+    # its own read_only flag -- this field never substitutes for either.
+    environment: str = "production"
+    execution_mode: ExecutionMode = ExecutionMode.PAPER
+    # Non-secret pointer to where this account's credentials are resolved
+    # from (e.g. "env:ANGELONE_*", "secretsmanager:angel-main") -- see the
+    # module docstring's Security note. Never a credential value itself.
+    credential_reference: str = ""
+    # Phase 15B additions -- all optional/defaulted so no existing
+    # TradingAccount(...) construction call anywhere in this codebase or
+    # its tests needs to change.
+    owner_id: str = ""  # who this account belongs to (e.g. "SAMIR", "WIFE") -- see TradingAccountRouter
+    display_name: str = ""
+    account_type: str = ""  # free-form label (e.g. "individual", "canary") -- informational only
+    # Independent of the adapter-level read_only flag each broker adapter
+    # already carries -- this is the account's OWN declared read-only
+    # status, consulted by create_broker_for_account() as the default for
+    # adapters that accept a read_only= constructor argument.
+    read_only: bool = True
+    authorization_state: AccountAuthorizationState = AccountAuthorizationState.READ_ONLY
+    metadata: dict[str, Any] = field(default_factory=dict)
+    # Populated by BrokerManager once connected. repr=False so this never
+    # gets printed/logged incidentally (see module docstring).
+    broker_client: BrokerClient | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        # TradingAccount is a plain (non-frozen) dataclass, so a normal
+        # attribute assignment is enough to coerce a plain string into the
+        # enum -- unlike OrderIntent's frozen __post_init__.
+        self.execution_mode = ExecutionMode(self.execution_mode)
+        self.authorization_state = AccountAuthorizationState(self.authorization_state)
+
+    def is_available(self) -> bool:
+        """True only when the account is both administratively enabled AND
+        actually holds a live, connected BrokerClient."""
+        return self.enabled and self.connection_state == ConnectionState.CONNECTED
+
+    def is_live_authorized(self) -> bool:
+        """True only in the single most-trusted state. KILLED always wins
+        over anything else -- see set_killed()."""
+        return self.authorization_state == AccountAuthorizationState.LIVE_AUTHORIZED and self.enabled
+
+    def set_killed(self, reason: str = "") -> None:
+        """Irreversible in intent (mirrors LiveCanaryGuard.emergency_shutdown()'s
+        own design -- see AccountAuthorizationState's docstring): no
+        "un-kill" method exists anywhere on this class. Once called, every
+        future is_live_authorized() check on this instance returns False,
+        since KILLED is never equal to LIVE_AUTHORIZED."""
+        self.authorization_state = AccountAuthorizationState.KILLED
+        self.metadata["kill_reason"] = reason or self.metadata.get("kill_reason", "")
+
+    def set_authorization_state(self, new_state: AccountAuthorizationState, *, reason: str = "") -> AccountAuthorizationState:
+        """Phase 15D-AUDIT (Area K): the one supported way to change
+        authorization_state after construction (besides the irreversible
+        set_killed() above), so a caller has a single place to hang an
+        audit record on -- see
+        trading.common.audit_store.record_authorization_transition(),
+        which takes the value this method returns as `previous_state`.
+
+        This method has NO audit dependency itself (TradingAccount stays
+        free of any observability import, per this module's own layering)
+        and it NEVER grants authorization on its own merit -- it only
+        performs the transition a caller has already decided on and
+        decided is a permitted transition; enforcing which transitions are
+        allowed belongs to that caller (e.g. an admin workflow), same as
+        before this method existed (direct attribute assignment).
+
+        Refuses to leave KILLED -- irreversible, matching set_killed()'s
+        own contract exactly. Returns the state that was in effect BEFORE
+        this call, so `record_authorization_transition(trail, account,
+        previous_state=old, ...)` never has to re-derive it after the fact.
+        """
+        if self.authorization_state == AccountAuthorizationState.KILLED:
+            raise AccountAuthorizationError(
+                self.account_id, self.authorization_state.value,
+                "KILLED is irreversible; no code path may transition out of it",
+            )
+        previous = self.authorization_state
+        self.authorization_state = AccountAuthorizationState(new_state)
+        if reason:
+            self.metadata["authorization_reason"] = reason
+        return previous
+
+    def __repr__(self) -> str:
+        return (
+            f"TradingAccount(account_id={self.account_id!r}, broker_id={self.broker_id!r}, "
+            f"enabled={self.enabled}, connection_state={self.connection_state.value}, "
+            f"execution_mode={self.execution_mode.value})"
+        )

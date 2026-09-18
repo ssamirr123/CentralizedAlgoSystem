@@ -8,9 +8,28 @@ def _angel_creds() -> dict:
     """AngelOne credentials from the environment (Stage 20). Falls back to a
     git-ignored trading/.env at the repo root so a strategy box that does not
     inject them via systemd still works. Real values live there or in AWS
-    Secrets Manager -> env -- NEVER in this tracked file."""
+    Secrets Manager -> env -- NEVER in this tracked file.
+
+    Phase 15D.3-R fix: only the specific Angel One credential keys this
+    function actually consumes (_REQUIRED_ENV_KEYS below) are ever read from
+    trading/.env and set into os.environ (via setdefault, so an explicit
+    caller-supplied value is never overwritten). Previously this loop set
+    EVERY key found in the file into process-global os.environ, which
+    silently leaked unrelated configuration (CANARY_*, ANGELONE_A_*,
+    ANGELONE_B_*, ...) into any process that happened to import this module
+    -- see tests/algos/test_doublestraddel_execution_bridge.py's own
+    "CREDENTIAL-LEAK GUARD" docstring for the specific incident this caused
+    and docs/phase-15d-3-post-canary-verification-report.md for the full
+    diagnosis. This loader is responsible for its own isolation: a future
+    key added to trading/.env for an unrelated purpose must never become a
+    process-global environment variable just because this function ran."""
     import os
     from pathlib import Path as _P
+
+    _REQUIRED_ENV_KEYS = (
+        "ANGELONE_CLIENT_ID", "ANGELONE_API_KEY", "ANGELONE_MPIN",
+        "ANGELONE_PASSWORD", "ANGELONE_TOTP_SECRET",
+    )
 
     _envf = _P(__file__).resolve().parents[3] / "trading" / ".env"
     if _envf.is_file():
@@ -18,7 +37,9 @@ def _angel_creds() -> dict:
             _raw = _raw.strip()
             if _raw and not _raw.startswith("#") and "=" in _raw:
                 _k, _, _v = _raw.partition("=")
-                os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+                _k = _k.strip()
+                if _k in _REQUIRED_ENV_KEYS:
+                    os.environ.setdefault(_k, _v.strip().strip("'\""))
 
     def _g(*names):
         for _n in names:

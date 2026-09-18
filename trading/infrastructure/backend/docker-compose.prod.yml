@@ -44,3 +44,13 @@ services:
     # PermissionError. Give it a writable, throwaway /app/logs.
     tmpfs:
       - /app/logs
+    # Phase 15D.10-R: the safety-critical SQLite stores (kill switch,
+    # audit, and any future idempotency/reconciliation/live-authorization
+    # store) must survive container recreation, not just a plain restart
+    # -- the backend service previously had NO persistent volume at all
+    # (unlike postgres, which already bind-mounts its data dir below).
+    # KILL_SWITCH_PERSISTENCE_PATH/AUDIT_DB_PATH (set in
+    # /etc/centralized-algo/backend.env) must point somewhere under
+    # /app/data for this mount to actually protect them.
+    volumes:
+      - /var/lib/centralized-algo/safety-data:/app/data

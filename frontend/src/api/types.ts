@@ -345,3 +345,119 @@ export interface MarketHealth {
   };
   last_error: string | null;
 }
+
+// --- Trading Control Center execution framework (Phase 11/12) --------
+// Mirrors trading/api/execution_routes.py's Pydantic response models --
+// the new, broker-agnostic execution-framework API (Phases 1-10), kept
+// deliberately distinct from the legacy AlgoListEntry/PositionEntry/etc.
+// telemetry types above (see docs/phase-12-react-control-center-report.md
+// for why these are separate types/pages rather than merged into them).
+export type StrategyStatusValue = "enabled" | "disabled" | "starting" | "running" | "stopped" | "error" | "shadow";
+export type ExecutionModeValue = "LIVE" | "LIVE_CANARY" | "PAPER" | "SHADOW";
+
+export interface ExecutionStrategy {
+  strategy_id: string;
+  status: StrategyStatusValue;
+  execution_mode: ExecutionModeValue;
+  intents_generated: number;
+  error_count: number;
+  last_error: string;
+  started_at: string;
+  stopped_at: string;
+  last_intent_at: string;
+}
+
+export interface ExecutionAccount {
+  account_id: string;
+  account_name: string;
+  broker_id: string;
+  enabled: boolean;
+  connection_state: "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "ERROR";
+  environment: string;
+  execution_mode: ExecutionModeValue;
+}
+
+export interface ExecutionBroker {
+  broker_id: string;
+  available: boolean;
+  reason: string;
+  account_count: number;
+}
+
+export interface ExecutionAssignment {
+  strategy_id: string;
+  account_id: string;
+  execution_mode: ExecutionModeValue;
+  risk_profile: string;
+  enabled: boolean;
+}
+
+export interface ExecutionAssignmentCreate {
+  strategy_id: string;
+  account_id: string;
+  execution_mode?: ExecutionModeValue | null;
+  risk_profile?: string;
+  enabled?: boolean;
+}
+
+export interface ExecutionModeOption {
+  value: ExecutionModeValue;
+}
+
+export interface RiskLimits {
+  max_order_quantity: number | null;
+  max_position_quantity: number | null;
+  max_strategy_exposure: number | null;
+  max_account_exposure: number | null;
+  max_daily_loss: number | null;
+  max_strategy_loss: number | null;
+  max_order_value: number | null;
+}
+
+export interface KillSwitchState {
+  engaged: boolean;
+  engaged_by: string;
+  reason: string;
+  engaged_at: string;
+  disengaged_at: string;
+}
+
+export interface RiskStatus {
+  kill_switch: KillSwitchState;
+  limits: RiskLimits;
+  assigned_strategy_count: number;
+}
+
+export interface ExecutionOrder {
+  order_id: string;
+  strategy_id: string;
+  account_id: string;
+  symbol: string;
+  side: string;
+  quantity: number;
+  status: string;
+}
+
+export interface ExecutionPosition {
+  strategy_id: string;
+  account_id: string;
+  symbol: string;
+  quantity: number;
+  average_price: number;
+  last_price: number;
+  pnl: number;
+}
+
+export interface ExecutionPnl {
+  total_realized: number;
+  total_unrealized: number;
+  per_strategy: Record<string, number>;
+}
+
+export interface ExecutionSystemStatus {
+  kill_switch_engaged: boolean;
+  strategy_counts_by_status: Record<string, number>;
+  account_count: number;
+  broker_availability: Record<string, boolean>;
+  assigned_strategy_count: number;
+}

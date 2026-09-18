@@ -3,6 +3,18 @@ import pandas as pd
 import pandas_ta as ta
 import config,make_data,token_file,time,threading,manager
 
+# Phase 15D.9 (Blocker 1 remediation): the ONE control-center kill switch
+# now reaches this legacy, pre-Phase-15D order path too -- see
+# trading/common/legacy_execution_guard.py's own docstring for exactly
+# what this does and does not close. Note: unlike the other two legacy
+# algos, this file has no DRY_RUN gate of its own at all -- that
+# pre-existing gap is documented separately (not fixed here, to avoid
+# introducing a new, untested behavior change beyond this phase's scope
+# -- see docs/phase-15d-9-final-readiness-report.md).
+from trading.common.legacy_execution_guard import assert_live_mutation_allowed
+
+_STRATEGY_ID = "Vwap_Algo_Nifty_hedge"
+
 def _retry_call(fn, retries=5, base_delay=2, label=''):
     """
     Call fn() up to `retries` times with exponential back-off.
@@ -113,6 +125,7 @@ def place_market_order(symbol,token,qty,ordertype):
     }
 
     def _call():
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         order_id = config.objconn.placeOrder(orderparams)
         if order_id is None:
             raise ValueError('Market order response missing order id')
@@ -139,6 +152,7 @@ def place_stoploss_order(symbol,token,qty,stoploss):
     }
 
     def _call():
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         order_id = config.objconn.placeOrder(orderparams)
         if order_id is None:
             raise ValueError('Stoploss order response missing order id')
