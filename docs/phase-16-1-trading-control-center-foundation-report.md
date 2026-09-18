@@ -102,7 +102,7 @@ No production source file (`.py` or `.tsx` outside of `*.test.tsx`) was modified
 
 ## 9. Commit SHA
 
-`[[COMMIT_SHA]]` on branch `web-base-algo-trading-control` — see Section 11 (deployment status) for why this commit is not yet pushed or deployed.
+`f97fc1c87fe403087b22b31de9785d4e3ed8d803` on branch `web-base-algo-trading-control` — see Section 11 (deployment status) for why this commit is not yet pushed or deployed.
 
 ## 10. Deployment status
 
