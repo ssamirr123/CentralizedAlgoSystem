@@ -135,6 +135,14 @@ def _check_authorization_state(account: TradingAccount, mode: ExecutionMode) -> 
             f"{mode.value} execution requires authorization_state in {{{allowed}}}",
         )
 
+
+# Phase 16.2: public alias so a read-only diagnostic (e.g.
+# trading.common.assignment_readiness) can reuse this exact gate to REPORT
+# whether an assignment would currently pass it, without duplicating
+# _REQUIRED_AUTHORIZATION_STATES or changing this function's behavior in
+# any way -- execute() itself still calls the private name below unchanged.
+check_authorization_state_for_mode = _check_authorization_state
+
 # Statuses that mean "nothing left to manage" across brokers. Adapters may
 # use their own vocabulary beyond this (e.g. "TRIGGER PENDING" is NOT
 # terminal) — anything not in this set is treated as still-open.

@@ -14,6 +14,7 @@ Phase 13 adds the /api/observability/* routes at the bottom of this file.
 
     GET    /api/assignments
     GET    /api/assignments/{strategy_id}
+    GET    /api/assignments/{strategy_id}/readiness
     POST   /api/assignments
 
     GET    /api/execution-modes
@@ -87,7 +88,9 @@ from trading.api.deps import Principal, client_ip, enforce_rate_limit, get_db, g
 from trading.api.execution_state import ExecutionState
 from trading.api.security import audit
 from trading.api.security.permissions import Permission
+from trading.common.assignment_readiness import AssignmentReadiness, check_assignment_readiness
 from trading.common.broker_manager import BrokerUnavailableError, UnknownAccountError
+from trading.common.broker_types import BrokerCapabilities
 from trading.common.strategy import InvalidStrategyStateError, StrategyMetrics
 from trading.common.strategy_assignment import Assignment, InvalidAssignmentError, UnknownAssignmentError
 from trading.common.strategy_registry import UnknownStrategyError
@@ -153,6 +156,7 @@ class AccountOut(BaseModel):
     connection_state: str
     environment: str
     execution_mode: str
+    authorization_state: str
 
     @classmethod
     def from_account(cls, account: TradingAccount) -> "AccountOut":
@@ -160,6 +164,7 @@ class AccountOut(BaseModel):
             account_id=account.account_id, account_name=account.account_name, broker_id=account.broker_id,
             enabled=account.enabled, connection_state=account.connection_state.value,
             environment=account.environment, execution_mode=account.execution_mode.value,
+            authorization_state=account.authorization_state.value,
         )
 
 
@@ -191,6 +196,55 @@ class AssignmentIn(BaseModel):
     execution_mode: str | None = None
     risk_profile: str = "default"
     enabled: bool = True
+    # Phase 16.2: POST /api/assignments creates a NEW assignment by default
+    # and now rejects (409) a strategy_id that is already assigned -- an
+    # operator must pass replace=true to knowingly reroute an existing
+    # assignment to a different account/mode, rather than silently
+    # overwriting one via a duplicate form submission. The underlying
+    # StrategyAssignment.assign() Python method is unchanged and remains
+    # overwrite-capable for internal/legacy callers that never go through
+    # this API (see trading/common/strategy_assignment.py).
+    replace: bool = False
+
+
+class AssignmentReadinessOut(BaseModel):
+    strategy_id: str
+    account_id: str
+    execution_mode: str
+    strategy_status: str
+    assignment_enabled: bool
+    assignment_valid: bool
+    authorization_ok: bool
+    authorization_detail: str
+    kill_switch_engaged: bool
+    broker_capabilities: dict[str, Any] | None
+    order_execution_allowed: bool
+    blocking_reasons: list[str]
+
+    @classmethod
+    def from_readiness(cls, r: AssignmentReadiness) -> "AssignmentReadinessOut":
+        caps: BrokerCapabilities | None = r.broker_capabilities
+        return cls(
+            strategy_id=r.strategy_id, account_id=r.account_id, execution_mode=r.execution_mode,
+            strategy_status=r.strategy_status, assignment_enabled=r.assignment_enabled,
+            assignment_valid=r.assignment_valid, authorization_ok=r.authorization_ok,
+            authorization_detail=r.authorization_detail, kill_switch_engaged=r.kill_switch_engaged,
+            broker_capabilities=(
+                None if caps is None else {
+                    "broker_type": caps.broker_type.value,
+                    "requires_static_ip": caps.requires_static_ip,
+                    "supports_websocket": caps.supports_websocket,
+                    "supports_orders": caps.supports_orders,
+                    "supports_positions": caps.supports_positions,
+                    "supports_funds": caps.supports_funds,
+                    "supports_options": caps.supports_options,
+                    "supports_market_data": caps.supports_market_data,
+                    "supports_live_orders": caps.supports_live_orders,
+                }
+            ),
+            order_execution_allowed=r.order_execution_allowed,
+            blocking_reasons=list(r.blocking_reasons),
+        )
 
 
 class ExecutionModeOut(BaseModel):
@@ -364,6 +418,26 @@ def get_assignment(strategy_id: str, state: ExecutionState = Depends(_state), _p
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No assignment for strategy: {strategy_id!r}") from None
 
 
+@router.get("/assignments/{strategy_id}/readiness", response_model=AssignmentReadinessOut)
+def get_assignment_readiness(
+    strategy_id: str, state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW),
+) -> AssignmentReadinessOut:
+    """Read-only: reports whether this strategy's assignment would currently
+    pass execute()'s own gates -- never calls a broker, never constructs an
+    execution engine, never consumes a human-issued live authorization. See
+    trading/common/assignment_readiness.py."""
+    try:
+        readiness = check_assignment_readiness(
+            strategy_registry=state.strategy_registry, strategy_assignment=state.strategy_assignment,
+            broker_manager=state.broker_manager, kill_switch=state.kill_switch, strategy_id=strategy_id,
+        )
+    except UnknownStrategyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {strategy_id!r}") from None
+    except UnknownAssignmentError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No assignment for strategy: {strategy_id!r}") from None
+    return AssignmentReadinessOut.from_readiness(readiness)
+
+
 @router.post("/assignments", response_model=AssignmentOut, status_code=status.HTTP_201_CREATED)
 def create_assignment(
     body: AssignmentIn, request: Request, db: Session = Depends(get_db),
@@ -371,6 +445,13 @@ def create_assignment(
 ) -> AssignmentOut:
     if not state.strategy_registry.is_registered(body.strategy_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {body.strategy_id!r}")
+    if not body.replace and state.strategy_assignment.has_assignment(body.strategy_id):
+        existing = state.strategy_assignment.get_account_id(body.strategy_id)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Strategy {body.strategy_id!r} is already assigned to account {existing!r}; "
+            "pass replace=true to reassign it.",
+        )
     try:
         execution_mode = ExecutionMode(body.execution_mode) if body.execution_mode else None
     except ValueError:

@@ -210,6 +210,80 @@ def test_assign_with_invalid_execution_mode_string_is_422(client, bearer):
 
 
 # --------------------------------------------------------------------------- #
+# ASSIGNMENTS -- duplicate guard (Phase 16.2)
+# --------------------------------------------------------------------------- #
+def test_create_duplicate_assignment_is_409(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    r = client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    assert r.status_code == 409
+    assert "already assigned" in r.json()["detail"]
+
+
+def test_create_assignment_with_replace_true_reassigns_without_error(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    r = client.post("/api/assignments", headers=op,
+                     json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN", "replace": True})
+    assert r.status_code == 201
+
+
+# --------------------------------------------------------------------------- #
+# ASSIGNMENTS -- readiness (Phase 16.2, read-only)
+# --------------------------------------------------------------------------- #
+def test_assignment_readiness_for_unassigned_strategy_is_404(client, viewer_auth):
+    r = client.get("/api/assignments/DoubleStraddelAlgo/readiness", headers=viewer_auth)
+    assert r.status_code == 404
+
+
+def test_assignment_readiness_for_unknown_strategy_is_404(client, viewer_auth):
+    r = client.get("/api/assignments/NoSuchStrategy/readiness", headers=viewer_auth)
+    assert r.status_code == 404
+
+
+def test_assignment_readiness_blocks_on_strategy_not_running(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    r = client.get("/api/assignments/DoubleStraddelAlgo/readiness", headers=op)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["order_execution_allowed"] is False
+    assert body["strategy_status"] == "disabled"
+    assert any("not running/shadow" in reason for reason in body["blocking_reasons"])
+
+
+def test_assignment_readiness_reports_true_once_healthy(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategies/DoubleStraddelAlgo/start", headers=op)
+    r = client.get("/api/assignments/DoubleStraddelAlgo/readiness", headers=op)
+    body = r.json()
+    assert body["order_execution_allowed"] is True
+    assert body["blocking_reasons"] == []
+    assert body["authorization_ok"] is True  # SHADOW mode -- default READ_ONLY is sufficient
+    assert body["broker_capabilities"]["broker_type"] == "ANGEL_ONE"
+
+
+def test_assignment_readiness_never_calls_a_broker_or_starts_a_strategy(client, bearer):
+    """Purely diagnostic: hitting readiness must not itself change strategy
+    status or account state (no side effects from a read)."""
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.get("/api/assignments/DoubleStraddelAlgo/readiness", headers=op)
+    strategy = client.get("/api/strategies/DoubleStraddelAlgo", headers=op).json()
+    assert strategy["status"] == "disabled"  # unchanged by the read-only readiness check
+
+
+# --------------------------------------------------------------------------- #
+# ACCOUNTS -- authorization_state exposure (Phase 16.2)
+# --------------------------------------------------------------------------- #
+def test_account_out_exposes_authorization_state(client, viewer_auth):
+    r = client.get("/api/accounts/ANGEL_MAIN", headers=viewer_auth)
+    assert r.status_code == 200
+    assert r.json()["authorization_state"] == "READ_ONLY"
+
+
+# --------------------------------------------------------------------------- #
 # EXECUTION MODES
 # --------------------------------------------------------------------------- #
 def test_execution_modes_lists_all_four(client, viewer_auth):
