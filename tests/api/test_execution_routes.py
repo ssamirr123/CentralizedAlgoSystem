@@ -363,6 +363,39 @@ def test_execution_routes_module_never_calls_get_broker():
     assert "place_order" not in source
 
 
+def test_execution_routes_module_never_touches_live_authorization():
+    """Phase 16.1 (Control Center foundation validation): this control-
+    center API layer must never create or consume a LiveAuthorization, and
+    must never construct a StrategyExecutionEngine -- both belong
+    exclusively to the separate, script-driven, human-authorized canary
+    path (trading/common/live_authorization*.py,
+    trading/preflight/live_canary.py), never to an HTTP route a browser
+    session could reach. Mirrors the existing
+    test_execution_routes_module_never_calls_get_broker's own structural
+    source-scan pattern."""
+    import trading.api.execution_routes as mod
+    import trading.api.execution_state as state_mod
+
+    for mod_under_test in (mod, state_mod):
+        source = open(mod_under_test.__file__, encoding="utf-8").read()
+        assert "LiveAuthorization" not in source
+        assert "try_consume(" not in source
+        assert "StrategyExecutionEngine(" not in source
+
+
+def test_execution_state_never_wires_a_live_authorization_store():
+    """Read-only structural check on the actual constructed ExecutionState
+    used by every route in this module -- not just its source text."""
+    from trading.api.execution_state import ExecutionState, build_execution_state
+
+    state = build_execution_state()
+    assert not hasattr(state, "live_authorization_store")
+    assert set(ExecutionState.__dataclass_fields__) == {
+        "broker_manager", "strategy_assignment", "risk_manager", "strategy_registry",
+        "kill_switch", "metrics", "audit_trail", "alerts",
+    }
+
+
 def test_full_regression_isolation_between_tests(client, bearer):
     """Each test gets a fresh app (per tests/conftest.py's `app` fixture),
     so state from a previous test (e.g. a started strategy) must not leak
