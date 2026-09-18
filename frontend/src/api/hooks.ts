@@ -291,6 +291,11 @@ export const useCreateExecutionAssignment = () => {
   });
 };
 
+export const useStrategyLifecycle = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["strategy-lifecycle"], queryFn: api.listStrategyLifecycle, refetchInterval: poll });
+};
+
 export const useExecutionModes = () =>
   useQuery({ queryKey: ["exec-modes"], queryFn: api.listExecutionModes, staleTime: Infinity });
 

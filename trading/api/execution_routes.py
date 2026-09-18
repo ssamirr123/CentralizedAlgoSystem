@@ -17,6 +17,9 @@ Phase 13 adds the /api/observability/* routes at the bottom of this file.
     GET    /api/assignments/{strategy_id}/readiness
     POST   /api/assignments
 
+    GET    /api/strategy-lifecycle
+    GET    /api/strategy-lifecycle/{strategy_id}
+
     GET    /api/execution-modes
 
     GET    /api/risk/status
@@ -93,6 +96,7 @@ from trading.common.broker_manager import BrokerUnavailableError, UnknownAccount
 from trading.common.broker_types import BrokerCapabilities
 from trading.common.strategy import InvalidStrategyStateError, StrategyMetrics
 from trading.common.strategy_assignment import Assignment, InvalidAssignmentError, UnknownAssignmentError
+from trading.common.strategy_lifecycle import StrategyLifecycleView, check_all_lifecycles, check_lifecycle
 from trading.common.strategy_registry import UnknownStrategyError
 from trading.common.trading_account import ExecutionMode, TradingAccount
 
@@ -244,6 +248,33 @@ class AssignmentReadinessOut(BaseModel):
             ),
             order_execution_allowed=r.order_execution_allowed,
             blocking_reasons=list(r.blocking_reasons),
+        )
+
+
+class StrategyLifecycleOut(BaseModel):
+    strategy_id: str
+    assignment_id: str | None
+    account_id: str | None
+    strategy_status: str
+    lifecycle_state: str
+    account_authorization_state: str | None
+    live_authorized: bool
+    execution_active: bool
+    last_transition_at: str
+    last_heartbeat_at: str
+    last_error: str
+    assignment_exists: bool
+    blocking_reasons: list[str]
+
+    @classmethod
+    def from_view(cls, v: StrategyLifecycleView) -> "StrategyLifecycleOut":
+        return cls(
+            strategy_id=v.strategy_id, assignment_id=v.assignment_id, account_id=v.account_id,
+            strategy_status=v.strategy_status, lifecycle_state=v.lifecycle_state.value,
+            account_authorization_state=v.account_authorization_state, live_authorized=v.live_authorized,
+            execution_active=v.execution_active, last_transition_at=v.last_transition_at,
+            last_heartbeat_at=v.last_heartbeat_at, last_error=v.last_error,
+            assignment_exists=v.assignment_exists, blocking_reasons=list(v.blocking_reasons),
         )
 
 
@@ -472,6 +503,40 @@ def create_assignment(
     _audit(db, request, principal, audit.ASSIGNMENT_SET, target=f"strategy:{body.strategy_id}",
            detail={"account_id": body.account_id, "risk_profile": body.risk_profile, "enabled": body.enabled})
     return AssignmentOut.from_assignment(state.strategy_assignment.get_assignment(body.strategy_id))
+
+
+# --------------------------------------------------------------------------- #
+# STRATEGY LIFECYCLE (Phase 16.3, read-only)
+#
+# LifecycleState is a projection, not a new persisted state machine: it is
+# derived on every read from the existing StrategyStatus (Phase 10) and
+# Phase 16.2's assignment readiness. Nothing here calls a broker, starts a
+# strategy, or consumes a human-issued live trading authorization -- see
+# trading/common/strategy_lifecycle.py's own module docstring.
+#
+#     STRATEGY LIFECYCLE STATE  !=  LIVE AUTHORIZATION  !=  ORDER EXECUTION
+# --------------------------------------------------------------------------- #
+@router.get("/strategy-lifecycle", response_model=list[StrategyLifecycleOut])
+def list_strategy_lifecycle(state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW)) -> list[StrategyLifecycleOut]:
+    views = check_all_lifecycles(
+        strategy_registry=state.strategy_registry, strategy_assignment=state.strategy_assignment,
+        broker_manager=state.broker_manager, kill_switch=state.kill_switch,
+    )
+    return [StrategyLifecycleOut.from_view(v) for v in views]
+
+
+@router.get("/strategy-lifecycle/{strategy_id}", response_model=StrategyLifecycleOut)
+def get_strategy_lifecycle(
+    strategy_id: str, state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW),
+) -> StrategyLifecycleOut:
+    try:
+        view = check_lifecycle(
+            strategy_registry=state.strategy_registry, strategy_assignment=state.strategy_assignment,
+            broker_manager=state.broker_manager, kill_switch=state.kill_switch, strategy_id=strategy_id,
+        )
+    except UnknownStrategyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {strategy_id!r}") from None
+    return StrategyLifecycleOut.from_view(view)
 
 
 # --------------------------------------------------------------------------- #

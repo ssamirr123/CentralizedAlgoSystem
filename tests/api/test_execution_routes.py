@@ -284,6 +284,66 @@ def test_account_out_exposes_authorization_state(client, viewer_auth):
 
 
 # --------------------------------------------------------------------------- #
+# STRATEGY LIFECYCLE (Phase 16.3, read-only)
+# --------------------------------------------------------------------------- #
+def test_strategy_lifecycle_list_covers_all_strategies(client, viewer_auth):
+    r = client.get("/api/strategy-lifecycle", headers=viewer_auth)
+    assert r.status_code == 200
+    ids = {row["strategy_id"] for row in r.json()}
+    assert ids == STRATEGY_IDS
+    for row in r.json():
+        assert row["lifecycle_state"] == "STOPPED"
+        assert row["assignment_exists"] is False
+        assert row["live_authorized"] is False
+
+
+def test_strategy_lifecycle_detail_for_unknown_strategy_is_404(client, viewer_auth):
+    r = client.get("/api/strategy-lifecycle/NoSuchStrategy", headers=viewer_auth)
+    assert r.status_code == 404
+
+
+def test_strategy_lifecycle_detail_reflects_assignment_before_enable_is_stopped(client, bearer):
+    """The Control Center API has no standalone enable-only action --
+    POST /api/strategies/{id}/start enables AND starts in one call (Phase
+    11). A freshly-assigned-but-never-started strategy is therefore still
+    StrategyStatus.DISABLED, which is lifecycle STOPPED, not READY. READY
+    (StrategyStatus.ENABLED) is exercised directly at the Python level in
+    tests/common/test_strategy_lifecycle.py; it is a real, tested state
+    that is simply not independently reachable through this API today."""
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    r = client.get("/api/strategy-lifecycle/DoubleStraddelAlgo", headers=op)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["lifecycle_state"] == "STOPPED"
+    assert body["strategy_status"] == "disabled"
+    assert body["account_id"] == "ANGEL_MAIN"
+    assert body["assignment_id"] == "DoubleStraddelAlgo"
+    assert body["account_authorization_state"] == "READ_ONLY"
+    assert body["live_authorized"] is False
+
+
+def test_strategy_lifecycle_detail_reflects_running_after_start(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategies/DoubleStraddelAlgo/start", headers=op)
+    r = client.get("/api/strategy-lifecycle/DoubleStraddelAlgo", headers=op)
+    body = r.json()
+    assert body["lifecycle_state"] == "RUNNING"
+    assert body["execution_active"] is True
+
+
+def test_strategy_lifecycle_reading_never_starts_a_strategy_or_mutates_anything(client, viewer_auth, bearer):
+    op = bearer(role="operator")
+    client.get("/api/strategy-lifecycle", headers=viewer_auth)
+    client.get("/api/strategy-lifecycle/DoubleStraddelAlgo", headers=viewer_auth)
+    strategy = client.get("/api/strategies/DoubleStraddelAlgo", headers=op).json()
+    assignments = client.get("/api/assignments", headers=op).json()
+    assert strategy["status"] == "disabled"
+    assert assignments == []
+
+
+# --------------------------------------------------------------------------- #
 # EXECUTION MODES
 # --------------------------------------------------------------------------- #
 def test_execution_modes_lists_all_four(client, viewer_auth):

@@ -7,8 +7,8 @@ import * as hooks from "@/api/hooks";
 vi.mock("@/api/hooks");
 
 const ACCOUNTS = [
-  { account_id: "ACC_A", account_name: "Account A", broker_id: "angelone", enabled: true, connection_state: "DISCONNECTED" as const, environment: "production", execution_mode: "PAPER" as const },
-  { account_id: "ACC_B", account_name: "Account B", broker_id: "angelone", enabled: true, connection_state: "DISCONNECTED" as const, environment: "production", execution_mode: "PAPER" as const },
+  { account_id: "ACC_A", account_name: "Account A", broker_id: "angelone", enabled: true, connection_state: "DISCONNECTED" as const, environment: "production", execution_mode: "PAPER" as const, authorization_state: "READ_ONLY" as const },
+  { account_id: "ACC_B", account_name: "Account B", broker_id: "angelone", enabled: true, connection_state: "DISCONNECTED" as const, environment: "production", execution_mode: "PAPER" as const, authorization_state: "READ_ONLY" as const },
 ];
 
 describe("TccAccountsPage", () => {

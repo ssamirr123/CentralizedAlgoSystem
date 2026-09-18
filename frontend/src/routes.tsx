@@ -20,6 +20,7 @@ import { TccStrategiesPage } from "@/pages/TccStrategiesPage";
 import { TccAccountsPage } from "@/pages/TccAccountsPage";
 import { TccBrokersPage } from "@/pages/TccBrokersPage";
 import { TccAssignmentsPage } from "@/pages/TccAssignmentsPage";
+import { TccLifecyclePage } from "@/pages/TccLifecyclePage";
 import { TccOrdersPage } from "@/pages/TccOrdersPage";
 import { TccPositionsPage } from "@/pages/TccPositionsPage";
 import { TccPnlPage } from "@/pages/TccPnlPage";
@@ -60,6 +61,7 @@ export const NAV_ROUTES: NavRoute[] = [
   { path: "/execution/accounts", label: "Trading Accounts", element: TccAccountsPage, permission: "VIEW" },
   { path: "/execution/brokers", label: "Brokers", element: TccBrokersPage, permission: "VIEW" },
   { path: "/execution/assignments", label: "Strategy Assignments", element: TccAssignmentsPage, permission: "VIEW" },
+  { path: "/execution/lifecycle", label: "Strategy Lifecycle", element: TccLifecyclePage, permission: "VIEW" },
   { path: "/execution/orders", label: "Orders", element: TccOrdersPage, permission: "VIEW" },
   { path: "/execution/positions", label: "Execution Positions", element: TccPositionsPage, permission: "VIEW" },
   { path: "/execution/pnl", label: "Execution P&L", element: TccPnlPage, permission: "VIEW" },

@@ -375,6 +375,7 @@ export interface ExecutionAccount {
   connection_state: "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "ERROR";
   environment: string;
   execution_mode: ExecutionModeValue;
+  authorization_state: "DISABLED" | "READ_ONLY" | "CANARY_READY" | "LIVE_AUTHORIZED" | "KILLED";
 }
 
 export interface ExecutionBroker {
@@ -398,6 +399,28 @@ export interface ExecutionAssignmentCreate {
   execution_mode?: ExecutionModeValue | null;
   risk_profile?: string;
   enabled?: boolean;
+}
+
+// Phase 16.3: a read-only PROJECTION of lifecycle state, deliberately
+// separate from both StrategyStatusValue (the strategy's own Phase 10
+// status) and ExecutionAccount.authorization_state (Phase 15B) -- see
+// trading/common/strategy_lifecycle.py's own module docstring.
+export type LifecycleStateValue = "STOPPED" | "READY" | "RUNNING" | "PAUSED" | "ERROR";
+
+export interface StrategyLifecycle {
+  strategy_id: string;
+  assignment_id: string | null;
+  account_id: string | null;
+  strategy_status: StrategyStatusValue;
+  lifecycle_state: LifecycleStateValue;
+  account_authorization_state: ExecutionAccount["authorization_state"] | null;
+  live_authorized: boolean;
+  execution_active: boolean;
+  last_transition_at: string;
+  last_heartbeat_at: string;
+  last_error: string;
+  assignment_exists: boolean;
+  blocking_reasons: string[];
 }
 
 export interface ExecutionModeOption {

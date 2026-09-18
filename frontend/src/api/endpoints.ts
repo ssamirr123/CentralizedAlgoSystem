@@ -184,6 +184,12 @@ export const listExecutionAssignments = () =>
 export const createExecutionAssignment = (body: import("./types").ExecutionAssignmentCreate) =>
   apiRequest<import("./types").ExecutionAssignment>("/api/assignments", { method: "POST", body });
 
+export const listStrategyLifecycle = () =>
+  apiRequest<import("./types").StrategyLifecycle[]>("/api/strategy-lifecycle");
+
+export const getStrategyLifecycle = (strategyId: string) =>
+  apiRequest<import("./types").StrategyLifecycle>(`/api/strategy-lifecycle/${encodeURIComponent(strategyId)}`);
+
 export const listExecutionModes = () =>
   apiRequest<import("./types").ExecutionModeOption[]>("/api/execution-modes");
 
