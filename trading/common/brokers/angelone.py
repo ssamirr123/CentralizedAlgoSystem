@@ -415,6 +415,20 @@ class AngelOneBroker(BrokerClient):
         validate/compare resolution without reaching into a private method."""
         return self._instrument_resolver(symbol)
 
+    @staticmethod
+    def _row_side(row: dict) -> OrderSide | None:
+        """Phase 15D-RECON: Angel's own order-book/order-detail rows already
+        carry `transactiontype` ("BUY"/"SELL") -- this just extracts it into
+        the generic OrderSide enum so trading.common.reconciliation can
+        compare an order's ACTUAL side against what was expected, without
+        this adapter needing to expose anything beyond what orderBook()
+        already returns (no new broker API call)."""
+        raw = str(row.get("transactiontype", "")).strip().upper()
+        try:
+            return OrderSide(raw)
+        except ValueError:
+            return None
+
     def get_order_book(self) -> list[OrderState]:
         """Every order Angel currently has on file for this session,
         normalized. Not part of the BrokerClient ABC -- read-only, optional,
@@ -427,8 +441,11 @@ class AngelOneBroker(BrokerClient):
             filled = int(float(row.get("filledshares", 0) or 0))
             status = _ANGEL_STATUS_MAP.get(str(row.get("status", "")).strip().lower(), "OPEN")
             states.append(
-                OrderState(order_id=order_id, status=status, filled_quantity=filled,
-                           remaining_quantity=max(quantity - filled, 0))
+                OrderState(
+                    order_id=order_id, status=status, filled_quantity=filled,
+                    remaining_quantity=max(quantity - filled, 0),
+                    symbol=str(row.get("tradingsymbol", "")), side=self._row_side(row),
+                )
             )
         return states
 
@@ -448,6 +465,7 @@ class AngelOneBroker(BrokerClient):
         return OrderState(
             order_id=str(order_id), status=status, filled_quantity=filled,
             remaining_quantity=max(quantity - filled, 0),
+            symbol=str(row.get("tradingsymbol", "")), side=self._row_side(row),
         )
 
     def modify_order(self, order_id: str, quantity: int, limit_price: float) -> bool:

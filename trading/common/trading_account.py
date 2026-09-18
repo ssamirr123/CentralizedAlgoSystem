@@ -173,6 +173,38 @@ class TradingAccount:
         self.authorization_state = AccountAuthorizationState.KILLED
         self.metadata["kill_reason"] = reason or self.metadata.get("kill_reason", "")
 
+    def set_authorization_state(self, new_state: AccountAuthorizationState, *, reason: str = "") -> AccountAuthorizationState:
+        """Phase 15D-AUDIT (Area K): the one supported way to change
+        authorization_state after construction (besides the irreversible
+        set_killed() above), so a caller has a single place to hang an
+        audit record on -- see
+        trading.common.audit_store.record_authorization_transition(),
+        which takes the value this method returns as `previous_state`.
+
+        This method has NO audit dependency itself (TradingAccount stays
+        free of any observability import, per this module's own layering)
+        and it NEVER grants authorization on its own merit -- it only
+        performs the transition a caller has already decided on and
+        decided is a permitted transition; enforcing which transitions are
+        allowed belongs to that caller (e.g. an admin workflow), same as
+        before this method existed (direct attribute assignment).
+
+        Refuses to leave KILLED -- irreversible, matching set_killed()'s
+        own contract exactly. Returns the state that was in effect BEFORE
+        this call, so `record_authorization_transition(trail, account,
+        previous_state=old, ...)` never has to re-derive it after the fact.
+        """
+        if self.authorization_state == AccountAuthorizationState.KILLED:
+            raise AccountAuthorizationError(
+                self.account_id, self.authorization_state.value,
+                "KILLED is irreversible; no code path may transition out of it",
+            )
+        previous = self.authorization_state
+        self.authorization_state = AccountAuthorizationState(new_state)
+        if reason:
+            self.metadata["authorization_reason"] = reason
+        return previous
+
     def __repr__(self) -> str:
         return (
             f"TradingAccount(account_id={self.account_id!r}, broker_id={self.broker_id!r}, "

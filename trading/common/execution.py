@@ -32,7 +32,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from trading.common.broker import (
     BrokerClient,
@@ -45,8 +45,10 @@ from trading.common.alerts import AlertManager
 from trading.common.broker_manager import BrokerManager, UnknownAccountError
 from trading.common.broker_response_validation import validate_broker_response
 from trading.common.idempotency_store import (
+    STATUS_AMBIGUOUS,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_PENDING,
     STATUS_REJECTED,
     IdempotencyRecord,
     IdempotencyStore,
@@ -139,6 +141,53 @@ def _check_authorization_state(account: TradingAccount, mode: ExecutionMode) -> 
 TERMINAL_STATUSES = {"FILLED", "COMPLETE", "REJECTED", "CANCELLED"}
 
 
+class AmbiguousOrderStateError(RuntimeError):
+    """Phase 15D-DR (Area E/J): raised when a broker call made specifically
+    to SUBMIT an order raised an exception -- a network timeout, connection
+    reset, rate limit, or any other failure during the mutating call itself
+    -- rather than returning a definitive OrderResult. This is fundamentally
+    different from a confirmed REJECTED response: here, it is impossible to
+    tell whether the broker actually received and processed the request
+    before failing to answer. Never safe to blindly retry (a retry could
+    submit a second real order for what may already be a live one) --
+    `_retry()` re-raises this immediately instead of looping, and
+    `execute()` persists it as STATUS_AMBIGUOUS and returns a distinct,
+    non-retryable ExecutionResult requiring reconciliation before any
+    future action on this idempotency key."""
+
+
+class ConfirmedRejectionError(RuntimeError):
+    """Phase 15D.3-R: raised when the broker returned a definitive,
+    non-exceptional REJECTED OrderResult carrying NO order_id -- i.e. the
+    broker unambiguously told us the order was never created (e.g.
+    AngelOne's own place_order() returning status="REJECTED" after a
+    clean API-level rejection such as AG7002 "IP not registered", with no
+    exception raised and no order_id issued). This is deliberately
+    distinct from AmbiguousOrderStateError: there, the mutating call
+    itself raised and the outcome is genuinely unknown; here, the broker
+    answered normally and definitively said "no".
+
+    Still safe to retry with a new price/attempt while attempts remain
+    (Phase 15D-DR's own `test_confirmed_rejected_status_is_still_safely_
+    retried_with_new_price` is unaffected by this class -- see `_retry()`,
+    which retries on this exception exactly like any other and only
+    changes behavior once every attempt is exhausted). If EVERY attempt
+    ends in this same confirmed rejection, `_retry()` re-raises it instead
+    of returning a bare None, and `execute()` persists a terminal
+    STATUS_REJECTED idempotency outcome -- closing the gap where a
+    definitively-rejected order (no ambiguity at all) was previously left
+    at STATUS_PENDING forever, indistinguishable from a genuinely
+    unresolved attempt (see docs/phase-15d-2-live-canary-report.md's
+    Attempt 2 and docs/phase-15d-3-post-canary-verification-report.md).
+
+    A REJECTED OrderResult that DOES carry an order_id (an inconsistent,
+    suspicious broker response this codebase has never actually observed
+    but must not blindly trust) is deliberately NOT wrapped in this class
+    -- see place_limit()/place_market_emergency()'s own `_call()`, which
+    routes that case through AmbiguousOrderStateError instead, requiring
+    reconciliation rather than confidently declaring a rejection."""
+
+
 @dataclass(frozen=True)
 class OrderState:
     """Point-in-time status of a previously placed order. An adapter that
@@ -148,6 +197,18 @@ class OrderState:
     status: str
     filled_quantity: int
     remaining_quantity: int
+    # Phase 15D-RECON: optional, additive -- defaults keep every existing
+    # get_order()/get_order_book() implementation (shadow_broker, dhan,
+    # icici_breeze, connected_shadow_broker) unchanged; only an adapter
+    # that chooses to populate them (AngelOneBroker, see angelone.py) lets
+    # trading.common.reconciliation compare an order's ACTUAL symbol/side
+    # against what a strategy originally intended (Area E of that phase's
+    # brief) instead of only its status/quantity, which is all this
+    # dataclass carried before. Never used by the pending-order management
+    # logic in _manage_pending() below, which only reads status/filled_
+    # quantity/remaining_quantity exactly as it always has.
+    symbol: str = ""
+    side: OrderSide | None = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +324,7 @@ class StrategyExecutionEngine:
         central_kill_switch: CentralKillSwitch | None = None,
         idempotency_store: IdempotencyStore | None = None,
         observability_health: ObservabilityHealth | None = None,
+        live_authorization_store: Any | None = None,
     ) -> None:
         self._broker = broker
         self._config = config or ExecutionConfig()
@@ -309,6 +371,15 @@ class StrategyExecutionEngine:
         # exactly as before Phase 14.6). Passing one is what makes
         # Blocker D's restart-safe guarantee real for this engine instance.
         self._idempotency_store = idempotency_store
+        # Phase 15D.5: optional durable, single-use, exactly-scoped human
+        # authorization gate (trading.common.live_authorization). None
+        # means "no authorization gate attached" -- exactly today's
+        # behavior for every existing caller/test, unchanged. When
+        # attached, execute() requires intent.metadata["authorization_id"]
+        # to reference a still-AUTHORIZED LiveAuthorization whose scope
+        # exactly matches this intent, consumed atomically immediately
+        # before the broker call -- see execute()'s own comments.
+        self._live_authorization_store = live_authorization_store
         # Observability health is NEVER optional in the sense of "may be
         # absent" -- Blocker C requires that metrics/audit/alert failures
         # can never crash execute() regardless of whether the caller wired
@@ -316,6 +387,14 @@ class StrategyExecutionEngine:
         # aggregate health centrally); if none is given, a private one is
         # still always active.
         self._observability_health = observability_health or ObservabilityHealth()
+        # Phase 15D.3-R: set by _retry() when the LAST attempt of the most
+        # recent place_limit()/place_market_emergency() call ended in a
+        # confirmed (never ambiguous) broker rejection with every retry
+        # exhausted -- consulted only by execute(), immediately after its
+        # own call into one of those methods returns None. See _retry()'s
+        # own comment for why this is instance state rather than part of
+        # place_limit()/place_market_emergency()'s public return contract.
+        self._last_confirmed_rejection: ConfirmedRejectionError | None = None
 
     @property
     def observability_health(self) -> ObservabilityHealth:
@@ -344,6 +423,19 @@ class StrategyExecutionEngine:
 
     def _retry(self, fn: Callable[[int], object], label: str):
         cfg = self._config
+        # Phase 15D.3-R: `place_limit()`/`place_market_emergency()` are
+        # public APIs called directly by strategies too, not only via
+        # execute() -- their established contract on retries-exhausted is
+        # to return None (see test_exhausted_retries_returns_none), and
+        # this method must not change that for a direct caller. So a
+        # confirmed rejection on the LAST attempt is recorded on the
+        # engine instance (self._last_confirmed_rejection), NOT raised
+        # here -- only execute() consults that attribute (immediately
+        # after its own place_limit()/place_market_emergency() call
+        # returns None) to decide whether to persist STATUS_REJECTED.
+        # Cleared at the start of every _retry() call so stale state from
+        # an unrelated earlier call can never leak into this one.
+        self._last_confirmed_rejection = None
         for attempt in range(1, cfg.max_retries + 1):
             try:
                 self._throttle()
@@ -352,7 +444,20 @@ class StrategyExecutionEngine:
                     return result
             except LiveTradingDisabledError:
                 raise
+            except AmbiguousOrderStateError:
+                # Phase 15D-DR: never retry a mutating call whose prior
+                # attempt's outcome is unknown -- re-raise immediately,
+                # exhausting no further attempts, so the caller (place_limit/
+                # place_market_emergency/execute()) can surface this as a
+                # distinct, non-retryable state instead of silently looping
+                # into a possible second real order.
+                self._log(f"[EXEC AMBIGUOUS] {label} attempt {attempt}: broker call outcome unknown -- NOT retrying")
+                raise
+            except ConfirmedRejectionError as exc:
+                self._last_confirmed_rejection = exc
+                self._log(f"[EXEC RETRY] {label} attempt {attempt}/{cfg.max_retries} confirmed rejection: {exc}")
             except Exception as exc:
+                self._last_confirmed_rejection = None  # a different failure mode supersedes any prior rejection signal
                 self._log(f"[EXEC RETRY] {label} attempt {attempt}/{cfg.max_retries} error: {exc}")
             time.sleep(cfg.retry_delay_seconds)
         self._log(f"[EXEC FAILED] {label} - {cfg.max_retries} retries exhausted")
@@ -393,9 +498,26 @@ class StrategyExecutionEngine:
 
         def _call(attempt: int) -> OrderResult:
             price = self._limit_price(symbol, side, attempt, broker=active_broker)
-            result = active_broker.place_order(symbol, side, quantity, OrderType.LIMIT, price)
+            try:
+                result = active_broker.place_order(symbol, side, quantity, OrderType.LIMIT, price)
+            except Exception as exc:
+                # Phase 15D-DR: the mutating call itself raised -- we cannot
+                # tell whether the broker received/processed this request
+                # before failing to respond. Never treat this the same as a
+                # confirmed REJECTED (which is safe to retry at a new price).
+                raise AmbiguousOrderStateError(f"place_order raised during submission: {exc}") from exc
             if result.status == "REJECTED":
-                raise RuntimeError(result.message or "order rejected")
+                if result.order_id:
+                    # Phase 15D.3-R: a REJECTED status paired with a real
+                    # order_id is an inconsistent, suspicious response --
+                    # never confidently treat this as a safe, closed
+                    # rejection. Route it through the SAME ambiguous/
+                    # reconciliation-required path as an outright exception.
+                    raise AmbiguousOrderStateError(
+                        f"broker reported REJECTED but also returned order_id={result.order_id!r} -- "
+                        "inconsistent response, cannot safely confirm rejection"
+                    )
+                raise ConfirmedRejectionError(result.message or "order rejected")
             self._log(
                 f"[EXEC] LIMIT {side.value} {symbol} qty={quantity} price={price} "
                 f"id={result.order_id} status={result.status}"
@@ -435,9 +557,17 @@ class StrategyExecutionEngine:
             return result
 
         def _call(_attempt: int) -> OrderResult:
-            result = active_broker.place_order(symbol, side, quantity, OrderType.MARKET)
+            try:
+                result = active_broker.place_order(symbol, side, quantity, OrderType.MARKET)
+            except Exception as exc:
+                raise AmbiguousOrderStateError(f"place_order raised during submission: {exc}") from exc
             if result.status == "REJECTED":
-                raise RuntimeError(result.message or "order rejected")
+                if result.order_id:
+                    raise AmbiguousOrderStateError(
+                        f"broker reported REJECTED but also returned order_id={result.order_id!r} -- "
+                        "inconsistent response, cannot safely confirm rejection"
+                    )
+                raise ConfirmedRejectionError(result.message or "order rejected")
             self._log(f"[EXEC] MARKET(EMERGENCY) {side.value} {symbol} qty={quantity} id={result.order_id} status={result.status}")
             return result
 
@@ -521,6 +651,15 @@ class StrategyExecutionEngine:
             replay = self._check_idempotency_replay(intent)
             if replay is not None:
                 return replay
+            # NOTE: the atomic claim() against this key happens later, at
+            # step 5, immediately before the broker is actually called --
+            # not here. Claiming this early would poison the key for any
+            # intent that gets rejected by the AuthorizationState gate,
+            # RiskManager, or LiveCanaryGuard (none of which persist an
+            # idempotency outcome today, by design -- a rejected intent was
+            # never sent anywhere, so there's nothing to remember), making
+            # a legitimate later retry under the same key impossible to
+            # distinguish from "unresolved". See step 5 below.
 
         started = time.monotonic()
 
@@ -575,6 +714,18 @@ class StrategyExecutionEngine:
                     EVENT_ORDER_INTENT_CREATED, correlation_id=cid, strategy_id=sid,
                     symbol=intent.symbol, side=intent.side.value, quantity=intent.quantity,
                     order_type=intent.order_type.value, account_id=intent.account_id,
+                    idempotency_key=intent.idempotency_key,
+                    # Phase 15D-RECON: this event is the ONLY durable record
+                    # of "what was expected" that a later reconciliation
+                    # pass can reconstruct from (see
+                    # trading.common.reconciliation._reconstruct_expected())
+                    # -- exchange/product_type/expiry/strike/option_type are
+                    # exactly the extra fields that phase's Area A/E need
+                    # and this event didn't carry before.
+                    exchange=intent.exchange, product_type=intent.product_type.value,
+                    expiry=(intent.instrument.expiry if intent.instrument else ""),
+                    strike=(intent.instrument.strike if intent.instrument else None),
+                    option_type=(intent.instrument.option_type if intent.instrument else ""),
                 ),
             )
 
@@ -645,20 +796,96 @@ class StrategyExecutionEngine:
         except Exception as exc:  # noqa: BLE001 - surfaced as a rejection, not raised
             return self._fail(intent, f"could not resolve broker for account '{account_id}': {exc}", started=started)
 
+        # Phase 15D.5: consult the durable human-authorization gate BEFORE
+        # the idempotency claim (a rejection here must never poison the
+        # idempotency key -- see idempotency_store.py's own "claim right
+        # before the broker call" rationale, and the AG7002 lesson about
+        # never leaving a key in an unresolved state for a rejection that
+        # never reached the broker at all). Runs after every other gate
+        # (kill switch, RiskManager, LiveCanaryGuard) has already passed,
+        # and is itself never a replacement for any of them -- it only
+        # additionally requires a specific, still-valid, exactly-scoped
+        # human authorization to exist for this exact intent.
+        if self._live_authorization_store is not None:
+            auth_id = intent.metadata.get("authorization_id", "")
+            if not auth_id:
+                return self._fail(
+                    intent, "live authorization is required but no authorization_id was present on this intent",
+                    started=started,
+                )
+            order_value = intent.limit_price if intent.limit_price is not None else (
+                context.reference_price if context is not None and context.reference_price is not None else None
+            )
+            if order_value is None:
+                return self._fail(
+                    intent, "cannot verify authorized order value -- no limit_price or reference_price available",
+                    started=started,
+                )
+            try:
+                self._live_authorization_store.try_consume(
+                    auth_id, account_id=account_id, broker_id=account.broker_id,
+                    credential_reference=account.credential_reference, symbol=intent.symbol,
+                    side=intent.side.value, quantity=intent.quantity, order_type=intent.order_type.value,
+                    product_type=intent.product_type.value, idempotency_key=intent.idempotency_key,
+                    order_value=abs(intent.quantity * order_value), correlation_id=intent.correlation_id,
+                    # Phase 15D.7: additive -- when the intent carries an
+                    # operator_id (set by LiveAuthorizationWorkflow), it
+                    # must match the authorization's own operator_id
+                    # exactly, same as every other exact-scope field.
+                    # Omitted (None) for any intent that doesn't carry one,
+                    # preserving every pre-15D.7 call's exact behavior.
+                    operator_id=intent.metadata.get("operator_id"),
+                )
+            except Exception as exc:  # noqa: BLE001 -- LiveAuthorizationError or a genuine store failure, both fail closed
+                return self._fail(intent, f"live authorization check failed: {exc}", started=started)
+
+        # Phase 15D-DR (Area C.8/M.7): atomically claim this idempotency key
+        # NOW -- immediately before the broker is actually called, after
+        # every rejection-capable gate (authorization, RiskManager,
+        # LiveCanaryGuard) has already passed. This closes the race between
+        # two concurrent execute() calls for the SAME key without poisoning
+        # the key for any intent that never reaches this point.
+        if self._idempotency_store is not None and intent.idempotency_key:
+            claimed = self._idempotency_store.claim(
+                intent.idempotency_key, strategy_id=intent.strategy_id, account_id=account_id,
+                intent_hash=compute_intent_hash(intent),
+            )
+            if not claimed:
+                return self._fail(
+                    intent,
+                    f"idempotency_key {intent.idempotency_key!r} is already being processed by a concurrent "
+                    "request (or a prior attempt is unresolved) -- refusing to submit a second broker request "
+                    "for the same intent.",
+                    started=started,
+                )
+
         if intent.order_type == OrderType.MARKET:
-            order_result = self.place_market_emergency(intent.symbol, intent.side, intent.quantity, broker=broker)
+            try:
+                order_result = self.place_market_emergency(intent.symbol, intent.side, intent.quantity, broker=broker)
+            except AmbiguousOrderStateError as exc:
+                return self._handle_ambiguous(intent, account_id, exc, started=started)
         else:
-            order_result = self.place_limit(intent.symbol, intent.side, intent.quantity, broker=broker)
+            try:
+                order_result = self.place_limit(intent.symbol, intent.side, intent.quantity, broker=broker)
+            except AmbiguousOrderStateError as exc:
+                return self._handle_ambiguous(intent, account_id, exc, started=started)
 
         if self._metrics is not None:
             self._obs("metrics", "record_execution_latency", lambda: self._metrics.record_execution_latency(sid, time.monotonic() - started))
 
         if order_result is None:
-            # Genuinely ambiguous: the broker never definitively answered
-            # (retries exhausted). Deliberately NOT persisted to the
-            # idempotency store as a definitive outcome -- see
-            # trading/common/idempotency_store.py's module docstring for
-            # why this specific case is an honest, documented boundary.
+            # Phase 15D.3-R: distinguish "every attempt ended in the SAME
+            # confirmed, non-ambiguous broker rejection" (a known terminal
+            # outcome -- persist STATUS_REJECTED) from the genuinely
+            # never-ambiguous case where retries failed BEFORE ever
+            # reaching the broker's order-placement call at all (e.g.
+            # _limit_price()'s own get_quote() failing -- safe to report
+            # as a plain failure and safe to leave unpersisted, see
+            # trading/common/idempotency_store.py's module docstring). An
+            # AmbiguousOrderStateError from the mutating call itself is
+            # caught separately above and never reaches here.
+            if self._last_confirmed_rejection is not None:
+                return self._handle_confirmed_rejection(intent, account_id, self._last_confirmed_rejection, started=started)
             return self._fail(intent, "order execution failed after retries", started=started)
 
         # -- 6: broker response validation (Blocker B) -- EVERY mode now, not just canary. ---- #
@@ -683,13 +910,15 @@ class StrategyExecutionEngine:
                 lambda: self._audit_trail.append(
                     EVENT_EXECUTION_RESULT, correlation_id=cid, strategy_id=sid,
                     success=result.success, status=result.status, message=result.message,
+                    account_id=account_id, idempotency_key=intent.idempotency_key, broker_order_id=result.order_id,
                 ),
             )
             self._obs(
                 "audit_trail", "append(BROKER_ORDER_PLACED)",
                 lambda: self._audit_trail.append(
                     EVENT_BROKER_ORDER_PLACED, correlation_id=cid, strategy_id=sid,
-                    order_id=result.order_id, account_id=account_id, broker_id=account.broker_id, simulated=broker.is_simulated,
+                    order_id=result.order_id, broker_order_id=result.order_id, account_id=account_id,
+                    broker_id=account.broker_id, idempotency_key=intent.idempotency_key, simulated=broker.is_simulated,
                 ),
             )
             if result.status in TERMINAL_STATUSES:
@@ -697,6 +926,8 @@ class StrategyExecutionEngine:
                     "audit_trail", "append(FILL)",
                     lambda: self._audit_trail.append(
                         EVENT_FILL, correlation_id=cid, strategy_id=sid, order_id=result.order_id,
+                        broker_order_id=result.order_id, account_id=account_id,
+                        idempotency_key=intent.idempotency_key,
                         filled_quantity=result.filled_quantity, simulated=broker.is_simulated,
                     ),
                 )
@@ -725,7 +956,7 @@ class StrategyExecutionEngine:
         caught) if the SAME key is reused for a materially different
         intent -- silently replaying the wrong cached result would be
         worse than a loud failure."""
-        from trading.common.idempotency_store import IdempotencyKeyReuseError
+        from trading.common.idempotency_store import AmbiguousIdempotencyStateError, IdempotencyKeyReuseError
 
         existing = self._idempotency_store.get(intent.idempotency_key)
         if existing is None:
@@ -736,6 +967,19 @@ class StrategyExecutionEngine:
                 f"OrderIntent (hash {existing.intent_hash} != {compute_intent_hash(intent)}); refusing "
                 "to replay a cached result for a mismatched request, and refusing to submit a new "
                 "order under a reused key."
+            )
+        if existing.status in (STATUS_AMBIGUOUS, STATUS_PENDING):
+            # Phase 15D-DR: this exact intent's prior broker outcome was
+            # never determined (AMBIGUOUS), or a claim for this key is
+            # still outstanding -- possibly a concurrent in-flight request,
+            # possibly a crashed process that never reached a definitive
+            # outcome (PENDING). Both are equally unresolved: never silently
+            # replayed as success, never silently treated as safe-to-resubmit
+            # -- propagating, deliberately NOT caught, exactly like
+            # IdempotencyKeyReuseError above.
+            raise AmbiguousIdempotencyStateError(
+                f"idempotency_key {intent.idempotency_key!r} has an unresolved {existing.status} prior outcome; "
+                "reconcile the actual broker state (order book / positions) before any further action."
             )
         if self._audit_trail is not None:
             self._obs(
@@ -784,6 +1028,51 @@ class StrategyExecutionEngine:
         if self._alerts is not None:
             self._obs("alerts", "execution_error", lambda: self._alerts.execution_error(intent.strategy_id, reason, correlation_id=intent.correlation_id))
         return ExecutionResult.rejected(intent, reason)
+
+    def _handle_ambiguous(
+        self, intent: OrderIntent, account_id: str, exc: "AmbiguousOrderStateError", *, started: float,
+    ) -> ExecutionResult:
+        """Phase 15D-DR (Area E/J): the broker call that would have
+        submitted this order raised an exception with an undetermined
+        outcome. Persisted as STATUS_AMBIGUOUS (never STATUS_FAILED --
+        that would wrongly imply "definitely did not succeed") so a future
+        replay attempt for this exact key is blocked via
+        AmbiguousIdempotencyStateError rather than silently retried or
+        silently allowed through. This engine never attempts reconciliation
+        automatically -- see this class's own module docstring and
+        docs/phase-15d-deployment-recovery-safety-report.md."""
+        reason = f"broker call outcome is ambiguous -- reconciliation required before any further action: {exc}"
+        self._persist_idempotency(intent, account_id, status=STATUS_AMBIGUOUS, broker_order_id="", result=None)
+        if self._audit_trail is not None:
+            self._obs(
+                "audit_trail", "append(AMBIGUOUS_ORDER_STATE)",
+                lambda: self._audit_trail.append(
+                    "AMBIGUOUS_ORDER_STATE", correlation_id=intent.correlation_id, strategy_id=intent.strategy_id,
+                    account_id=account_id, idempotency_key=intent.idempotency_key, reason=str(exc),
+                ),
+            )
+        return self._fail(intent, reason, started=started)  # _fail() records metrics/alerts once
+
+    def _handle_confirmed_rejection(
+        self, intent: OrderIntent, account_id: str, exc: "ConfirmedRejectionError", *, started: float,
+    ) -> ExecutionResult:
+        """Phase 15D.3-R: every retry attempt ended in the SAME definitive,
+        broker-confirmed rejection (never an ambiguous/unknown outcome --
+        see ConfirmedRejectionError's own docstring). Persisted as
+        STATUS_REJECTED, a genuine terminal state, closing the gap where
+        this exact scenario (Attempt 2's real AG7002 rejection) previously
+        left the idempotency record at STATUS_PENDING forever."""
+        reason = f"order rejected by broker (confirmed, no order created): {exc}"
+        self._persist_idempotency(intent, account_id, status=STATUS_REJECTED, broker_order_id="", result=None)
+        if self._audit_trail is not None:
+            self._obs(
+                "audit_trail", "append(CONFIRMED_REJECTION)",
+                lambda: self._audit_trail.append(
+                    "CONFIRMED_REJECTION", correlation_id=intent.correlation_id, strategy_id=intent.strategy_id,
+                    account_id=account_id, idempotency_key=intent.idempotency_key, reason=str(exc),
+                ),
+            )
+        return self._fail(intent, reason, started=started)
 
     def _raise_risk_alerts(self, intent: OrderIntent, check) -> None:  # noqa: ANN001 - RiskCheckResult, avoiding an import cycle concern is moot but kept loose intentionally
         """Classify each failed risk check into the matching named alert.

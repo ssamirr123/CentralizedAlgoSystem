@@ -384,6 +384,12 @@ def test_blocker_c_idempotency_store_write_failure_does_not_affect_the_result():
         def get(self, key):
             return None
 
+        def claim(self, key, *, strategy_id, account_id, intent_hash):
+            # Phase 15D-DR: claim() must succeed so execution proceeds to
+            # the broker -- this test is specifically about a WRITE
+            # (persist) failure, not a claim failure.
+            return True
+
         def put(self, record):
             raise RuntimeError("disk full")
 

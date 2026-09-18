@@ -64,11 +64,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from trading.common.file_permissions import harden_file_permissions
+
 _DEFAULT_DB_PATH = "trading_idempotency.db"
 
 STATUS_COMPLETED = "COMPLETED"
 STATUS_REJECTED = "REJECTED"
 STATUS_FAILED = "FAILED"
+#: Phase 15D-DR (Area E/J): the broker call that would have submitted this
+#: intent raised an exception whose outcome cannot be determined -- the
+#: order may or may not actually exist at the broker. Deliberately distinct
+#: from STATUS_FAILED (which means "definitively did not succeed" -- e.g. a
+#: broker-response-validation failure on a response that WAS received).
+#: A record in this state must never be silently replayed as success,
+#: silently treated as safe-to-resubmit, or silently ignored -- see
+#: AmbiguousIdempotencyStateError below.
+STATUS_AMBIGUOUS = "AMBIGUOUS"
+#: Phase 15D-DR (Area C.8 / M.7): a placeholder status written by claim()
+#: the instant a request begins processing a NEW idempotency_key, closing
+#: the race window between "check whether this key exists" and "persist
+#: the definitive outcome" that two concurrent requests for the SAME key
+#: could otherwise both pass through. A record left in this state (e.g.
+#: the process crashed mid-execution) is exactly as unresolved as
+#: STATUS_AMBIGUOUS and must be handled identically -- never silently
+#: replayed, never silently treated as safe-to-resubmit.
+STATUS_PENDING = "PENDING"
 
 
 def _now() -> str:
@@ -96,6 +116,17 @@ class IdempotencyKeyReuseError(RuntimeError):
     bug behind a wrong, silently-replayed outcome."""
 
 
+class AmbiguousIdempotencyStateError(RuntimeError):
+    """Phase 15D-DR: raised when a replay lookup finds an existing record
+    for this exact idempotency_key (same intent) whose status is
+    STATUS_AMBIGUOUS -- the prior attempt's broker outcome was never
+    determined. Never silently replayed, and never silently allowed to
+    proceed to a fresh broker submission (which could create a duplicate
+    real order for an intent that may have already succeeded). The caller
+    must reconcile the actual broker state (order book / positions) before
+    any further action on this key is possible."""
+
+
 class IdempotencyStore(Protocol):
     """The narrow interface StrategyExecutionEngine depends on. Any
     persistent (or, for tests only, in-memory) implementation satisfying
@@ -105,6 +136,26 @@ class IdempotencyStore(Protocol):
     def get(self, idempotency_key: str) -> IdempotencyRecord | None: ...
 
     def put(self, record: IdempotencyRecord) -> None: ...
+
+    def list_by_status(self, status: str) -> list[IdempotencyRecord]:
+        """Phase 15D-RECON: enumerate every record currently at `status` --
+        added specifically so a reconciliation subsystem can discover
+        outstanding STATUS_AMBIGUOUS/STATUS_PENDING records without already
+        knowing their idempotency_key (get() requires the key; this doesn't).
+        Purely additive and read-only -- does not change get()/put()/claim()
+        in any way."""
+        ...
+
+    def claim(self, idempotency_key: str, *, strategy_id: str, account_id: str, intent_hash: str) -> bool:
+        """Phase 15D-DR: atomically create a STATUS_PENDING placeholder
+        for `idempotency_key` IF AND ONLY IF no record exists yet.
+        Returns True if this call was the one that created it (the caller
+        may proceed), False if a record already existed (another request
+        already claimed -- or completed -- this key; the caller must NOT
+        proceed to a fresh broker submission). Must be atomic with respect
+        to concurrent callers -- a plain get()-then-put() is NOT sufficient,
+        which is exactly the race this method exists to close."""
+        ...
 
 
 def compute_intent_hash(intent) -> str:  # noqa: ANN001 -- trading.common.order_intent.OrderIntent, avoiding an import cycle concern is moot but kept loose intentionally
@@ -141,6 +192,7 @@ class SqliteIdempotencyStore:
         self._db_path = str(db_path)
         self._lock = threading.Lock()
         self._init_schema()
+        harden_file_permissions(self._db_path)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=10)
@@ -209,6 +261,47 @@ class SqliteIdempotencyStore:
             finally:
                 conn.close()
 
+    def claim(self, idempotency_key: str, *, strategy_id: str, account_id: str, intent_hash: str) -> bool:
+        """A bare INSERT (never ON CONFLICT) against the PRIMARY KEY column
+        -- SQLite raises IntegrityError if a row already exists, which is
+        exactly the atomicity this needs: whichever caller's INSERT commits
+        first wins the claim, and every other concurrent caller's INSERT
+        fails, both under the SAME `self._lock` that serializes every other
+        method here, and (for true multi-process deployments) under
+        SQLite's own file-level locking."""
+        if not idempotency_key:
+            return True  # no key at all -- nothing to claim/protect (matches _persist_idempotency's own no-op)
+        now = _now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO idempotency_records
+                        (idempotency_key, strategy_id, account_id, intent_hash, status,
+                         broker_order_id, result_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, '', '', ?, ?)
+                    """,
+                    (idempotency_key, strategy_id, account_id, intent_hash, STATUS_PENDING, now, now),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False  # someone else already claimed (or completed) this key
+            finally:
+                conn.close()
+
+    def list_by_status(self, status: str) -> list[IdempotencyRecord]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM idempotency_records WHERE status = ?", (status,)
+                ).fetchall()
+            finally:
+                conn.close()
+        return [IdempotencyRecord(**{k: row[k] for k in row.keys()}) for row in rows]
+
 
 class InMemoryIdempotencyStore:
     """Explicitly NOT for production use -- does not survive a restart,
@@ -228,3 +321,21 @@ class InMemoryIdempotencyStore:
     def put(self, record: IdempotencyRecord) -> None:
         with self._lock:
             self._records[record.idempotency_key] = record
+
+    def claim(self, idempotency_key: str, *, strategy_id: str, account_id: str, intent_hash: str) -> bool:
+        if not idempotency_key:
+            return True
+        with self._lock:
+            if idempotency_key in self._records:
+                return False
+            now = _now()
+            self._records[idempotency_key] = IdempotencyRecord(
+                idempotency_key=idempotency_key, strategy_id=strategy_id, account_id=account_id,
+                intent_hash=intent_hash, status=STATUS_PENDING, broker_order_id="", result_json="",
+                created_at=now, updated_at=now,
+            )
+            return True
+
+    def list_by_status(self, status: str) -> list[IdempotencyRecord]:
+        with self._lock:
+            return [r for r in self._records.values() if r.status == status]

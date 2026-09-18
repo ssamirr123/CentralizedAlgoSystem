@@ -29,7 +29,9 @@ this API. Accounts are listed by static TradingAccount metadata only.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from typing import Any
 
 from trading.common.alerts import AlertManager
 from trading.common.broker import create_broker
@@ -73,14 +75,44 @@ class ExecutionState:
     # Phase 13 observability -- one MetricsRegistry/AuditTrail/AlertManager
     # per app instance, same test-isolation rationale as everything else
     # on this dataclass (see module docstring).
+    #
+    # Type hint stays `AuditTrail` for documentation purposes, but Phase
+    # 15D-AUDIT's PersistentAuditTrail (trading.common.audit_store) is a
+    # duck-type-compatible drop-in that build_execution_state() below may
+    # construct instead -- see that function's own comment.
     metrics: MetricsRegistry = field(default_factory=MetricsRegistry)
-    audit_trail: AuditTrail = field(default_factory=AuditTrail)
+    audit_trail: Any = field(default_factory=AuditTrail)
     alerts: AlertManager = field(default_factory=AlertManager)
 
 
 def build_execution_state() -> ExecutionState:
     metrics = MetricsRegistry()
-    audit_trail = AuditTrail()
+
+    # Phase 15D-AUDIT: AUDIT_DB_PATH, when set, switches the process-wide
+    # audit trail from Phase 13's in-memory-only AuditTrail to a durable,
+    # SQLite-backed PersistentAuditTrail that survives restart (see
+    # trading/common/audit_store.py). Unset (the default) preserves the
+    # exact original in-memory behavior byte-for-byte -- this matters for
+    # tests/conftest.py's `app` fixture, which calls create_app() fresh per
+    # test and must not leave a database file behind unless a real
+    # deployment has explicitly opted in.
+    audit_db_path = os.environ.get("AUDIT_DB_PATH", "").strip()
+    if audit_db_path:
+        from trading.common.audit_store import PersistentAuditTrail
+
+        audit_trail: Any = PersistentAuditTrail(db_path=audit_db_path)
+    else:
+        audit_trail = AuditTrail()
+
+    # Phase 15D-AUDIT: likewise for the kill switch's own restart-safety
+    # (Phase 15D-DR added the capability; this is where the production
+    # instance actually opts in). KILL_SWITCH_PERSISTENCE_PATH unset keeps
+    # the original in-memory-only default.
+    kill_switch_path = os.environ.get("KILL_SWITCH_PERSISTENCE_PATH", "").strip()
+    kill_switch = CentralKillSwitch(
+        persistence_path=kill_switch_path or None, audit_trail=audit_trail,
+    )
+
     alerts = AlertManager(audit_trail=audit_trail)
 
     broker_manager = BrokerManager(metrics_registry=metrics, audit_trail=audit_trail, alerts=alerts)
@@ -115,6 +147,7 @@ def build_execution_state() -> ExecutionState:
         strategy_assignment=strategy_assignment,
         risk_manager=risk_manager,
         strategy_registry=strategy_registry,
+        kill_switch=kill_switch,
         metrics=metrics,
         audit_trail=audit_trail,
         alerts=alerts,

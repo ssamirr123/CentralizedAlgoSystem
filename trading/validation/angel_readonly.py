@@ -30,10 +30,12 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass, field
+from datetime import date, datetime, time as dt_time
 from pathlib import Path
 
 from trading.common.brokers.angelone import AngelOneBroker
 from trading.common.config import TradingConfig, load_config
+from trading.market_data.market_hours import market_tz, now_in_tz
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -96,13 +98,54 @@ def _index_aware_resolver(broker: AngelOneBroker):
     return _resolve
 
 
-def _pick_current_nifty_ce_symbol(spot_price: float):
+# NSE cash/F&O session window (IST) -- mirrors the same constant already
+# used by trading/common/risk_manager.py's own MARKET_SESSION_VALIDATION
+# check. Duplicated here (not imported) because that module's constant is
+# private and this is a separate, broker-independent validation tool by
+# design (see this module's own docstring) -- not a second, divergent
+# definition of NSE's actual hours, just the same well-known constant.
+_SESSION_END = dt_time(15, 30)
+
+
+def _is_expiry_still_tradable(expiry_date: date, now: datetime) -> bool:
+    """Phase 15D.1-B fix: an expiry is tradable only if its date is in the
+    future, OR it is today AND today's session has not yet closed. A
+    calendar-date-only comparison (expiry_date >= today) is NOT enough --
+    it is exactly what let the resolver keep returning a same-day contract
+    after that day's session had already ended (the scrip master itself
+    doesn't drop the row until Angel refreshes it, typically the next
+    trading day). `now` must be timezone-aware, in the same tz used to
+    derive `today`."""
+    local = now.astimezone(market_tz())
+    today = local.date()
+    if expiry_date < today:
+        return False
+    if expiry_date == today:
+        return local.time() < _SESSION_END
+    return True
+
+
+def _pick_current_nifty_ce_symbol(spot_price: float, *, now: datetime | None = None):
     """Independent instrument discovery: downloads the public NFO/OPTIDX
     scrip master directly (no credentials, no dependency on any algo's own
-    token_file.py or cache) and picks the nearest-expiry CE strike closest
-    to the given spot price. Deliberately independent of AngelOneBroker's
-    own resolver so this validation isn't just trusting the same code path
-    it's trying to validate.
+    token_file.py or cache) and picks the nearest VALID (non-expired), TRADABLE
+    weekly expiry's CE strike closest to the given spot price. Deliberately
+    independent of AngelOneBroker's own resolver so this validation isn't
+    just trusting the same code path it's trying to validate.
+
+    Phase 15D.1-B fix: previously this simply took expiries[0] after a pure
+    calendar-date sort, with no check for whether that nearest date's own
+    trading session had already ended -- so once the market closed on a
+    weekly expiry day, this kept returning that now-unusable contract
+    (Angel's public scrip master itself doesn't drop the expired row until
+    it refreshes, typically the next trading day). Every candidate expiry
+    is now filtered through `_is_expiry_still_tradable()` before selection,
+    and expiries with no resolvable ATM row (or a malformed date string)
+    are skipped in favor of the next valid candidate, rather than crashing
+    or silently returning something wrong.
+
+    `now` is injectable (for deterministic tests); production callers omit
+    it and get the real current time.
 
     Strike extraction uses exact positional slicing, NOT a regex on
     trailing digits: the raw scrip-master expiry string is 4-digit-year
@@ -117,23 +160,43 @@ def _pick_current_nifty_ce_symbol(spot_price: float):
     """
     import pandas as pd
 
+    now = now or now_in_tz(market_tz())
+
     df = pd.read_json(_SCRIP_MASTER_URL)
     df = df.loc[(df.exch_seg == "NFO") & (df.name == "NIFTY") & (df.instrumenttype == "OPTIDX")]
 
-    expiries = sorted(df["expiry"].unique(), key=lambda e: pd.to_datetime(e, format="%d%b%Y"))
-    nearest_expiry_str = expiries[0]
-    nearest_expiry_date = pd.to_datetime(nearest_expiry_str, format="%d%b%Y").date().isoformat()
-    prefix = nearest_expiry_str[:5] + nearest_expiry_str[5:][2:]  # "15SEP2026" -> "15SEP26"
-    known_head = "NIFTY" + prefix
+    candidates: list[tuple[str, date]] = []
+    for raw_expiry in df["expiry"].unique():
+        try:
+            parsed = pd.to_datetime(raw_expiry, format="%d%b%Y").date()
+        except (ValueError, TypeError):
+            continue  # malformed expiry string -- skip, never crash the whole resolution
+        candidates.append((raw_expiry, parsed))
+    candidates.sort(key=lambda pair: pair[1])
 
-    df = df[df["expiry"] == nearest_expiry_str]
-    ce_df = df[df["symbol"].str.endswith("CE") & df["symbol"].str.startswith(known_head)].copy()
-    ce_df["strike_num"] = ce_df["symbol"].str.slice(len(known_head), -2).astype(float)
+    valid_candidates = [(raw, parsed) for raw, parsed in candidates if _is_expiry_still_tradable(parsed, now)]
+    if not valid_candidates:
+        raise ValueError(
+            "no valid (non-expired, still-tradable) NIFTY weekly expiry available in the scrip master"
+        )
 
     atm_guess = round(spot_price / 50) * 50
-    ce_df["diff"] = (ce_df["strike_num"] - atm_guess).abs()
-    row = ce_df.sort_values("diff").iloc[0]
-    return str(row["symbol"]), nearest_expiry_date
+
+    for nearest_expiry_str, parsed_date in valid_candidates:
+        prefix = nearest_expiry_str[:5] + nearest_expiry_str[5:][2:]  # "15SEP2026" -> "15SEP26"
+        known_head = "NIFTY" + prefix
+
+        expiry_df = df[df["expiry"] == nearest_expiry_str]
+        ce_df = expiry_df[expiry_df["symbol"].str.endswith("CE") & expiry_df["symbol"].str.startswith(known_head)].copy()
+        if ce_df.empty:
+            continue  # no CE rows for this expiry -- try the next valid candidate
+
+        ce_df["strike_num"] = ce_df["symbol"].str.slice(len(known_head), -2).astype(float)
+        ce_df["diff"] = (ce_df["strike_num"] - atm_guess).abs()
+        row = ce_df.sort_values("diff").iloc[0]
+        return str(row["symbol"]), parsed_date.isoformat()
+
+    raise ValueError("no valid NIFTY CE instrument found across any tradable expiry")
 
 
 @dataclass

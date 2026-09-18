@@ -15,6 +15,14 @@ import threading
 import websocket_feed as wf
 from broker import execution_bridge
 
+# Phase 15D.9 (Blocker 1 remediation): the ONE control-center kill switch
+# now reaches this legacy, pre-Phase-15D order path too -- see
+# trading/common/legacy_execution_guard.py's own docstring for exactly
+# what this does and does not close.
+from trading.common.legacy_execution_guard import assert_live_mutation_allowed
+
+_STRATEGY_ID = "DoubleStraddelAlgo"
+
 # --------------------------------------------------------------------------- #
 # Rate limiting
 # --------------------------------------------------------------------------- #
@@ -121,6 +129,7 @@ def place_limit(symbol, token, qty, side):
             "stoploss": "0",
             "quantity": str(qty),
         }
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         oid = config.objconn.placeOrder(params)
         if oid is None:
             raise ValueError('no order id returned (possibly rejected)')
@@ -170,6 +179,7 @@ def place_market(symbol, token, qty, side):
             "stoploss": "0",
             "quantity": str(qty),
         }
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         oid = config.objconn.placeOrder(params)
         if oid is None:
             raise ValueError('no order id returned')

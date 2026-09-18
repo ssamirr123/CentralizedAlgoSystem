@@ -235,7 +235,16 @@ class RiskManager:
         since self._limits itself always exists (see __init__)."""
         return self._account_limits.get(account_id, self._limits)
 
-    def validate(self, intent: OrderIntent, context: RiskContext | None = None) -> RiskCheckResult:
+    def validate(self, intent: OrderIntent, context: RiskContext | None = None, *, dry_run: bool = False) -> RiskCheckResult:
+        """dry_run=True (Phase 15D.6): evaluate every check exactly as a
+        real call would, WITHOUT any of the two mutations a real,
+        non-dry-run call makes on approval (marking idempotency_key as
+        seen; incrementing the day's order count for strategy_id). This
+        lets an operator workflow preview a RiskManager decision (e.g. at
+        REQUEST or PREFLIGHT time) an unlimited number of times without
+        poisoning the ONE real validate() call execute() makes immediately
+        before placing the order. Default False -- zero behavior change
+        for every existing caller."""
         context = context or RiskContext()
         checks: list[RiskCheckOutcome] = []
 
@@ -250,7 +259,7 @@ class RiskManager:
             checks.append(self._check_max_account_exposure(intent, context))
             checks.append(self._check_max_daily_loss(intent, context))
             checks.append(self._check_max_strategy_loss(intent, context))
-            checks.append(self._check_duplicate_order(intent, context))
+            checks.append(self._check_duplicate_order(intent, context, dry_run=dry_run))
             checks.append(self._check_market_session(intent, context))
             checks.append(self._check_kill_switch(intent, context))
             checks.append(self._check_order_value_limit(intent, context))
@@ -259,7 +268,7 @@ class RiskManager:
             checks.append(RiskCheckOutcome(name="INTERNAL_ERROR", passed=False, reason=str(exc)))
 
         result = self._build_result(intent, checks)
-        if result.allowed:
+        if result.allowed and not dry_run:
             self._record_order_approved_for_daily_count(intent, context)
         return result
 
@@ -402,14 +411,15 @@ class RiskManager:
         return RiskCheckOutcome("MAX_STRATEGY_LOSS", True)
 
     # -- 10: duplicate order protection ------------------------------------------------------- #
-    def _check_duplicate_order(self, intent: OrderIntent, context: RiskContext) -> RiskCheckOutcome:
+    def _check_duplicate_order(self, intent: OrderIntent, context: RiskContext, *, dry_run: bool = False) -> RiskCheckOutcome:
         key = intent.idempotency_key
         if not key:
             return RiskCheckOutcome("DUPLICATE_ORDER_PROTECTION", True, "no idempotency_key supplied -- not tracked")
         with self._lock:
             if key in self._seen_idempotency_keys:
                 return RiskCheckOutcome("DUPLICATE_ORDER_PROTECTION", False, f"idempotency_key {key!r} was already approved")
-            self._seen_idempotency_keys.add(key)
+            if not dry_run:
+                self._seen_idempotency_keys.add(key)
         return RiskCheckOutcome("DUPLICATE_ORDER_PROTECTION", True)
 
     # -- 11: market/session validation ------------------------------------------------------------ #

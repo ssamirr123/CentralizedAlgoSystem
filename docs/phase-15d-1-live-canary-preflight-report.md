@@ -262,3 +262,46 @@ LIVE_AUTHORIZED entered: NO
 **PHASE 15D.1 STATUS: BLOCKED**
 
 Every structural/system-readiness gate passed cleanly, exactly as in the original run — the only material change this rerun found is that Account A's zero-funds finding is now confirmed as a real (not merely persistent) balance of ₹100, and that balance is **decisively insufficient** for the smallest practical version of the proposed canary (a single 1-lot NIFTY option purchase, minimum realistic cost ~₹2,600). This is not a system defect and not something further diagnosis or code change can resolve — the account requires substantially more real capital before a live canary of this shape is fundable.
+
+---
+
+# SECOND FRESH REVALIDATION — funding landed in Account B, not Account A
+
+A follow-up instruction asserted "Account A has now been funded." A fresh, real check performed specifically to verify this before proceeding found:
+
+```
+Account A (ANGEL_SAMIR), fresh real check:
+  available_cash:   100.0   (UNCHANGED from every prior check)
+  used_margin:       0.0
+  available_margin:  0.0
+  positions: 0   orders: 0
+  identity: AA***21 (matches, session valid)
+  mutation_block: place_order/modify_order/cancel_order all BLOCKED (ReadOnlyModeError)
+```
+
+Account A's real balance did **not** change. The user then clarified mid-session that the deposit had actually gone to **Account B**, not Account A. A fresh, real, read-only check of Account B (`ANGEL_ACCOUNT_B`, `env:ANGELONE_B`) confirms this directly:
+
+```
+Account B (ANGEL_ACCOUNT_B), fresh real check:
+  available_cash:   3094.83   (up from 94.83 in every prior phase -- a real ₹3,000 deposit)
+  used_margin:       0.0
+  available_margin:  0.0
+  positions: 0   orders: 4
+```
+
+## Conclusion for THIS phase (Account A)
+
+**PHASE 15D.1 STATUS: BLOCKED (unchanged).** Account A remains exactly as insufficiently funded as every prior check found. Nothing in this phase's scope — a preflight specifically for Account A — changes as a result of Account B's new balance. Per this project's own standing rule (explicitly stated in Phase 15D.1.1's own safety rules: **"Do NOT use Account B funds to satisfy Account A requirements"**), Account B's funds cannot be used, borrowed, or substituted to satisfy Account A's canary preflight in any way, and this report does not do so.
+
+## Note, not acted upon: Account B is now a real, funded candidate
+
+This is reported for visibility only — **no action was taken on it**. Account B now holds a real, substantial balance (₹3,094.83) that would very plausibly cover the smallest practical canary order (~₹2,600–8,450 estimated range for a single 1-lot NIFTY option). Whether to run a dedicated Phase 15D.1-equivalent preflight *for Account B specifically* is a decision this report does not make unilaterally: the currently-authorized `LiveCanaryGuard`/`CanaryLimits` object built in this phase is explicitly dedicated to `ANGEL_SAMIR` (Account A) via `CanaryLimits.account_id` — attempting to route an Account B intent through it would itself be correctly rejected (`DEDICATED_ACCOUNT`), by design. A genuine Account-B canary preflight would need its own explicitly-constructed `CanaryLimits(account_id="ANGEL_ACCOUNT_B", ...)` and its own fresh walk through every step of this phase — not a reuse of Account A's artifacts — and only if and when explicitly requested.
+
+```
+Real mutation calls this check: 0
+Real orders this check: 0
+Account A authorization_state: READ_ONLY (unchanged)
+Account B authorization_state: READ_ONLY (unchanged)
+CANARY_READY entered: NO
+LIVE_AUTHORIZED entered: NO
+```
