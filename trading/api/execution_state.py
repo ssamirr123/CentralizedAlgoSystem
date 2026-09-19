@@ -60,6 +60,8 @@ from trading.common.strategy_assignment import StrategyAssignment
 from trading.common.strategy_registry import StrategyRegistry
 from trading.common.strategy_runtime import StrategyRuntime
 from trading.common.trading_account import ExecutionMode, TradingAccount
+from trading.common.worker_coordinator import WorkerCoordinator
+from trading.common.worker_registry import WorkerRegistry
 
 _EXAMPLE_ACCOUNTS = (
     ("ANGEL_MAIN", "Angel One (main)", "angelone"),
@@ -102,6 +104,14 @@ class ExecutionState:
     # kill_switch, so "assigned via the API" and "executed by the runtime"
     # can never silently diverge onto separate state.
     strategy_runtime: StrategyRuntime | None = None
+    # Phase 16.9 -- see trading/common/worker_registry.py and
+    # worker_coordinator.py. Zero workers are ever pre-registered here;
+    # this only gives the read-only /api/workers endpoints (and any
+    # future local worker-simulation harness) something to read/write
+    # against, sharing this SAME strategy_registry/strategy_assignment/
+    # strategy_runtime -- never a second execution path.
+    worker_registry: WorkerRegistry | None = None
+    worker_coordinator: WorkerCoordinator | None = None
 
 
 def build_execution_state() -> ExecutionState:
@@ -162,6 +172,14 @@ def build_execution_state() -> ExecutionState:
         metrics_registry=metrics, audit_trail=audit_trail,
     )
 
+    # Phase 16.9 -- zero workers pre-registered; see the ExecutionState
+    # field comment above for why these are constructed anyway.
+    worker_registry = WorkerRegistry()
+    worker_coordinator = WorkerCoordinator(
+        worker_registry=worker_registry, strategy_registry=strategy_registry,
+        strategy_assignment=strategy_assignment, strategy_runtime=strategy_runtime,
+    )
+
     return ExecutionState(
         broker_manager=broker_manager,
         strategy_assignment=strategy_assignment,
@@ -172,4 +190,6 @@ def build_execution_state() -> ExecutionState:
         audit_trail=audit_trail,
         alerts=alerts,
         strategy_runtime=strategy_runtime,
+        worker_registry=worker_registry,
+        worker_coordinator=worker_coordinator,
     )

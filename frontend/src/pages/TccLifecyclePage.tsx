@@ -64,6 +64,7 @@ export function TccLifecyclePage() {
                 <thead>
                   <tr>
                     <th>Strategy</th>
+                    <th>Worker</th>
                     <th>Account</th>
                     <th>Lifecycle</th>
                     <th>Mode</th>
@@ -85,6 +86,10 @@ export function TccLifecyclePage() {
                     return (
                       <tr key={r.strategy_id}>
                         <td>{r.strategy_id}</td>
+                        <td className="mono">
+                          {r.worker_id ?? "—"}
+                          {r.worker_status && <div className="inline-note">{r.worker_status}</div>}
+                        </td>
                         <td className="mono">{r.account_id ?? "—"}</td>
                         <td>
                           <span className={`badge lifecycle-${r.lifecycle_state.toLowerCase()}`}>{r.lifecycle_state}</span>

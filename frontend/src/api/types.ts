@@ -433,6 +433,28 @@ export interface StrategyLifecycle {
   // strategy declares no required instruments (every strategy today).
   market_data_status: "" | "AVAILABLE" | "NO_DATA" | "STALE" | "INVALID" | "PROVIDER_ERROR";
   last_market_data_at: string;
+  // Phase 16.9 -- trading/common/worker_registry.py. null when no worker
+  // currently owns this strategy (a strategy runs fine locally with no
+  // worker assigned at all -- placement is additive, never required).
+  worker_id: string | null;
+  worker_status: WorkerStatusValue | null;
+  worker_last_heartbeat_at: string | null;
+}
+
+// Phase 16.9 -- distributed strategy worker foundation. A worker never
+// executes an order and never holds a broker credential.
+export type WorkerStatusValue = "REGISTERED" | "ONLINE" | "OFFLINE" | "DEGRADED" | "STOPPED";
+
+export interface Worker {
+  worker_id: string;
+  name: string;
+  status: WorkerStatusValue;
+  assigned_strategy_ids: string[];
+  last_heartbeat_at: string;
+  started_at: string;
+  version: string;
+  git_sha: string;
+  host_identity: string;
 }
 
 export interface RuntimeExecutionResult {

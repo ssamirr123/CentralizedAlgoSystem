@@ -22,6 +22,10 @@ Phase 13 adds the /api/observability/* routes at the bottom of this file.
     POST   /api/strategy-lifecycle/{strategy_id}/command   (Phase 16.4: START | STOP)
     POST   /api/strategy-lifecycle/{strategy_id}/evaluate  (Phase 16.5: one PAPER/SHADOW cycle)
 
+    GET    /api/workers                        (Phase 16.9, read-only)
+    GET    /api/workers/{worker_id}
+    GET    /api/workers/{worker_id}/strategies
+
     GET    /api/execution-modes
 
     GET    /api/risk/status
@@ -101,6 +105,7 @@ from trading.common.strategy_assignment import Assignment, InvalidAssignmentErro
 from trading.common.strategy_control import ControlCommand, StrategyControlOutcome, execute_strategy_command
 from trading.common.strategy_lifecycle import StrategyLifecycleView, check_all_lifecycles, check_lifecycle
 from trading.common.strategy_runtime import RuntimeCycleResult, RuntimeStatus
+from trading.common.worker_registry import UnknownWorkerError
 from trading.common.strategy_registry import UnknownStrategyError
 from trading.common.trading_account import ExecutionMode, TradingAccount
 
@@ -285,9 +290,19 @@ class StrategyLifecycleOut(BaseModel):
     # registered today) -- otherwise one of MarketDataStatus's values.
     market_data_status: str
     last_market_data_at: str
+    # Phase 16.9 -- trading/common/worker_registry.py. None when no
+    # worker currently owns this strategy (the local, in-process
+    # evaluation path Phases 16.5-16.8 already use remains fully valid
+    # with no worker assigned at all -- workers are an additive, optional
+    # placement concept, never a requirement).
+    worker_id: str | None
+    worker_status: str | None
+    worker_last_heartbeat_at: str | None
 
     @classmethod
-    def from_view(cls, v: StrategyLifecycleView, runtime: RuntimeStatus | None = None) -> "StrategyLifecycleOut":
+    def from_view(
+        cls, v: StrategyLifecycleView, runtime: RuntimeStatus | None = None, worker: object | None = None,
+    ) -> "StrategyLifecycleOut":
         return cls(
             strategy_id=v.strategy_id, assignment_id=v.assignment_id, account_id=v.account_id,
             execution_mode=v.execution_mode, strategy_status=v.strategy_status, lifecycle_state=v.lifecycle_state.value,
@@ -299,6 +314,9 @@ class StrategyLifecycleOut(BaseModel):
             runtime_state=(runtime.state.value if runtime else "INACTIVE"),
             last_cycle_at=(runtime.last_cycle_at if runtime else ""),
             last_runtime_error=(runtime.last_error if runtime else ""),
+            worker_id=(worker.worker_id if worker else None),
+            worker_status=(worker.status.value if worker else None),
+            worker_last_heartbeat_at=(worker.last_heartbeat_at if worker else None),
             market_data_status=(runtime.market_data_status if runtime else ""),
             last_market_data_at=(runtime.last_market_data_at if runtime else ""),
             last_result_summary=(runtime.last_result_summary if runtime else ""),
@@ -572,6 +590,22 @@ def create_assignment(
 #
 #     STRATEGY LIFECYCLE STATE  !=  LIVE AUTHORIZATION  !=  ORDER EXECUTION
 # --------------------------------------------------------------------------- #
+def _worker_for(state: ExecutionState, strategy_id: str):
+    """Phase 16.9: looks up the WorkerInfo (if any) currently owning
+    strategy_id, purely for read-only display on the lifecycle
+    endpoints. Returns None when no worker registry is configured or no
+    worker owns this strategy -- both are valid, unremarkable states."""
+    if state.worker_registry is None:
+        return None
+    owner_id = state.worker_registry.get_strategy_owner(strategy_id)
+    if owner_id is None:
+        return None
+    try:
+        return state.worker_registry.get_worker(owner_id)
+    except UnknownWorkerError:
+        return None
+
+
 @router.get("/strategy-lifecycle", response_model=list[StrategyLifecycleOut])
 def list_strategy_lifecycle(state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW)) -> list[StrategyLifecycleOut]:
     views = check_all_lifecycles(
@@ -581,7 +615,7 @@ def list_strategy_lifecycle(state: ExecutionState = Depends(_state), _principal:
     out = []
     for v in views:
         runtime_status = state.strategy_runtime.get_status(v.strategy_id) if state.strategy_runtime else None
-        out.append(StrategyLifecycleOut.from_view(v, runtime_status))
+        out.append(StrategyLifecycleOut.from_view(v, runtime_status, _worker_for(state, v.strategy_id)))
     return out
 
 
@@ -597,7 +631,7 @@ def get_strategy_lifecycle(
     except UnknownStrategyError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {strategy_id!r}") from None
     runtime_status = state.strategy_runtime.get_status(strategy_id) if state.strategy_runtime else None
-    return StrategyLifecycleOut.from_view(view, runtime_status)
+    return StrategyLifecycleOut.from_view(view, runtime_status, _worker_for(state, strategy_id))
 
 
 # --------------------------------------------------------------------------- #
@@ -710,6 +744,69 @@ def evaluate_strategy_runtime(
         ],
         error=cycle.error,
     )
+
+
+class WorkerOut(BaseModel):
+    worker_id: str
+    name: str
+    status: str
+    assigned_strategy_ids: list[str]
+    last_heartbeat_at: str
+    started_at: str
+    version: str
+    git_sha: str
+    host_identity: str
+
+    @classmethod
+    def from_info(cls, info) -> "WorkerOut":
+        return cls(
+            worker_id=info.worker_id, name=info.name, status=info.status.value,
+            assigned_strategy_ids=list(info.assigned_strategy_ids), last_heartbeat_at=info.last_heartbeat_at,
+            started_at=info.started_at, version=info.version, git_sha=info.git_sha,
+            host_identity=info.host_identity,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# WORKERS (Phase 16.9, read-only)
+#
+# A worker never executes an order and never holds a broker credential --
+# see trading/common/worker_identity.py's and worker_coordinator.py's own
+# module docstrings. These endpoints only ever read the existing
+# WorkerRegistry; they never register, command, or otherwise mutate a
+# worker (there is no local worker-simulation harness wired into the
+# shared Control Center API this phase -- see the phase report's Section
+# 15 for how the local simulation was actually exercised, entirely
+# within the test suite).
+# --------------------------------------------------------------------------- #
+@router.get("/workers", response_model=list[WorkerOut])
+def list_workers(state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW)) -> list[WorkerOut]:
+    if state.worker_registry is None:
+        return []
+    return [WorkerOut.from_info(w) for w in state.worker_registry.list_workers()]
+
+
+@router.get("/workers/{worker_id}", response_model=WorkerOut)
+def get_worker(worker_id: str, state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW)) -> WorkerOut:
+    if state.worker_registry is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such worker: {worker_id!r}")
+    try:
+        return WorkerOut.from_info(state.worker_registry.get_worker(worker_id))
+    except UnknownWorkerError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such worker: {worker_id!r}") from None
+
+
+@router.get("/workers/{worker_id}/strategies", response_model=list[str])
+def get_worker_strategies(
+    worker_id: str, state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW),
+) -> list[str]:
+    if state.worker_registry is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such worker: {worker_id!r}")
+    try:
+        info = state.worker_registry.get_worker(worker_id)
+    except UnknownWorkerError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such worker: {worker_id!r}") from None
+    return list(info.assigned_strategy_ids)
 
 
 # --------------------------------------------------------------------------- #

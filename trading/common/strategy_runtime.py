@@ -321,6 +321,34 @@ class StrategyRuntime:
                 executions=executions, error=error, market_data_status=md_status,
             )
 
+    def is_strategy_active(self, strategy_id: str) -> bool:
+        """Phase 16.9: public, read-only check reused by WorkerCoordinator
+        (trading/common/worker_coordinator.py) to confirm a strategy's
+        lifecycle permits evaluation before accepting a worker's
+        OrderIntent submission -- the exact same status set run_once()
+        itself gates on, never a second definition of "active"."""
+        return self._strategy_registry.get(strategy_id).get_status() in _ACTIVE_STATUSES
+
+    def execute_worker_intent(self, intent: OrderIntent, *, owning_strategy_id: str) -> ExecutionResult:
+        """Phase 16.9: the ONLY seam a WorkerCoordinator may call to turn a
+        worker-submitted OrderIntent into an executed result. Reuses this
+        SAME instance's engine and hard shadow boundary
+        (_assert_simulated_broker) -- never a second execution engine or
+        a second boundary check. `owning_strategy_id` is the strategy the
+        CENTRAL coordinator has already authoritatively determined this
+        submission belongs to (after validating worker/assignment
+        ownership) -- this method independently re-confirms the intent's
+        own strategy_id agrees, exactly like run_once()'s per-intent
+        check, and raises ShadowBoundaryViolation (never executes) on any
+        mismatch or non-simulated broker."""
+        if intent.strategy_id != owning_strategy_id:
+            raise ShadowBoundaryViolation(
+                f"OrderIntent.strategy_id={intent.strategy_id!r} does not match "
+                f"the owning strategy ({owning_strategy_id!r}) -- refusing to execute"
+            )
+        self._assert_simulated_broker(intent)
+        return self._engine.execute(intent)
+
     def _assert_simulated_broker(self, intent: OrderIntent) -> None:
         """Layer 2 of the hard shadow boundary -- see module docstring.
         Resolution mirrors exactly what execute() itself does (via

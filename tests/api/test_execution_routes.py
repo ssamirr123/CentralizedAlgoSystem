@@ -548,6 +548,52 @@ def test_evaluate_is_audited(client, bearer, db_session):
 
 
 # --------------------------------------------------------------------------- #
+# WORKERS (Phase 16.9, read-only)
+# --------------------------------------------------------------------------- #
+def test_list_workers_starts_empty(client, viewer_auth):
+    r = client.get("/api/workers", headers=viewer_auth)
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_get_unknown_worker_is_404(client, viewer_auth):
+    r = client.get("/api/workers/no-such-worker", headers=viewer_auth)
+    assert r.status_code == 404
+
+
+def test_get_unknown_worker_strategies_is_404(client, viewer_auth):
+    r = client.get("/api/workers/no-such-worker/strategies", headers=viewer_auth)
+    assert r.status_code == 404
+
+
+def test_worker_endpoints_reflect_a_registered_worker(client, viewer_auth, app):
+    app.state.execution.worker_registry.register_worker(worker_id="w1", name="Worker One", version="1.0")
+    app.state.execution.worker_registry.assign_strategy("DoubleStraddelAlgo", "w1")
+
+    r = client.get("/api/workers", headers=viewer_auth)
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+    assert r.json()[0]["worker_id"] == "w1"
+    assert r.json()[0]["status"] == "ONLINE"
+
+    r2 = client.get("/api/workers/w1", headers=viewer_auth)
+    assert r2.status_code == 200
+    assert r2.json()["version"] == "1.0"
+
+    r3 = client.get("/api/workers/w1/strategies", headers=viewer_auth)
+    assert r3.status_code == 200
+    assert r3.json() == ["DoubleStraddelAlgo"]
+
+
+def test_worker_response_never_contains_a_credential_field(client, viewer_auth, app):
+    app.state.execution.worker_registry.register_worker(worker_id="w1", name="Worker One")
+    r = client.get("/api/workers", headers=viewer_auth)
+    body_text = r.text.lower()
+    for forbidden in ("api_key", "api_secret", "access_token", "password", "credential"):
+        assert forbidden not in body_text
+
+
+# --------------------------------------------------------------------------- #
 # EXECUTION MODES
 # --------------------------------------------------------------------------- #
 def test_execution_modes_lists_all_four(client, viewer_auth):
@@ -731,11 +777,15 @@ def test_execution_state_never_wires_a_live_authorization_store():
     assert set(ExecutionState.__dataclass_fields__) == {
         "broker_manager", "strategy_assignment", "risk_manager", "strategy_registry",
         "kill_switch", "metrics", "audit_trail", "alerts", "strategy_runtime",
+        "worker_registry", "worker_coordinator",
     }
     # Phase 16.5's own runtime is present, but it is not a
     # LiveAuthorization store -- it holds no live-authorization state of
     # any kind (see trading/common/strategy_runtime.py's own docstring).
     assert not hasattr(state.strategy_runtime, "live_authorization_store")
+    # Phase 16.9: the worker registry starts with zero workers -- nothing
+    # is ever auto-registered.
+    assert state.worker_registry.list_workers() == []
 
 
 def test_full_regression_isolation_between_tests(client, bearer):

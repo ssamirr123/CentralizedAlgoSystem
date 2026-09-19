@@ -16,6 +16,7 @@ const ROWS = [
     last_transition_at: "", last_heartbeat_at: "", last_error: "", assignment_exists: true, blocking_reasons: [],
     runtime_state: "INACTIVE" as const, last_cycle_at: "", last_runtime_error: "", last_result_summary: "",
     market_data_status: "" as const, last_market_data_at: "",
+    worker_id: null, worker_status: null, worker_last_heartbeat_at: null,
   },
   {
     strategy_id: "CombinedVwapNifty", assignment_id: null, account_id: null,
@@ -25,6 +26,7 @@ const ROWS = [
     blocking_reasons: ["no assignment exists for this strategy"],
     runtime_state: "INACTIVE" as const, last_cycle_at: "", last_runtime_error: "", last_result_summary: "",
     market_data_status: "" as const, last_market_data_at: "",
+    worker_id: null, worker_status: null, worker_last_heartbeat_at: null,
   },
   {
     strategy_id: "Vwap_Algo_Nifty_hedge", assignment_id: "Vwap_Algo_Nifty_hedge", account_id: "ACC_A",
@@ -34,6 +36,7 @@ const ROWS = [
     assignment_exists: true, runtime_state: "HEALTHY" as const, last_cycle_at: "2026-09-19T00:05:00Z",
     last_runtime_error: "", last_result_summary: "FILLED",
     market_data_status: "AVAILABLE" as const, last_market_data_at: "2026-09-19T00:04:55Z",
+    worker_id: "strategy-worker-03", worker_status: "ONLINE" as const, worker_last_heartbeat_at: "2026-09-19T00:05:00Z",
     blocking_reasons: [],
   },
 ];
@@ -206,6 +209,16 @@ describe("TccLifecyclePage", () => {
     renderWithProviders(<TccLifecyclePage />);
     expect(screen.getByText("AVAILABLE")).toBeInTheDocument();
     expect(screen.getAllByText("—").length).toBeGreaterThan(0); // the two rows with no market-data requirement
+  });
+
+  it("shows worker placement for an assigned strategy and — for an unassigned one", () => {
+    mockAll(true, true);
+    renderWithProviders(<TccLifecyclePage />);
+    expect(screen.getByText("strategy-worker-03")).toBeInTheDocument();
+    expect(screen.getAllByText("ONLINE").length).toBe(1);
+    const rows = screen.getAllByRole("row");
+    const unassignedRow = rows.find((r) => r.textContent?.includes("DoubleStraddelAlgo"))!;
+    expect(unassignedRow.textContent).not.toContain("strategy-worker");
   });
 
   it("never implies RUNNING means live trading, and shows no market-data-driven live control", () => {

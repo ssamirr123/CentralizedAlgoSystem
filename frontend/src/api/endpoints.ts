@@ -196,6 +196,8 @@ export const sendStrategyCommand = (strategyId: string, body: import("./types").
     { method: "POST", body },
   );
 
+export const listWorkers = () => apiRequest<import("./types").Worker[]>("/api/workers");
+
 export const listExecutionModes = () =>
   apiRequest<import("./types").ExecutionModeOption[]>("/api/execution-modes");
 
