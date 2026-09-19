@@ -68,9 +68,15 @@ def test_adapter_full_lifecycle_reaches_shadow_then_stopped(adapter_cls, expecte
 
 
 @_ADAPTERS
-def test_adapter_generate_order_intents_returns_an_empty_list_today(adapter_cls, expected_id):
-    """Documented, deliberate: real decision-logic integration is future
-    work -- see each adapter module's own docstring."""
+def test_adapter_generate_order_intents_returns_an_empty_list_with_no_market_data(adapter_cls, expected_id):
+    """A bare call (no market_data) returns [] for all three today.
+    DoubleStraddleStrategy/VwapAlgoNiftyHedgeStrategy: real decision-logic
+    integration remains deliberately deferred (see each module's own
+    docstring). CombinedVwapNiftyStrategy (Phase 16.7): real decision
+    logic IS integrated, but required_instruments() gates it -- with no
+    market_data supplied it fails closed to [] exactly like the other
+    two; see tests/common/test_combined_vwap_nifty_strategy.py for its
+    real, non-empty-intent behavior once given market data."""
     strategy = adapter_cls()
     strategy.enable()
     strategy.start()

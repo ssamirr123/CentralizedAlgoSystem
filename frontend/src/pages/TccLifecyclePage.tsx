@@ -94,7 +94,13 @@ export function TccLifecyclePage() {
                         <td>{r.execution_active ? "ACTIVE" : "INACTIVE"}</td>
                         <td>
                           <span className={`badge runtime-${r.runtime_state.toLowerCase()}`}>{r.runtime_state}</span>
-                          {r.last_result_summary && <div className="inline-note">{r.last_result_summary}</div>}
+                          {r.last_result_summary && (
+                            <div className="inline-note">
+                              {/* Phase 16.7: an intent that reached a broker call always did so
+                                  in SHADOW/PAPER mode -- never implied to be a live order. */}
+                              Shadow result: {r.last_result_summary}
+                            </div>
+                          )}
                           {r.last_runtime_error && <div className="form-error">{r.last_runtime_error}</div>}
                         </td>
                         <td>{r.market_data_status || "—"}</td>

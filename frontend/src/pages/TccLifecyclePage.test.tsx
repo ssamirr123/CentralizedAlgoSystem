@@ -180,7 +180,7 @@ describe("TccLifecyclePage", () => {
     expect(screen.getAllByText("INACTIVE").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SHADOW").length).toBe(2);
     expect(screen.getByText("2026-09-19T00:05:00Z")).toBeInTheDocument();
-    expect(screen.getByText("FILLED")).toBeInTheDocument();
+    expect(screen.getByText(/Shadow result: FILLED/)).toBeInTheDocument();
   });
 
   it("shows a runtime error distinctly when the runtime has FAILED", () => {
@@ -215,5 +215,12 @@ describe("TccLifecyclePage", () => {
       expect(screen.queryByRole("button", { name: forbidden })).not.toBeInTheDocument();
       expect(screen.queryByText(forbidden)).not.toBeInTheDocument();
     }
+  });
+
+  it("labels a generated intent's execution result as a shadow result, never implying a live order", () => {
+    mockAll(true, true);
+    renderWithProviders(<TccLifecyclePage />);
+    expect(screen.getByText(/Shadow result:/)).toBeInTheDocument();
+    expect(screen.queryByText(/live order/i)).not.toBeInTheDocument();
   });
 });

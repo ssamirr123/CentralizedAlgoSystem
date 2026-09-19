@@ -291,15 +291,20 @@ def test_strategy_lifecycle_list_covers_all_strategies(client, viewer_auth):
     assert r.status_code == 200
     ids = {row["strategy_id"] for row in r.json()}
     assert ids == STRATEGY_IDS
+    by_id = {row["strategy_id"]: row for row in r.json()}
     for row in r.json():
         assert row["lifecycle_state"] == "STOPPED"
         assert row["assignment_exists"] is False
         assert row["live_authorized"] is False
-        # Phase 16.6: none of the registered strategies declare
-        # required_instruments() today, so market data is never fetched
-        # or gated on for them -- Phase 16.5 behavior is unchanged.
-        assert row["market_data_status"] == ""
         assert row["last_market_data_at"] == ""
+    # market_data_status only reflects the LAST time the runtime actually
+    # attempted an evaluation cycle (run_once()) -- this endpoint never
+    # calls run_once(), and none of these strategies have been started,
+    # so every strategy (including Phase 16.7's CombinedVwapNifty, which
+    # now declares required_instruments()) correctly reports "" here:
+    # nothing has been evaluated yet, never fabricated.
+    for strategy_id in STRATEGY_IDS:
+        assert by_id[strategy_id]["market_data_status"] == ""
 
 
 def test_strategy_lifecycle_detail_for_unknown_strategy_is_404(client, viewer_auth):
@@ -498,6 +503,26 @@ def test_evaluate_running_strategy_generates_zero_intents_by_design(client, bear
     lifecycle = client.get("/api/strategy-lifecycle/DoubleStraddelAlgo", headers=op).json()
     assert lifecycle["runtime_state"] == "HEALTHY"
     assert lifecycle["last_cycle_at"] != ""
+
+
+def test_evaluate_combined_vwap_nifty_reports_no_data_with_no_market_data_source_configured(client, bearer):
+    """Phase 16.7: CombinedVwapNifty now declares required_instruments()
+    for its ported CE/PE legs. build_execution_state() deliberately wires
+    no market_data_source by default (avoiding any external/network
+    dependency at app startup) -- evaluating it must fail closed and
+    report NO_DATA, never fabricate a signal."""
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "CombinedVwapNifty", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategy-lifecycle/CombinedVwapNifty/command", headers=op, json={"command": "START"})
+    r = client.post("/api/strategy-lifecycle/CombinedVwapNifty/evaluate", headers=op)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ticked"] is True
+    assert body["intents_generated"] == 0
+
+    lifecycle = client.get("/api/strategy-lifecycle/CombinedVwapNifty", headers=op).json()
+    assert lifecycle["market_data_status"] == "NO_DATA"
+    assert lifecycle["runtime_state"] == "HEALTHY"  # missing data is not a runtime failure
 
 
 def test_evaluate_response_never_contains_a_credential_field(client, bearer):
