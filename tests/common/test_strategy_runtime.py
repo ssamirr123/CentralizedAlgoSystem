@@ -475,11 +475,14 @@ def test_real_broker_place_order_call_count_is_zero_with_a_recording_broker():
 # --------------------------------------------------------------------------- #
 def test_strategy_with_no_required_instruments_is_unaffected_by_market_data():
     """Phase 16.5 behavior preserved exactly: a strategy that declares no
-    required_instruments() (all 3 real registered strategies today) never
-    triggers a market-data fetch/gate at all, even with no source
+    required_instruments() (BaseStrategy's own default -- as of Phase
+    16.8 all three real registered strategies now DO declare some, see
+    tests/common/test_double_straddle_strategy.py /
+    test_vwap_algo_nifty_hedge_strategy.py / test_combined_vwap_nifty_strategy.py)
+    never triggers a market-data fetch/gate at all, even with no source
     configured."""
     manager, registry, assignment, kill_switch, runtime = _setup(market_data_source=None)
-    strategy = DoubleStraddleStrategy()
+    strategy = _OneShotStrategy(STRATEGY_ID, "ACC1")
     registry.register(strategy)
     assignment.assign(STRATEGY_ID, "ACC1")
     registry.enable(STRATEGY_ID)

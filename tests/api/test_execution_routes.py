@@ -487,9 +487,11 @@ def test_evaluate_inactive_strategy_is_a_pure_noop(client, trader_auth):
 
 
 def test_evaluate_running_strategy_generates_zero_intents_by_design(client, bearer):
-    """The registered Phase-10 strategy classes generate no real intents
-    (Phase 10 scope) -- evaluating them must tick cleanly with zero
-    executions, never fabricate activity."""
+    """DoubleStraddelAlgo now has real, ported decision logic (Phase
+    16.8), but build_execution_state() deliberately wires no
+    market_data_source by default (avoiding any external/network
+    dependency at app startup) -- evaluating it must fail closed to zero
+    intents/executions, never fabricate activity."""
     op = bearer(role="operator")
     client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
     client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})

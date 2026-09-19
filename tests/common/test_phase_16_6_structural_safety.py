@@ -76,20 +76,19 @@ def test_frontend_lifecycle_page_contains_no_broker_sdk_or_credential_literal():
         assert forbidden not in page, forbidden
 
 
-def test_two_of_three_registered_strategies_still_declare_no_required_instruments():
-    """Documents the current, honest state as of Phase 16.6: no rewrite of
-    real strategy decision logic had happened yet -- the market-data gate
-    existed and was proven end-to-end via a test-only strategy only.
-    Phase 16.7 (see docs/phase-16-7-strategy-order-intent-integration-report.md)
-    integrated exactly ONE of the three (CombinedVwapNifty) with real,
-    ported decision logic -- the other two remain unchanged, zero-intent,
-    and market-data-independent."""
+def test_all_three_registered_strategies_now_declare_required_instruments():
+    """Historical note: as of Phase 16.6, none of the three declared any
+    required_instruments() -- the market-data gate existed and was proven
+    end-to-end via a test-only strategy only. Phase 16.7 integrated
+    CombinedVwapNifty with real, ported decision logic; Phase 16.8 (see
+    docs/phase-16-8-remaining-strategy-shadow-integration-report.md)
+    integrated the remaining two (DoubleStraddelAlgo, Vwap_Algo_Nifty_hedge)
+    the same way -- all three now genuinely depend on market data to
+    generate an intent, and all three still fail closed to zero intents
+    with no data supplied (see each strategy's own dedicated test file)."""
+    from trading.common.strategies.combined_vwap_nifty import CombinedVwapNiftyStrategy
     from trading.common.strategies.double_straddle import DoubleStraddleStrategy
     from trading.common.strategies.vwap_algo_nifty_hedge import VwapAlgoNiftyHedgeStrategy
 
-    for cls in (DoubleStraddleStrategy, VwapAlgoNiftyHedgeStrategy):
-        assert cls().required_instruments() == ()
-
-    from trading.common.strategies.combined_vwap_nifty import CombinedVwapNiftyStrategy
-
-    assert CombinedVwapNiftyStrategy().required_instruments() != ()
+    for cls in (CombinedVwapNiftyStrategy, DoubleStraddleStrategy, VwapAlgoNiftyHedgeStrategy):
+        assert cls().required_instruments() != ()
