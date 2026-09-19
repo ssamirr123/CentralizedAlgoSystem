@@ -52,7 +52,40 @@ class _RaisingStrategy(BaseStrategy):
         raise RuntimeError("simulated strategy crash")
 
 
-def _setup(*, execution_mode=ExecutionMode.SHADOW, broker_client=None):
+class _MarketDataAwareStrategy(BaseStrategy):
+    """Phase 16.6 test-only stub: declares required_instruments() and only
+    generates an intent when get_market_data() actually has a quote for
+    every one of them -- proving the fail-closed gate wires all the way
+    through to generate_order_intents()."""
+
+    def __init__(
+        self, strategy_id: str, account_id: str, instruments: tuple[str, ...], *,
+        idempotency_key: str | None = None, **kw,
+    ) -> None:
+        super().__init__(strategy_id, **kw)
+        self._account_id = account_id
+        self._instruments = instruments
+        self._idempotency_key = idempotency_key or f"md-aware-{strategy_id}"
+        self.calls = 0
+
+    def required_instruments(self) -> tuple[str, ...]:
+        return self._instruments
+
+    def _on_generate_order_intents(self):
+        self.calls += 1
+        market_data = self.get_market_data()
+        if not market_data or any(i not in market_data for i in self._instruments):
+            return []
+        return [
+            OrderIntent(
+                strategy_id=self.strategy_id, account_id=self._account_id, symbol="NIFTY24950CE",
+                exchange="NFO", side=OrderSide.BUY, quantity=1, order_type=OrderType.MARKET,
+                idempotency_key=self._idempotency_key,
+            )
+        ]
+
+
+def _setup(*, execution_mode=ExecutionMode.SHADOW, broker_client=None, market_data_source=None):
     manager = BrokerManager()
     account = TradingAccount(
         account_id="ACC1", account_name="A1", broker_id="paper", execution_mode=execution_mode,
@@ -64,7 +97,7 @@ def _setup(*, execution_mode=ExecutionMode.SHADOW, broker_client=None):
     kill_switch = CentralKillSwitch()
     runtime = StrategyRuntime(
         strategy_registry=registry, strategy_assignment=assignment, broker_manager=manager,
-        risk_manager=risk_manager, kill_switch=kill_switch,
+        risk_manager=risk_manager, kill_switch=kill_switch, market_data_source=market_data_source,
     )
     return manager, registry, assignment, kill_switch, runtime
 
@@ -435,3 +468,239 @@ def test_real_broker_place_order_call_count_is_zero_with_a_recording_broker():
     assert recording.place_order_calls == 0
     assert recording.modify_order_calls == 0
     assert recording.cancel_order_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# Phase 16.6 -- market-data-gated evaluation
+# --------------------------------------------------------------------------- #
+def test_strategy_with_no_required_instruments_is_unaffected_by_market_data():
+    """Phase 16.5 behavior preserved exactly: a strategy that declares no
+    required_instruments() (all 3 real registered strategies today) never
+    triggers a market-data fetch/gate at all, even with no source
+    configured."""
+    manager, registry, assignment, kill_switch, runtime = _setup(market_data_source=None)
+    strategy = DoubleStraddleStrategy()
+    registry.register(strategy)
+    assignment.assign(STRATEGY_ID, "ACC1")
+    registry.enable(STRATEGY_ID)
+    registry.start(STRATEGY_ID)
+    result = runtime.run_once(STRATEGY_ID)
+    assert result.ticked is True
+    assert result.market_data_status == ""
+
+
+def test_required_instrument_missing_blocks_evaluation_entirely():
+    from trading.common.market_data_gateway import FixedMarketDataSource, MarketDataStatus
+
+    manager, registry, assignment, kill_switch, runtime = _setup(market_data_source=FixedMarketDataSource())
+    strategy = _MarketDataAwareStrategy(STRATEGY_ID, "ACC1", ("NIFTY",))
+    registry.register(strategy)
+    assignment.assign(STRATEGY_ID, "ACC1")
+    registry.enable(STRATEGY_ID)
+    registry.start(STRATEGY_ID)
+
+    result = runtime.run_once(STRATEGY_ID)
+
+    assert result.intents_generated == 0
+    assert result.executions == []
+    assert result.market_data_status == MarketDataStatus.NO_DATA.value
+    assert strategy.calls == 0  # generate_order_intents() never even called
+    assert runtime.get_status(STRATEGY_ID).state == RuntimeState.HEALTHY  # missing data != a failure
+
+
+def test_stale_required_instrument_blocks_evaluation():
+    from datetime import datetime, timedelta, timezone
+
+    from trading.common.market_data_gateway import FixedMarketDataSource, MarketDataStatus
+    from trading.market_data.schemas import IndexQuote
+
+    stale_quote = IndexQuote.build(
+        symbol="NIFTY", ltp=24950.0, provider_timestamp=datetime.now(timezone.utc) - timedelta(seconds=999),
+    )
+    source = FixedMarketDataSource({"NIFTY": stale_quote})
+    manager, registry, assignment, kill_switch, runtime = _setup(market_data_source=source)
+    strategy = _MarketDataAwareStrategy(STRATEGY_ID, "ACC1", ("NIFTY",))
+    registry.register(strategy)
+    assignment.assign(STRATEGY_ID, "ACC1")
+    registry.enable(STRATEGY_ID)
+    registry.start(STRATEGY_ID)
+
+    result = runtime.run_once(STRATEGY_ID)
+
+    assert result.intents_generated == 0
+    assert result.market_data_status == MarketDataStatus.STALE.value
+    assert strategy.calls == 0
+
+
+def test_partial_market_data_blocks_evaluation_never_partial_execution():
+    from trading.common.market_data_gateway import FixedMarketDataSource
+    from trading.market_data.schemas import IndexQuote
+
+    source = FixedMarketDataSource({"NIFTY": IndexQuote.build(symbol="NIFTY", ltp=24950.0)})
+    manager, registry, assignment, kill_switch, runtime = _setup(market_data_source=source)
+    strategy = _MarketDataAwareStrategy(STRATEGY_ID, "ACC1", ("NIFTY", "NIFTY24950CE"))
+    registry.register(strategy)
+    assignment.assign(STRATEGY_ID, "ACC1")
+    registry.enable(STRATEGY_ID)
+    registry.start(STRATEGY_ID)
+
+    result = runtime.run_once(STRATEGY_ID)
+
+    assert result.intents_generated == 0
+    assert strategy.calls == 0
+
+
+def test_available_fresh_market_data_reaches_the_strategy_and_a_simulated_execution():
+    from trading.common.market_data_gateway import FixedMarketDataSource, MarketDataStatus
+    from trading.market_data.schemas import IndexQuote
+
+    source = FixedMarketDataSource({"NIFTY": IndexQuote.build(symbol="NIFTY", ltp=24950.0)})
+    manager, registry, assignment, kill_switch, runtime = _setup(market_data_source=source)
+    strategy = _MarketDataAwareStrategy(STRATEGY_ID, "ACC1", ("NIFTY",))
+    registry.register(strategy)
+    assignment.assign(STRATEGY_ID, "ACC1")
+    registry.enable(STRATEGY_ID)
+    registry.start(STRATEGY_ID)
+
+    result = runtime.run_once(STRATEGY_ID)
+
+    assert result.intents_generated == 1
+    assert result.executions[0].success is True
+    assert result.market_data_status == MarketDataStatus.AVAILABLE.value
+    assert strategy.calls == 1
+    status = runtime.get_status(STRATEGY_ID)
+    assert status.market_data_status == MarketDataStatus.AVAILABLE.value
+    assert status.last_market_data_at != ""
+
+
+def test_provider_error_blocks_evaluation_and_is_reported():
+    from trading.common.market_data_gateway import MarketDataStatus
+
+    class _BrokenSource:
+        def get_quote(self, instrument):
+            raise ConnectionError("simulated provider outage")
+
+    manager, registry, assignment, kill_switch, runtime = _setup(market_data_source=_BrokenSource())
+    strategy = _MarketDataAwareStrategy(STRATEGY_ID, "ACC1", ("NIFTY",))
+    registry.register(strategy)
+    assignment.assign(STRATEGY_ID, "ACC1")
+    registry.enable(STRATEGY_ID)
+    registry.start(STRATEGY_ID)
+
+    result = runtime.run_once(STRATEGY_ID)
+    assert result.market_data_status == MarketDataStatus.PROVIDER_ERROR.value
+    assert strategy.calls == 0
+    assert runtime.get_status(STRATEGY_ID).state == RuntimeState.HEALTHY
+
+
+def test_repeated_evaluation_with_fresh_data_remains_idempotent():
+    """Combines Phase 16.5's idempotency guarantee with Phase 16.6's
+    market-data gate: repeated cycles with the SAME signal and fresh data
+    still resolve to the same cached execution, never a duplicate."""
+    from trading.common.market_data_gateway import FixedMarketDataSource
+    from trading.market_data.schemas import IndexQuote
+
+    source = FixedMarketDataSource({"NIFTY": IndexQuote.build(symbol="NIFTY", ltp=24950.0)})
+    manager, registry, assignment, kill_switch, runtime = _setup(market_data_source=source)
+    strategy = _MarketDataAwareStrategy(STRATEGY_ID, "ACC1", ("NIFTY",))
+    registry.register(strategy)
+    assignment.assign(STRATEGY_ID, "ACC1")
+    registry.enable(STRATEGY_ID)
+    registry.start(STRATEGY_ID)
+
+    first = runtime.run_once(STRATEGY_ID)
+    second = runtime.run_once(STRATEGY_ID)
+
+    assert first.executions[0].order_id == second.executions[0].order_id
+
+
+def test_two_strategies_requiring_different_instruments_never_cross_contaminate():
+    """Strategy A requires NIFTY, Strategy B requires BANKNIFTY -- each
+    must only ever see its own instrument's data, on its own account."""
+    from trading.common.market_data_gateway import FixedMarketDataSource
+    from trading.market_data.schemas import IndexQuote
+
+    source = FixedMarketDataSource({
+        "NIFTY": IndexQuote.build(symbol="NIFTY", ltp=24950.0),
+        "BANKNIFTY": IndexQuote.build(symbol="BANKNIFTY", ltp=51000.0),
+    })
+    manager = BrokerManager()
+    manager.register_account(
+        TradingAccount(account_id="ACC_A", account_name="A", broker_id="paper", execution_mode=ExecutionMode.SHADOW),
+        broker_client=PaperBroker(),
+    )
+    manager.register_account(
+        TradingAccount(account_id="ACC_B", account_name="B", broker_id="paper", execution_mode=ExecutionMode.SHADOW),
+        broker_client=PaperBroker(),
+    )
+    registry = StrategyRegistry()
+    assignment = StrategyAssignment(manager)
+    risk_manager = RiskManager(assignment)
+    kill_switch = CentralKillSwitch()
+    runtime = StrategyRuntime(
+        strategy_registry=registry, strategy_assignment=assignment, broker_manager=manager,
+        risk_manager=risk_manager, kill_switch=kill_switch, market_data_source=source,
+    )
+    strat_a = _MarketDataAwareStrategy("StrategyA", "ACC_A", ("NIFTY",))
+    strat_b = _MarketDataAwareStrategy("StrategyB", "ACC_B", ("BANKNIFTY",))
+    registry.register(strat_a)
+    registry.register(strat_b)
+    assignment.assign("StrategyA", "ACC_A")
+    assignment.assign("StrategyB", "ACC_B")
+    for sid in ("StrategyA", "StrategyB"):
+        registry.enable(sid)
+        registry.start(sid)
+
+    result_a = runtime.run_once("StrategyA")
+    result_b = runtime.run_once("StrategyB")
+
+    assert result_a.executions[0].account_id == "ACC_A"
+    assert result_b.executions[0].account_id == "ACC_B"
+
+
+def test_concurrent_evaluation_with_market_data_is_safe_across_strategies():
+    from trading.common.market_data_gateway import FixedMarketDataSource
+    from trading.market_data.schemas import IndexQuote
+
+    source = FixedMarketDataSource({
+        "NIFTY": IndexQuote.build(symbol="NIFTY", ltp=24950.0),
+        "BANKNIFTY": IndexQuote.build(symbol="BANKNIFTY", ltp=51000.0),
+    })
+    manager = BrokerManager()
+    manager.register_account(
+        TradingAccount(account_id="ACC_A", account_name="A", broker_id="paper", execution_mode=ExecutionMode.SHADOW),
+        broker_client=PaperBroker(),
+    )
+    manager.register_account(
+        TradingAccount(account_id="ACC_B", account_name="B", broker_id="paper", execution_mode=ExecutionMode.SHADOW),
+        broker_client=PaperBroker(),
+    )
+    registry = StrategyRegistry()
+    assignment = StrategyAssignment(manager)
+    risk_manager = RiskManager(assignment)
+    kill_switch = CentralKillSwitch()
+    runtime = StrategyRuntime(
+        strategy_registry=registry, strategy_assignment=assignment, broker_manager=manager,
+        risk_manager=risk_manager, kill_switch=kill_switch, market_data_source=source,
+    )
+    registry.register(_MarketDataAwareStrategy("StrategyA", "ACC_A", ("NIFTY",)))
+    registry.register(_MarketDataAwareStrategy("StrategyB", "ACC_B", ("BANKNIFTY",)))
+    assignment.assign("StrategyA", "ACC_A")
+    assignment.assign("StrategyB", "ACC_B")
+    for sid in ("StrategyA", "StrategyB"):
+        registry.enable(sid)
+        registry.start(sid)
+
+    outcomes = {}
+
+    def worker(sid):
+        outcomes[sid] = runtime.run_once(sid)
+
+    threads = [threading.Thread(target=worker, args=(sid,)) for sid in ("StrategyA", "StrategyB")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert outcomes["StrategyA"].executions[0].account_id == "ACC_A"
+    assert outcomes["StrategyB"].executions[0].account_id == "ACC_B"

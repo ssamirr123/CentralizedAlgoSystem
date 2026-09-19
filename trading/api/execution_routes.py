@@ -280,6 +280,11 @@ class StrategyLifecycleOut(BaseModel):
     last_cycle_at: str
     last_runtime_error: str
     last_result_summary: str
+    # Phase 16.6 -- trading/common/market_data_gateway.py. "" when the
+    # strategy declares no required_instruments() (every strategy
+    # registered today) -- otherwise one of MarketDataStatus's values.
+    market_data_status: str
+    last_market_data_at: str
 
     @classmethod
     def from_view(cls, v: StrategyLifecycleView, runtime: RuntimeStatus | None = None) -> "StrategyLifecycleOut":
@@ -294,6 +299,8 @@ class StrategyLifecycleOut(BaseModel):
             runtime_state=(runtime.state.value if runtime else "INACTIVE"),
             last_cycle_at=(runtime.last_cycle_at if runtime else ""),
             last_runtime_error=(runtime.last_error if runtime else ""),
+            market_data_status=(runtime.market_data_status if runtime else ""),
+            last_market_data_at=(runtime.last_market_data_at if runtime else ""),
             last_result_summary=(runtime.last_result_summary if runtime else ""),
         )
 

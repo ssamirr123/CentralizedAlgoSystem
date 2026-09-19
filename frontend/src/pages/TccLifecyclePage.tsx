@@ -6,12 +6,16 @@ import { PageHeader } from "@/components/PageHeader";
 import { QueryBoundary } from "@/components/States";
 import type { StrategyCommandResult } from "@/api/types";
 
-// Phase 16.3/16.4/16.5: read-only lifecycle + runtime display plus two
-// control-plane commands (START/STOP). Deliberately shows FOUR separate
-// facts (Lifecycle / Authorization / Execution / Runtime) rather than one
-// merged status -- see trading/common/strategy_lifecycle.py's and
-// trading/common/strategy_runtime.py's own module docstrings for why
-// these must never be collapsed into a single value.
+// Phase 16.3/16.4/16.5/16.6: read-only lifecycle + runtime + market-data
+// display plus two control-plane commands (START/STOP). Deliberately
+// shows FIVE separate facts (Lifecycle / Authorization / Execution /
+// Runtime / Market Data) rather than one merged status -- see
+// trading/common/strategy_lifecycle.py's, trading/common/strategy_runtime.py's,
+// and trading/common/market_data_gateway.py's own module docstrings for
+// why these must never be collapsed into a single value. Market data
+// status is purely informational here -- real/normalized market data
+// reaching a strategy (Phase 16.6) is only ever permitted to flow toward
+// a SHADOW/PAPER execution, never toward a live broker order.
 //
 //     STRATEGY LIFECYCLE STATE  !=  LIVE AUTHORIZATION  !=  ORDER EXECUTION
 //
@@ -66,9 +70,11 @@ export function TccLifecyclePage() {
                     <th>Authorization</th>
                     <th>Execution</th>
                     <th>Runtime</th>
+                    <th>Market Data</th>
                     <th>Control</th>
                     <th>Last transition</th>
                     <th>Last heartbeat</th>
+                    <th>Last market data</th>
                     <th>Last error</th>
                   </tr>
                 </thead>
@@ -91,6 +97,7 @@ export function TccLifecyclePage() {
                           {r.last_result_summary && <div className="inline-note">{r.last_result_summary}</div>}
                           {r.last_runtime_error && <div className="form-error">{r.last_runtime_error}</div>}
                         </td>
+                        <td>{r.market_data_status || "—"}</td>
                         <td>
                           <div className="filters" style={{ gap: 6 }}>
                             <button
@@ -122,6 +129,7 @@ export function TccLifecyclePage() {
                         </td>
                         <td className="mono">{r.last_transition_at || "—"}</td>
                         <td className="mono">{r.last_heartbeat_at || "—"}</td>
+                        <td className="mono">{r.last_market_data_at || "—"}</td>
                         <td>{r.last_error || "—"}</td>
                       </tr>
                     );

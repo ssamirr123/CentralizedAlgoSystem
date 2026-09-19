@@ -429,6 +429,10 @@ export interface StrategyLifecycle {
   last_cycle_at: string;
   last_runtime_error: string;
   last_result_summary: string;
+  // Phase 16.6 -- trading/common/market_data_gateway.py. "" when the
+  // strategy declares no required instruments (every strategy today).
+  market_data_status: "" | "AVAILABLE" | "NO_DATA" | "STALE" | "INVALID" | "PROVIDER_ERROR";
+  last_market_data_at: string;
 }
 
 export interface RuntimeExecutionResult {

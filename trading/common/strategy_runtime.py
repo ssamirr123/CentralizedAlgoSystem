@@ -76,6 +76,12 @@ from trading.common.brokers.shadow_broker import ShadowBroker
 from trading.common.execution import ExecutionConfig, ExecutionResult, StrategyExecutionEngine
 from trading.common.idempotency_store import IdempotencyStore, InMemoryIdempotencyStore
 from trading.common.kill_switch import CentralKillSwitch
+from trading.common.market_data_gateway import (
+    DEFAULT_MAX_DATA_AGE_SECONDS,
+    MarketDataSource,
+    MarketDataStatus,
+    gather_market_data,
+)
 from trading.common.order_intent import OrderIntent
 from trading.common.risk_manager import RiskManager
 from trading.common.strategy import StrategyStatus
@@ -123,6 +129,12 @@ class RuntimeCycleResult:
     intents_generated: int
     executions: list[ExecutionResult] = field(default_factory=list)
     error: str = ""
+    # Phase 16.6 -- "" when the strategy declares no required_instruments()
+    # (Phase 16.5 behavior, unchanged); otherwise one of MarketDataStatus's
+    # values. NO_DATA/STALE/INVALID/PROVIDER_ERROR all mean
+    # generate_order_intents() was never called this cycle -- fail closed,
+    # not a strategy/runtime failure.
+    market_data_status: str = ""
 
 
 @dataclass
@@ -134,6 +146,8 @@ class RuntimeStatus:
     last_cycle_at: str
     last_error: str
     last_result_summary: str
+    market_data_status: str = ""
+    last_market_data_at: str = ""
 
 
 def _now() -> str:
@@ -158,11 +172,22 @@ class StrategyRuntime:
         metrics_registry: Any | None = None,
         audit_trail: Any | None = None,
         idempotency_store: IdempotencyStore | None = None,
+        market_data_source: MarketDataSource | None = None,
+        max_data_age_seconds: float = DEFAULT_MAX_DATA_AGE_SECONDS,
     ) -> None:
         self._strategy_registry = strategy_registry
         self._strategy_assignment = strategy_assignment
         self._broker_manager = broker_manager
         self._metrics_registry = metrics_registry
+        # Phase 16.6 -- optional. None (the default) preserves Phase
+        # 16.5's exact behavior for every strategy, since
+        # gather_market_data() with no source configured only matters for
+        # a strategy that actually declares required_instruments() (none
+        # of the three registered production strategies do today).
+        self._market_data_source = market_data_source
+        self._max_data_age_seconds = max_data_age_seconds
+        self._last_market_data_status: dict[str, str] = {}
+        self._last_market_data_at: dict[str, str] = {}
         # Reuses the existing idempotency-store abstraction (Phase 15D --
         # trading/common/idempotency_store.py), never a second, unrelated
         # mechanism. InMemoryIdempotencyStore is explicitly documented as
@@ -210,14 +235,51 @@ class StrategyRuntime:
             if strategy.get_status() not in _ACTIVE_STATUSES:
                 return RuntimeCycleResult(strategy_id=strategy_id, ticked=False, intents_generated=0)
 
+            required = strategy.required_instruments()
+            market_data = None
+            md_status = ""
+            if required:
+                market_data, md_results = gather_market_data(
+                    self._market_data_source, required, max_age_seconds=self._max_data_age_seconds,
+                )
+                # Report the worst status across required instruments when
+                # data isn't fully available; AVAILABLE only when every
+                # one of them resolved AVAILABLE (gather_market_data's own
+                # fail-closed, no-partial-data rule).
+                md_status = (
+                    MarketDataStatus.AVAILABLE.value if market_data is not None
+                    else next((r.status.value for r in md_results if r.status != MarketDataStatus.AVAILABLE), "")
+                )
+                self._last_market_data_status[strategy_id] = md_status
+                if market_data is not None:
+                    self._last_market_data_at[strategy_id] = _now()
+                if market_data is None:
+                    # Fail closed: NO_DATA/STALE/INVALID/PROVIDER_ERROR all
+                    # mean generate_order_intents() is never called this
+                    # cycle -- this is expected, routine behavior (e.g.
+                    # outside market hours), never a strategy/runtime
+                    # failure, so RuntimeState stays HEALTHY, not FAILED.
+                    self._last_cycle_at[strategy_id] = _now()
+                    self._failed.discard(strategy_id)
+                    self._last_error.pop(strategy_id, None)
+                    if self._metrics_registry is not None:
+                        self._metrics_registry.record_strategy_heartbeat(strategy_id)
+                    return RuntimeCycleResult(
+                        strategy_id=strategy_id, ticked=True, intents_generated=0,
+                        market_data_status=md_status,
+                    )
+
             try:
-                intents = strategy.generate_order_intents()
+                intents = strategy.generate_order_intents(market_data)
             except Exception as exc:
-                strategy.mark_error(f"strategy_runtime: generate_order_intents raised: {exc}")
+                strategy.mark_error(f"strategy_runtime: STRATEGY_EVALUATION_FAILED: {exc}")
                 self._last_error[strategy_id] = str(exc)
                 self._failed.add(strategy_id)
                 self._last_cycle_at[strategy_id] = _now()
-                return RuntimeCycleResult(strategy_id=strategy_id, ticked=True, intents_generated=0, error=str(exc))
+                return RuntimeCycleResult(
+                    strategy_id=strategy_id, ticked=True, intents_generated=0, error=str(exc),
+                    market_data_status=md_status,
+                )
 
             executions: list[ExecutionResult] = []
             error = ""
@@ -231,7 +293,16 @@ class StrategyRuntime:
                     self._assert_simulated_broker(intent)
                     executions.append(self._engine.execute(intent))
             except ShadowBoundaryViolation as exc:
-                strategy.mark_error(f"strategy_runtime: {exc}")
+                strategy.mark_error(f"strategy_runtime: SHADOW_EXECUTION_FAILED: {exc}")
+                error = str(exc)
+            except Exception as exc:
+                # e.g. IdempotencyKeyReuseError -- execute() deliberately
+                # RAISES (rather than returning a rejected ExecutionResult)
+                # for a caller-side bug like reusing one idempotency_key
+                # for two genuinely different intents. Never let that
+                # escape run_once() uncaught -- fail closed, report it,
+                # same as every other cycle failure mode.
+                strategy.mark_error(f"strategy_runtime: SHADOW_EXECUTION_FAILED: {exc}")
                 error = str(exc)
 
             self._last_cycle_at[strategy_id] = _now()
@@ -247,7 +318,7 @@ class StrategyRuntime:
 
             return RuntimeCycleResult(
                 strategy_id=strategy_id, ticked=True, intents_generated=len(intents),
-                executions=executions, error=error,
+                executions=executions, error=error, market_data_status=md_status,
             )
 
     def _assert_simulated_broker(self, intent: OrderIntent) -> None:
@@ -295,4 +366,6 @@ class StrategyRuntime:
             last_intent_at=strategy.get_metrics().last_intent_at,
             last_cycle_at=self._last_cycle_at.get(strategy_id, ""),
             last_error=self._last_error.get(strategy_id, ""), last_result_summary=summary,
+            market_data_status=self._last_market_data_status.get(strategy_id, ""),
+            last_market_data_at=self._last_market_data_at.get(strategy_id, ""),
         )

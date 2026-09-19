@@ -15,6 +15,7 @@ const ROWS = [
     account_authorization_state: "READ_ONLY" as const, live_authorized: false, execution_active: false,
     last_transition_at: "", last_heartbeat_at: "", last_error: "", assignment_exists: true, blocking_reasons: [],
     runtime_state: "INACTIVE" as const, last_cycle_at: "", last_runtime_error: "", last_result_summary: "",
+    market_data_status: "" as const, last_market_data_at: "",
   },
   {
     strategy_id: "CombinedVwapNifty", assignment_id: null, account_id: null,
@@ -23,6 +24,7 @@ const ROWS = [
     last_transition_at: "", last_heartbeat_at: "", last_error: "", assignment_exists: false,
     blocking_reasons: ["no assignment exists for this strategy"],
     runtime_state: "INACTIVE" as const, last_cycle_at: "", last_runtime_error: "", last_result_summary: "",
+    market_data_status: "" as const, last_market_data_at: "",
   },
   {
     strategy_id: "Vwap_Algo_Nifty_hedge", assignment_id: "Vwap_Algo_Nifty_hedge", account_id: "ACC_A",
@@ -31,6 +33,7 @@ const ROWS = [
     last_transition_at: "2026-09-19T00:00:00Z", last_heartbeat_at: "2026-09-19T00:05:00Z", last_error: "",
     assignment_exists: true, runtime_state: "HEALTHY" as const, last_cycle_at: "2026-09-19T00:05:00Z",
     last_runtime_error: "", last_result_summary: "FILLED",
+    market_data_status: "AVAILABLE" as const, last_market_data_at: "2026-09-19T00:04:55Z",
     blocking_reasons: [],
   },
 ];
@@ -196,5 +199,21 @@ describe("TccLifecyclePage", () => {
     renderWithProviders(<TccLifecyclePage />);
     expect(screen.getByText("FAILED")).toBeInTheDocument();
     expect(screen.getByText(/not a known-simulated broker/)).toBeInTheDocument();
+  });
+
+  it("shows market data status and last-market-data timestamp distinctly from lifecycle/runtime", () => {
+    mockAll(true, true);
+    renderWithProviders(<TccLifecyclePage />);
+    expect(screen.getByText("AVAILABLE")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0); // the two rows with no market-data requirement
+  });
+
+  it("never implies RUNNING means live trading, and shows no market-data-driven live control", () => {
+    mockAll(true, true);
+    renderWithProviders(<TccLifecyclePage />);
+    for (const forbidden of [/^go live$/i, /live execution/i, /enable live/i]) {
+      expect(screen.queryByRole("button", { name: forbidden })).not.toBeInTheDocument();
+      expect(screen.queryByText(forbidden)).not.toBeInTheDocument();
+    }
   });
 });

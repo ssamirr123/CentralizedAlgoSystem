@@ -49,6 +49,16 @@ from trading.common.observability import (
 )
 from trading.common.order_intent import OrderIntent
 from trading.common.trading_account import ExecutionMode
+from trading.market_data.schemas import IndexQuote, OptionQuote
+
+# Phase 16.6: a strategy_id/instrument -> normalized-quote mapping. Reuses
+# the existing Phase "market data" normalized types unchanged (never a
+# provider-specific object) -- see trading/common/market_data_gateway.py
+# for how trading/common/strategy_runtime.py builds one of these before
+# calling generate_order_intents(). None means "no market data was
+# supplied for this cycle" (e.g. no provider configured, or the strategy
+# declares no required_instruments()) -- never fabricated.
+MarketDataInput = dict[str, "IndexQuote | OptionQuote"]
 
 
 class StrategyStatus(str, Enum):
@@ -117,10 +127,29 @@ class Strategy(ABC):
         """Transition out of an active state into STOPPED."""
 
     @abstractmethod
-    def generate_order_intents(self) -> list[OrderIntent]:
+    def generate_order_intents(self, market_data: MarketDataInput | None = None) -> list[OrderIntent]:
         """Return zero or more new OrderIntent objects. Must never itself
         call a broker -- that is RiskManager/ExecutionEngine's job, entirely
-        outside this interface."""
+        outside this interface.
+
+        market_data (Phase 16.6, optional, default None): a snapshot of
+        already-normalized quotes for this strategy's own
+        required_instruments(), keyed by instrument. A strategy that
+        declares no required instruments is never called with anything
+        but None. Passing it is never itself permission to trade -- every
+        generated intent still passes through the full, unmodified
+        StrategyExecutionEngine gate sequence."""
+
+    def required_instruments(self) -> tuple[str, ...]:
+        """Phase 16.6: the internal instrument symbols (see
+        trading/market_data/schemas.py's IndexQuote.symbol convention)
+        this strategy needs fresh market data for before it can safely
+        generate an intent. Empty (the default) means "no market-data
+        dependency" -- trading/common/strategy_runtime.py then never
+        fetches or gates on market data for this strategy at all,
+        preserving Phase 16.5's exact behavior. Not abstract: existing
+        strategies need not override this to keep working."""
+        return ()
 
     @abstractmethod
     def get_status(self) -> StrategyStatus:
@@ -165,9 +194,17 @@ class BaseStrategy(Strategy):
         self._metrics_registry = metrics_registry
         self._audit_trail = audit_trail
         self._alerts = alerts
+        self._last_market_data: MarketDataInput | None = None
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(strategy_id={self.strategy_id!r}, status={self._status.value})"
+
+    def get_market_data(self) -> MarketDataInput | None:
+        """The market_data snapshot passed to the CURRENT (or most recent)
+        generate_order_intents() call -- for a concrete strategy's own
+        _on_generate_order_intents() override to read, without changing
+        that hook's long-established zero-arg signature."""
+        return self._last_market_data
 
     @property
     def execution_mode(self) -> ExecutionMode:
@@ -247,7 +284,7 @@ class BaseStrategy(Strategy):
         if self._alerts is not None:
             self._alerts.strategy_stopped(self.strategy_id)
 
-    def generate_order_intents(self) -> list[OrderIntent]:
+    def generate_order_intents(self, market_data: MarketDataInput | None = None) -> list[OrderIntent]:
         if self._status not in _ACTIVE_STATUSES:
             raise InvalidStrategyStateError(
                 f"Cannot generate order intents for '{self.strategy_id}' from status {self._status.value!r}; "
@@ -255,6 +292,12 @@ class BaseStrategy(Strategy):
             )
         if self._metrics_registry is not None:
             self._metrics_registry.record_strategy_heartbeat(self.strategy_id)
+        # Phase 16.6: stashed as a plain attribute (never passed as a hook
+        # parameter) so every existing _on_generate_order_intents()
+        # override -- all zero-arg today -- keeps working completely
+        # unchanged. A strategy that wants market data reads
+        # self.get_market_data() from inside its own hook override.
+        self._last_market_data = market_data
         try:
             intents = self._on_generate_order_intents()
         except Exception as exc:

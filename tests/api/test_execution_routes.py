@@ -295,6 +295,11 @@ def test_strategy_lifecycle_list_covers_all_strategies(client, viewer_auth):
         assert row["lifecycle_state"] == "STOPPED"
         assert row["assignment_exists"] is False
         assert row["live_authorized"] is False
+        # Phase 16.6: none of the registered strategies declare
+        # required_instruments() today, so market data is never fetched
+        # or gated on for them -- Phase 16.5 behavior is unchanged.
+        assert row["market_data_status"] == ""
+        assert row["last_market_data_at"] == ""
 
 
 def test_strategy_lifecycle_detail_for_unknown_strategy_is_404(client, viewer_auth):
