@@ -84,6 +84,19 @@ EVENT_BROKER_CONNECTED = "BROKER_CONNECTED"
 EVENT_BROKER_DISCONNECTED = "BROKER_DISCONNECTED"
 EVENT_ERROR = "ERROR"
 
+# Phase 16.10/16.11 -- portfolio-risk and distributed-worker lifecycle
+# events. Worker heartbeats themselves are deliberately NOT an event here
+# (see trading/common/worker_registry.py's own module docstring) -- only
+# state TRANSITIONS are audited, never routine polling.
+EVENT_PORTFOLIO_RISK_DECISION = "PORTFOLIO_RISK_DECISION"
+EVENT_WORKER_REGISTERED = "WORKER_REGISTERED"
+EVENT_WORKER_ONLINE = "WORKER_ONLINE"
+EVENT_WORKER_HEARTBEAT_LOST = "WORKER_HEARTBEAT_LOST"
+EVENT_WORKER_OFFLINE = "WORKER_OFFLINE"
+EVENT_WORKER_SESSION_REPLACEMENT_REJECTED = "WORKER_SESSION_REPLACEMENT_REJECTED"
+EVENT_STRATEGY_WORKER_ASSIGNED = "STRATEGY_WORKER_ASSIGNED"
+EVENT_STRATEGY_WORKER_UNASSIGNED = "STRATEGY_WORKER_UNASSIGNED"
+
 # The full, in-order lifecycle this phase's brief names -- exposed so a
 # caller (or a test) can assert a trace visits every stage it reached in
 # this exact order, without hand-copying the list everywhere.

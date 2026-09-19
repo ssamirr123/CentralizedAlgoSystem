@@ -16,6 +16,7 @@ import { RiskPage } from "@/pages/RiskPage";
 import { SystemHealthPage } from "@/pages/SystemHealthPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { TccOverviewPage } from "@/pages/TccOverviewPage";
+import { TccOperationsPage } from "@/pages/TccOperationsPage";
 import { TccStrategiesPage } from "@/pages/TccStrategiesPage";
 import { TccAccountsPage } from "@/pages/TccAccountsPage";
 import { TccBrokersPage } from "@/pages/TccBrokersPage";
@@ -57,6 +58,7 @@ export const NAV_ROUTES: NavRoute[] = [
   // Distinct nav section from the legacy telemetry pages above (see
   // docs/phase-12-react-control-center-report.md's naming-collision note).
   { path: "/execution", label: "Execution Overview", element: TccOverviewPage, permission: "VIEW" },
+  { path: "/execution/operations", label: "Operations", element: TccOperationsPage, permission: "VIEW" },
   { path: "/execution/strategies", label: "Execution Strategies", element: TccStrategiesPage, permission: "VIEW" },
   { path: "/execution/accounts", label: "Trading Accounts", element: TccAccountsPage, permission: "VIEW" },
   { path: "/execution/brokers", label: "Brokers", element: TccBrokersPage, permission: "VIEW" },

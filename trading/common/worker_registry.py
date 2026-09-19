@@ -15,7 +15,7 @@ from __future__ import annotations
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from trading.common.worker_identity import WorkerInfo, WorkerStatus
 
@@ -49,12 +49,24 @@ class WorkerRegistry:
     def __init__(
         self, *, heartbeat_timeout_seconds: float = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS,
         clock: Callable[[], datetime] | None = None,
+        audit_trail: Any | None = None,
     ) -> None:
         self._workers: dict[str, WorkerInfo] = {}
         self._strategy_owner: dict[str, str] = {}
         self._heartbeat_timeout = heartbeat_timeout_seconds
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        # Phase 16.11 -- optional so every pre-existing caller/test
+        # (constructed before this parameter existed) sees zero behavior
+        # change: None means transitions are simply never audited. Only
+        # meaningful STATE TRANSITIONS are recorded here, never a routine
+        # heartbeat -- see the module docstring and record_heartbeat()'s
+        # own comment.
+        self._audit_trail = audit_trail
         self._lock = threading.Lock()
+
+    def _audit(self, event_type: str, *, worker_id: str, **detail: Any) -> None:
+        if self._audit_trail is not None:
+            self._audit_trail.append(event_type, correlation_id=worker_id, **detail)
 
     def register_worker(
         self, *, worker_id: str, name: str, version: str = "", git_sha: str = "", host_identity: str = "",
@@ -65,6 +77,10 @@ class WorkerRegistry:
                 self._recompute_status_locked(worker_id)
                 existing = self._workers[worker_id]
                 if existing.status == WorkerStatus.ONLINE:
+                    self._audit(
+                        "WORKER_SESSION_REPLACEMENT_REJECTED", worker_id=worker_id,
+                        reason="a second concurrent registration was attempted while the existing session is ONLINE",
+                    )
                     raise DuplicateWorkerSessionError(
                         f"worker_id {worker_id!r} is already ONLINE (session {existing.session_id!r}); "
                         "refusing a second concurrent registration"
@@ -76,6 +92,8 @@ class WorkerRegistry:
                 assigned_strategy_ids=existing.assigned_strategy_ids if existing else (),
             )
             self._workers[worker_id] = info
+            self._audit("WORKER_REGISTERED", worker_id=worker_id, name=name, version=version, git_sha=git_sha)
+            self._audit("WORKER_ONLINE", worker_id=worker_id, session_id=info.session_id)
             return info
 
     def get_worker(self, worker_id: str) -> WorkerInfo:
@@ -96,20 +114,30 @@ class WorkerRegistry:
         self, worker_id: str, *, session_id: str | None = None, strategy_ids: Iterable[str] | None = None,
         runtime_state: str | None = None,
     ) -> WorkerInfo:
+        # A normal heartbeat itself is intentionally NEVER audited (Section
+        # 14: "do not create excessive heartbeat audit noise") -- only the
+        # RECOVERY transition (was not ONLINE, heartbeat brings it back) is.
         with self._lock:
             worker = self._workers.get(worker_id)
             if worker is None:
                 raise UnknownWorkerError(f"No such worker: {worker_id!r}")
             if session_id is not None and session_id != worker.session_id:
+                self._audit(
+                    "WORKER_SESSION_REPLACEMENT_REJECTED", worker_id=worker_id,
+                    reason="heartbeat session_id does not match the current active session -- stale or duplicate process",
+                )
                 raise DuplicateWorkerSessionError(
                     f"heartbeat session_id {session_id!r} does not match the current active session "
                     f"{worker.session_id!r} for worker {worker_id!r} -- stale or duplicate process"
                 )
+            previous_status = worker.status
             worker.last_heartbeat_at = self._clock().isoformat()
             if worker.status not in (WorkerStatus.STOPPED,):
                 worker.status = WorkerStatus.DEGRADED if runtime_state == "DEGRADED" else WorkerStatus.ONLINE
             if strategy_ids is not None:
                 worker.assigned_strategy_ids = tuple(strategy_ids)
+            if previous_status != WorkerStatus.ONLINE and worker.status == WorkerStatus.ONLINE:
+                self._audit("WORKER_ONLINE", worker_id=worker_id, recovered_from=previous_status.value)
             return worker
 
     def mark_offline(self, worker_id: str) -> WorkerInfo:
@@ -118,6 +146,7 @@ class WorkerRegistry:
             if worker is None:
                 raise UnknownWorkerError(f"No such worker: {worker_id!r}")
             worker.status = WorkerStatus.OFFLINE
+            self._audit("WORKER_OFFLINE", worker_id=worker_id, reason="marked offline")
             return worker
 
     def mark_stopped(self, worker_id: str) -> WorkerInfo:
@@ -143,6 +172,7 @@ class WorkerRegistry:
             worker = self._workers[worker_id]
             if strategy_id not in worker.assigned_strategy_ids:
                 worker.assigned_strategy_ids = worker.assigned_strategy_ids + (strategy_id,)
+            self._audit("STRATEGY_WORKER_ASSIGNED", worker_id=worker_id, strategy_id=strategy_id)
 
     def unassign_strategy(self, strategy_id: str) -> None:
         with self._lock:
@@ -150,6 +180,7 @@ class WorkerRegistry:
             if owner is not None and owner in self._workers:
                 worker = self._workers[owner]
                 worker.assigned_strategy_ids = tuple(s for s in worker.assigned_strategy_ids if s != strategy_id)
+                self._audit("STRATEGY_WORKER_UNASSIGNED", worker_id=owner, strategy_id=strategy_id)
 
     def get_strategy_owner(self, strategy_id: str) -> str | None:
         with self._lock:
@@ -165,3 +196,12 @@ class WorkerRegistry:
         age = (self._clock() - last).total_seconds()
         if age > self._heartbeat_timeout:
             worker.status = WorkerStatus.OFFLINE
+            # This is the ONE place a heartbeat-timeout transition is
+            # detected (lazily, on the next read) -- audited exactly once
+            # per transition, never per poll, since the guard clause above
+            # already refuses to re-enter this branch once OFFLINE.
+            self._audit(
+                "WORKER_HEARTBEAT_LOST", worker_id=worker_id,
+                heartbeat_age_seconds=round(age, 1), timeout_seconds=self._heartbeat_timeout,
+            )
+            self._audit("WORKER_OFFLINE", worker_id=worker_id, reason="heartbeat timeout exceeded")

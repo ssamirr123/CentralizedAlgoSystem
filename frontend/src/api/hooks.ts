@@ -346,6 +346,29 @@ export const useStrategyRisk = () => {
   return useQuery({ queryKey: ["portfolio-risk-strategies"], queryFn: api.listStrategyRisk, refetchInterval: poll });
 };
 
+export const useOperationsSummary = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["operations-summary"], queryFn: api.getOperationsSummary, refetchInterval: poll });
+};
+
+export const useOperationsAlerts = (q: { active_only?: boolean; severity?: string; category?: string } = {}) => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({
+    queryKey: ["operations-alerts", q],
+    queryFn: () => api.listOperationsAlerts(q),
+    refetchInterval: poll,
+  });
+};
+
+export const useOperationsAudit = (q: { limit?: number; strategy_id?: string; event_type?: string } = {}) => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({
+    queryKey: ["operations-audit", q],
+    queryFn: () => api.listOperationsAudit(q),
+    refetchInterval: poll,
+  });
+};
+
 export const useExecutionOrders = () => {
   const poll = usePollInterval(POLL_INTERVAL_MS);
   return useQuery({ queryKey: ["exec-orders"], queryFn: api.listExecutionOrders, refetchInterval: poll });

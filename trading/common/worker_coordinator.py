@@ -64,7 +64,10 @@ ignoring intent.account_id), and cannot reach a broker adapter directly
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
+from trading.common.observability import EVENT_PORTFOLIO_RISK_DECISION
+from trading.common.operational_alerts import AlertSeverity, OperationalAlertStore
 from trading.common.portfolio_risk import PortfolioRiskManager
 from trading.common.strategy_assignment import StrategyAssignment, UnknownAssignmentError
 from trading.common.strategy_registry import StrategyRegistry, UnknownStrategyError
@@ -87,6 +90,8 @@ class WorkerCoordinator:
         strategy_assignment: StrategyAssignment,
         strategy_runtime: StrategyRuntime,
         portfolio_risk_manager: PortfolioRiskManager | None = None,
+        audit_trail: Any | None = None,
+        operational_alerts: OperationalAlertStore | None = None,
         max_submission_age_seconds: float = DEFAULT_MAX_SUBMISSION_AGE_SECONDS,
     ) -> None:
         self._workers = worker_registry
@@ -98,6 +103,16 @@ class WorkerCoordinator:
         # change: None disables the portfolio-risk gate entirely, falling
         # back to exactly the Phase 16.9 pipeline.
         self._portfolio_risk = portfolio_risk_manager
+        # Phase 16.11 -- both optional, same zero-behavior-change-by-default
+        # discipline. `audit_trail` records EVERY portfolio-risk decision
+        # (Section 13); `operational_alerts` raises/resolves
+        # PORTFOLIO_RISK_BLOCKED/EXECUTION_REJECTED/EXECUTION_FAILED based
+        # on the SAME decisions -- neither ever influences the decision
+        # itself, both are purely observational side effects appended
+        # after the real decision (from PortfolioRiskManager/execute()) is
+        # already final.
+        self._audit_trail = audit_trail
+        self._operational_alerts = operational_alerts
         self._max_submission_age = max_submission_age_seconds
         self._seen_submission_ids: set[str] = set()
 
@@ -117,6 +132,7 @@ class WorkerCoordinator:
         except ShadowBoundaryViolation as exc:
             if reservation_id and self._portfolio_risk is not None:
                 self._portfolio_risk.release_reservation(reservation_id)
+            self._raise_execution_alert("EXECUTION_FAILED", submission, str(exc))
             return OrderIntentResult(
                 submission_id=submission.submission_id, accepted=False, execution_result=None, reason=str(exc),
             )
@@ -131,6 +147,7 @@ class WorkerCoordinator:
             # trading/common/strategy_runtime.py's own run_once() loop.
             if reservation_id and self._portfolio_risk is not None:
                 self._portfolio_risk.release_reservation(reservation_id)
+            self._raise_execution_alert("EXECUTION_FAILED", submission, str(exc))
             return OrderIntentResult(
                 submission_id=submission.submission_id, accepted=False, execution_result=None, reason=str(exc),
             )
@@ -138,10 +155,30 @@ class WorkerCoordinator:
         if reservation_id and self._portfolio_risk is not None:
             self._portfolio_risk.commit_reservation(reservation_id, execution_result=result)
 
+        if result.success:
+            self._resolve_execution_alerts(submission)
+        else:
+            self._raise_execution_alert("EXECUTION_REJECTED", submission, result.message)
+
         return OrderIntentResult(
             submission_id=submission.submission_id, accepted=result.success, execution_result=result,
             reason="" if result.success else result.message,
         )
+
+    def _raise_execution_alert(self, code: str, submission: OrderIntentSubmission, message: str) -> None:
+        if self._operational_alerts is None:
+            return
+        severity = AlertSeverity.CRITICAL if code == "EXECUTION_FAILED" else AlertSeverity.WARNING
+        self._operational_alerts.raise_alert(
+            code=code, severity=severity, category="EXECUTION", source_type="strategy",
+            source_id=submission.strategy_id, message=message,
+        )
+
+    def _resolve_execution_alerts(self, submission: OrderIntentSubmission) -> None:
+        if self._operational_alerts is None:
+            return
+        self._operational_alerts.resolve(code="EXECUTION_REJECTED", source_type="strategy", source_id=submission.strategy_id)
+        self._operational_alerts.resolve(code="EXECUTION_FAILED", source_type="strategy", source_id=submission.strategy_id)
 
     def _reserve_portfolio_risk(self, submission: OrderIntentSubmission) -> str | None | OrderIntentResult:
         """Returns a reservation_id (str) to commit/release later, None if
@@ -173,12 +210,49 @@ class WorkerCoordinator:
         decision = self._portfolio_risk.evaluate_and_reserve(
             submission.intent, strategy_id=submission.strategy_id, account_id=account_id,
         )
+        self._record_portfolio_risk_decision(submission, account_id, decision)
+
         if not decision.allowed:
             return OrderIntentResult(
                 submission_id=submission.submission_id, accepted=False, execution_result=None,
                 reason=f"{decision.reason_code}: {decision.message}",
             )
         return decision.reservation_id
+
+    def _record_portfolio_risk_decision(self, submission: OrderIntentSubmission, account_id: str, decision) -> None:
+        """Phase 16.11 Section 13 -- records EVERY portfolio-risk decision
+        (allowed or rejected) to the existing AuditTrail, and raises/
+        resolves the PORTFOLIO_RISK_BLOCKED operational alert. Reuses the
+        EXISTING AuditTrail/OperationalAlertStore -- this method never
+        makes or influences the actual risk decision, only observes one
+        already made by PortfolioRiskManager."""
+        snapshot = decision.snapshot
+        if self._audit_trail is not None:
+            self._audit_trail.append(
+                EVENT_PORTFOLIO_RISK_DECISION,
+                correlation_id=submission.intent.correlation_id, strategy_id=submission.strategy_id,
+                worker_id=submission.worker_id, account_id=account_id,
+                idempotency_key=submission.intent.idempotency_key,
+                allowed=decision.allowed, reason_code=decision.reason_code, message=decision.message,
+                violations=list(decision.violations),
+                conflicts=[c.conflict_type.value for c in decision.conflicts],
+                projected_strategy_exposure=(snapshot.projected_strategy_exposure if snapshot else None),
+                projected_account_exposure=(snapshot.projected_account_exposure if snapshot else None),
+                projected_portfolio_exposure=(snapshot.projected_portfolio_exposure if snapshot else None),
+            )
+
+        if self._operational_alerts is None:
+            return
+        if decision.allowed:
+            self._operational_alerts.resolve(
+                code="PORTFOLIO_RISK_BLOCKED", source_type="strategy", source_id=submission.strategy_id,
+            )
+        else:
+            self._operational_alerts.raise_alert(
+                code="PORTFOLIO_RISK_BLOCKED", severity=AlertSeverity.CRITICAL, category="RISK",
+                source_type="strategy", source_id=submission.strategy_id,
+                message=f"{decision.reason_code}: {decision.message}",
+            )
 
     def _validate(self, submission: OrderIntentSubmission) -> str:
         if submission.submission_id in self._seen_submission_ids:

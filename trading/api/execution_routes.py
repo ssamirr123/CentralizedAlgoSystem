@@ -50,6 +50,16 @@ Phase 13 adds the /api/observability/* routes at the bottom of this file.
     GET    /api/observability/audit
     GET    /api/observability/audit/integrity
 
+    GET    /api/operations/summary             (Phase 16.11, read-only)
+    GET    /api/operations/system
+    GET    /api/operations/workers
+    GET    /api/operations/strategies
+    GET    /api/operations/accounts
+    GET    /api/operations/executions
+    GET    /api/operations/intents
+    GET    /api/operations/alerts
+    GET    /api/operations/audit
+
 Every route here inherits router-level `Depends(get_principal)` +
 `Depends(enforce_rate_limit)` (same pattern as trading/api/routes.py) --
 so authentication and rate limiting apply uniformly. Each route layers
@@ -106,7 +116,8 @@ from trading.api.security.permissions import Permission
 from trading.common.assignment_readiness import AssignmentReadiness, check_assignment_readiness
 from trading.common.broker_manager import BrokerUnavailableError, UnknownAccountError
 from trading.common.broker_types import BrokerCapabilities
-from trading.common.portfolio_risk import PortfolioRiskSnapshot
+from trading.common.operations_snapshot import OperationsSnapshot, build_operations_snapshot
+from trading.common.portfolio_risk import PortfolioRiskLimits, PortfolioRiskSnapshot
 from trading.common.strategy import InvalidStrategyStateError, StrategyMetrics
 from trading.common.strategy_assignment import Assignment, InvalidAssignmentError, UnknownAssignmentError
 from trading.common.strategy_control import ControlCommand, StrategyControlOutcome, execute_strategy_command
@@ -518,6 +529,13 @@ def start_strategy(
             strategy.enable()
         strategy.start()
     except InvalidStrategyStateError as exc:
+        # Phase 16.11 -- reuses the existing STRATEGY_COMMAND_REJECTED
+        # constant (Phase 16.4) rather than inventing a new
+        # STRATEGY_START_REJECTED event; this legacy direct-mutation route
+        # and the newer /strategy-lifecycle/{id}/command endpoint both now
+        # audit a rejection the same way.
+        _audit(db, request, principal, audit.STRATEGY_COMMAND_REJECTED, target=f"strategy:{strategy_id}",
+               outcome="failure", detail={"command": "START", "reason": str(exc)})
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
 
     _audit(db, request, principal, audit.STRATEGY_STARTED, target=f"strategy:{strategy_id}",
@@ -538,6 +556,8 @@ def stop_strategy(
     try:
         strategy.stop()
     except InvalidStrategyStateError as exc:
+        _audit(db, request, principal, audit.STRATEGY_COMMAND_REJECTED, target=f"strategy:{strategy_id}",
+               outcome="failure", detail={"command": "STOP", "reason": str(exc)})
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
 
     _audit(db, request, principal, audit.STRATEGY_STOPPED, target=f"strategy:{strategy_id}")
@@ -1154,3 +1174,261 @@ def audit_integrity(state: ExecutionState = Depends(_state), _principal: Princip
     what this guarantees and what it doesn't."""
     records = state.audit_trail.records()
     return AuditIntegrityOut(verified=state.audit_trail.verify(), record_count=len(records))
+
+
+# --------------------------------------------------------------------------- #
+# OPERATIONS (Phase 16.11) -- a single, read-only console over EVERY
+# authoritative component above (workers, strategies, accounts, portfolio
+# risk, kill switch, deployment info) plus the new OperationalAlertStore.
+# Every route here is a pure read: it can raise/resolve a diagnostic
+# alert (see trading/common/operations_snapshot.py's own module docstring
+# for why that is not a trading-state mutation), but it never starts a
+# strategy, never places/modifies/cancels an order, never grants
+# authorization, and never changes a risk limit. See
+# docs/phase-16-11-operations-monitoring-alerts-report.md.
+# --------------------------------------------------------------------------- #
+class SystemHealthOut(BaseModel):
+    ready: bool
+    environment: str
+    app_version: str
+    git_sha: str
+    deployment_id: str
+    started_at: str
+    uptime_seconds: float
+    now: str
+
+
+class WorkerHealthOut(BaseModel):
+    worker_id: str
+    name: str
+    status: str
+    session_id: str
+    last_heartbeat_at: str
+    heartbeat_age_seconds: float | None
+    heartbeat_timeout_seconds: float
+    assigned_strategy_ids: list[str]
+    version: str
+    git_sha: str
+    host_identity: str
+    started_at: str
+    version_mismatch: bool
+
+
+class StrategyHealthOut(BaseModel):
+    strategy_id: str
+    lifecycle_state: str
+    runtime_state: str
+    account_authorization_state: str | None
+    execution_active: bool
+    worker_id: str | None
+    worker_status: str | None
+    account_id: str | None
+    market_data_status: str
+    last_market_data_at: str
+    last_cycle_at: str
+    last_result_summary: str
+    last_error: str
+
+
+class AccountHealthOut(BaseModel):
+    account_id: str
+    account_name: str
+    broker_id: str
+    enabled: bool
+    authorization_state: str
+    execution_mode: str
+    assigned_strategy_ids: list[str]
+    worker_ids: list[str]
+
+
+class SafetyOut(BaseModel):
+    kill_switch_engaged: bool
+    kill_switch_engaged_by: str
+    kill_switch_reason: str
+    execution_mode_banner: str
+    live_trading_disabled: bool
+
+
+class OperationalAlertOut(BaseModel):
+    alert_id: str
+    code: str
+    severity: str
+    category: str
+    source_type: str
+    source_id: str
+    message: str
+    raised_at: str
+    active: bool
+    resolved_at: str | None
+
+    @classmethod
+    def from_alert(cls, a) -> "OperationalAlertOut":
+        return cls(
+            alert_id=a.alert_id, code=a.code, severity=a.severity.value, category=a.category,
+            source_type=a.source_type, source_id=a.source_id, message=a.message,
+            raised_at=a.raised_at, active=a.active, resolved_at=a.resolved_at,
+        )
+
+
+class OperationsSummaryOut(BaseModel):
+    generated_at: str
+    system: SystemHealthOut
+    workers: list[WorkerHealthOut]
+    strategies: list[StrategyHealthOut]
+    accounts: list[AccountHealthOut]
+    portfolio_risk: PortfolioRiskOut
+    safety: SafetyOut
+    active_alerts: list[OperationalAlertOut]
+
+
+def _build_snapshot(state: ExecutionState, db: Session) -> OperationsSnapshot:
+    db_ok, _ = _check_database_ready(db)
+    return build_operations_snapshot(
+        strategy_registry=state.strategy_registry, strategy_assignment=state.strategy_assignment,
+        broker_manager=state.broker_manager, kill_switch=state.kill_switch,
+        strategy_runtime=state.strategy_runtime, worker_registry=state.worker_registry,
+        portfolio_risk_manager=state.portfolio_risk_manager, operational_alerts=state.operational_alerts,
+        db_ready=db_ok,
+    )
+
+
+def _check_database_ready(db: Session) -> tuple[bool, str]:
+    """Reuses the SAME check trading/api/health.py's /api/ready already
+    performs -- never a second, conflicting health semantic (Section 4)."""
+    try:
+        from sqlalchemy import text
+
+        db.execute(text("SELECT 1"))
+        return True, "connected"
+    except Exception as exc:  # noqa: BLE001 -- readiness must never crash on this
+        return False, f"error: {exc.__class__.__name__}"
+
+
+def _summary_out(state: ExecutionState, snapshot: OperationsSnapshot) -> OperationsSummaryOut:
+    portfolio_limits = (
+        state.portfolio_risk_manager.get_portfolio_limits() if state.portfolio_risk_manager is not None
+        else PortfolioRiskLimits()
+    )
+    return OperationsSummaryOut(
+        generated_at=snapshot.generated_at,
+        system=SystemHealthOut(**snapshot.system.__dict__),
+        workers=[WorkerHealthOut(**{**w.__dict__, "assigned_strategy_ids": list(w.assigned_strategy_ids)}) for w in snapshot.workers],
+        strategies=[StrategyHealthOut(**w.__dict__) for w in snapshot.strategies],
+        accounts=[
+            AccountHealthOut(**{
+                **a.__dict__, "assigned_strategy_ids": list(a.assigned_strategy_ids), "worker_ids": list(a.worker_ids),
+            })
+            for a in snapshot.accounts
+        ],
+        portfolio_risk=PortfolioRiskOut.from_snapshot(snapshot.portfolio_risk, portfolio_limits),
+        safety=SafetyOut(**snapshot.safety.__dict__),
+        active_alerts=[OperationalAlertOut.from_alert(a) for a in snapshot.active_alerts],
+    )
+
+
+@router.get("/operations/summary", response_model=OperationsSummaryOut)
+def operations_summary(
+    state: ExecutionState = Depends(_state), db: Session = Depends(get_db), _principal: Principal = Depends(_VIEW),
+) -> OperationsSummaryOut:
+    return _summary_out(state, _build_snapshot(state, db))
+
+
+@router.get("/operations/system", response_model=SystemHealthOut)
+def operations_system(
+    state: ExecutionState = Depends(_state), db: Session = Depends(get_db), _principal: Principal = Depends(_VIEW),
+) -> SystemHealthOut:
+    return _summary_out(state, _build_snapshot(state, db)).system
+
+
+@router.get("/operations/workers", response_model=list[WorkerHealthOut])
+def operations_workers(
+    state: ExecutionState = Depends(_state), db: Session = Depends(get_db), _principal: Principal = Depends(_VIEW),
+) -> list[WorkerHealthOut]:
+    return _summary_out(state, _build_snapshot(state, db)).workers
+
+
+@router.get("/operations/strategies", response_model=list[StrategyHealthOut])
+def operations_strategies(
+    state: ExecutionState = Depends(_state), db: Session = Depends(get_db), _principal: Principal = Depends(_VIEW),
+) -> list[StrategyHealthOut]:
+    return _summary_out(state, _build_snapshot(state, db)).strategies
+
+
+@router.get("/operations/accounts", response_model=list[AccountHealthOut])
+def operations_accounts(
+    state: ExecutionState = Depends(_state), db: Session = Depends(get_db), _principal: Principal = Depends(_VIEW),
+) -> list[AccountHealthOut]:
+    return _summary_out(state, _build_snapshot(state, db)).accounts
+
+
+@router.get("/operations/alerts", response_model=list[OperationalAlertOut])
+def operations_alerts(
+    state: ExecutionState = Depends(_state), db: Session = Depends(get_db), _principal: Principal = Depends(_VIEW),
+    active_only: bool = True, severity: str | None = None, category: str | None = None,
+) -> list[OperationalAlertOut]:
+    # Reconcile first (a fresh read reflects current facts), then answer
+    # from the store -- this endpoint can also return resolved history
+    # when active_only=False, bounded the same way all_alerts() bounds it.
+    _build_snapshot(state, db)
+    items = state.operational_alerts.active_alerts() if active_only else state.operational_alerts.all_alerts()
+    if severity:
+        items = [a for a in items if a.severity.value == severity.upper()]
+    if category:
+        items = [a for a in items if a.category == category.upper()]
+    return [OperationalAlertOut.from_alert(a) for a in items]
+
+
+@router.get("/operations/audit", response_model=list[AuditRecordOut])
+def operations_audit(
+    state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW),
+    limit: int = 200, strategy_id: str | None = None, event_type: str | None = None,
+) -> list[AuditRecordOut]:
+    """Convenience alias over the SAME audit trail /api/observability/audit
+    already reads -- not a second audit mechanism (Section 24: reuse, do
+    not duplicate). Adds a `strategy_id` filter, which the underlying
+    AuditTrail/PersistentAuditTrail has no dedicated query for today."""
+    records = state.audit_trail.records()
+    if strategy_id:
+        records = [r for r in records if r.strategy_id == strategy_id]
+    if event_type:
+        records = [r for r in records if r.event_type == event_type]
+    records = records[-max(1, min(limit, 1000)):]
+    return [
+        AuditRecordOut(seq=r.seq, timestamp=r.timestamp, event_type=r.event_type,
+                       correlation_id=r.correlation_id, strategy_id=r.strategy_id, detail=r.detail)
+        for r in reversed(records)
+    ]
+
+
+@router.get("/operations/intents", response_model=list[AuditRecordOut])
+def operations_intents(
+    state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW), limit: int = 50,
+) -> list[AuditRecordOut]:
+    """Bounded, read-only, recent PORTFOLIO_RISK_DECISION events -- the
+    closest thing to "recent OrderIntent processing" this repository's
+    existing audit trail can answer without inventing a second, competing
+    record of intents (Section 16). Never exposes a broker payload -- the
+    detail dict here is exactly what WorkerCoordinator already recorded."""
+    records = [r for r in state.audit_trail.records() if r.event_type == "PORTFOLIO_RISK_DECISION"]
+    records = records[-max(1, min(limit, 200)):]
+    return [
+        AuditRecordOut(seq=r.seq, timestamp=r.timestamp, event_type=r.event_type,
+                       correlation_id=r.correlation_id, strategy_id=r.strategy_id, detail=r.detail)
+        for r in reversed(records)
+    ]
+
+
+@router.get("/operations/executions", response_model=list[AuditRecordOut])
+def operations_executions(
+    state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW), limit: int = 50,
+) -> list[AuditRecordOut]:
+    """Bounded, read-only, recent EXECUTION_RESULT events (Section 17) --
+    reused from the same existing AuditTrail every StrategyExecutionEngine
+    .execute() call already appends to, never a new persistence mechanism."""
+    records = [r for r in state.audit_trail.records() if r.event_type == "EXECUTION_RESULT"]
+    records = records[-max(1, min(limit, 200)):]
+    return [
+        AuditRecordOut(seq=r.seq, timestamp=r.timestamp, event_type=r.event_type,
+                       correlation_id=r.correlation_id, strategy_id=r.strategy_id, detail=r.detail)
+        for r in reversed(records)
+    ]

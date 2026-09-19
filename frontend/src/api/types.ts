@@ -579,6 +579,102 @@ export interface StrategyRisk {
   limits: PortfolioRiskLimits;
 }
 
+// --- Phase 16.11: TCC operations console (read-only) --------------------
+export interface OperationsSystemHealth {
+  ready: boolean;
+  environment: string;
+  app_version: string;
+  git_sha: string;
+  deployment_id: string;
+  started_at: string;
+  uptime_seconds: number;
+  now: string;
+}
+
+export interface OperationsWorkerHealth {
+  worker_id: string;
+  name: string;
+  status: string;
+  session_id: string;
+  last_heartbeat_at: string;
+  heartbeat_age_seconds: number | null;
+  heartbeat_timeout_seconds: number;
+  assigned_strategy_ids: string[];
+  version: string;
+  git_sha: string;
+  host_identity: string;
+  started_at: string;
+  version_mismatch: boolean;
+}
+
+export interface OperationsStrategyHealth {
+  strategy_id: string;
+  lifecycle_state: string;
+  runtime_state: string;
+  account_authorization_state: string | null;
+  execution_active: boolean;
+  worker_id: string | null;
+  worker_status: string | null;
+  account_id: string | null;
+  market_data_status: string;
+  last_market_data_at: string;
+  last_cycle_at: string;
+  last_result_summary: string;
+  last_error: string;
+}
+
+export interface OperationsAccountHealth {
+  account_id: string;
+  account_name: string;
+  broker_id: string;
+  enabled: boolean;
+  authorization_state: string;
+  execution_mode: string;
+  assigned_strategy_ids: string[];
+  worker_ids: string[];
+}
+
+export interface OperationsSafety {
+  kill_switch_engaged: boolean;
+  kill_switch_engaged_by: string;
+  kill_switch_reason: string;
+  execution_mode_banner: string;
+  live_trading_disabled: boolean;
+}
+
+export interface OperationalAlert {
+  alert_id: string;
+  code: string;
+  severity: "INFO" | "WARNING" | "CRITICAL";
+  category: string;
+  source_type: string;
+  source_id: string;
+  message: string;
+  raised_at: string;
+  active: boolean;
+  resolved_at: string | null;
+}
+
+export interface OperationsSummary {
+  generated_at: string;
+  system: OperationsSystemHealth;
+  workers: OperationsWorkerHealth[];
+  strategies: OperationsStrategyHealth[];
+  accounts: OperationsAccountHealth[];
+  portfolio_risk: PortfolioRisk;
+  safety: OperationsSafety;
+  active_alerts: OperationalAlert[];
+}
+
+export interface ExecutionAuditRecord {
+  seq: number;
+  timestamp: string;
+  event_type: string;
+  correlation_id: string;
+  strategy_id: string;
+  detail: Record<string, unknown>;
+}
+
 export interface ExecutionOrder {
   order_id: string;
   strategy_id: string;

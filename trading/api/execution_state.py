@@ -52,6 +52,7 @@ from trading.common.broker_manager import BrokerManager
 from trading.common.brokers.shadow_broker import ShadowBroker
 from trading.common.kill_switch import CentralKillSwitch
 from trading.common.observability import AuditTrail, MetricsRegistry
+from trading.common.operational_alerts import OperationalAlertStore
 from trading.common.portfolio_risk import PortfolioRiskManager
 from trading.common.risk_manager import RiskManager
 from trading.common.strategies.combined_vwap_nifty import CombinedVwapNiftyStrategy
@@ -121,6 +122,13 @@ class ExecutionState:
     # submission passes through the SAME PortfolioRiskManager instance the
     # read-only /api/risk/portfolio endpoints also read.
     portfolio_risk_manager: PortfolioRiskManager | None = None
+    # Phase 16.11 -- see trading/common/operational_alerts.py. A
+    # presentation/classification layer only (never a second risk-decision
+    # engine, never authorization) -- shared into worker_registry/
+    # worker_coordinator below so worker lifecycle transitions and
+    # portfolio-risk/execution outcomes all raise/resolve alerts on this
+    # SAME store the read-only /api/operations/* endpoints also read.
+    operational_alerts: OperationalAlertStore = field(default_factory=OperationalAlertStore)
 
 
 def build_execution_state() -> ExecutionState:
@@ -181,9 +189,14 @@ def build_execution_state() -> ExecutionState:
         metrics_registry=metrics, audit_trail=audit_trail,
     )
 
+    # Phase 16.11 -- shared alert store; see trading/common/
+    # operational_alerts.py. Wired with the SAME audit_trail as everything
+    # else so an alert's raise/resolve is recorded there too.
+    operational_alerts = OperationalAlertStore(audit_trail=audit_trail)
+
     # Phase 16.9 -- zero workers pre-registered; see the ExecutionState
     # field comment above for why these are constructed anyway.
-    worker_registry = WorkerRegistry()
+    worker_registry = WorkerRegistry(audit_trail=audit_trail)
     # Phase 16.10 -- additive central gate, sitting in front of the
     # existing risk_manager above (see PortfolioRiskManager's own module
     # docstring for why it is a separate object rather than a change to
@@ -193,6 +206,7 @@ def build_execution_state() -> ExecutionState:
         worker_registry=worker_registry, strategy_registry=strategy_registry,
         strategy_assignment=strategy_assignment, strategy_runtime=strategy_runtime,
         portfolio_risk_manager=portfolio_risk_manager,
+        audit_trail=audit_trail, operational_alerts=operational_alerts,
     )
 
     return ExecutionState(
@@ -208,4 +222,5 @@ def build_execution_state() -> ExecutionState:
         worker_registry=worker_registry,
         worker_coordinator=worker_coordinator,
         portfolio_risk_manager=portfolio_risk_manager,
+        operational_alerts=operational_alerts,
     )

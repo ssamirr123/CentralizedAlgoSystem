@@ -221,6 +221,22 @@ export const listAccountRisk = () =>
 export const listStrategyRisk = () =>
   apiRequest<import("./types").StrategyRisk[]>("/api/risk/strategies");
 
+// --- Phase 16.11: TCC operations console (read-only) ---------------------
+export const getOperationsSummary = () =>
+  apiRequest<import("./types").OperationsSummary>("/api/operations/summary");
+
+export const listOperationsAlerts = (q: { active_only?: boolean; severity?: string; category?: string } = {}) =>
+  apiRequest<import("./types").OperationalAlert[]>("/api/operations/alerts", { query: { ...q } });
+
+export const listOperationsAudit = (q: { limit?: number; strategy_id?: string; event_type?: string } = {}) =>
+  apiRequest<import("./types").ExecutionAuditRecord[]>("/api/operations/audit", { query: { ...q } });
+
+export const listOperationsIntents = (limit = 50) =>
+  apiRequest<import("./types").ExecutionAuditRecord[]>("/api/operations/intents", { query: { limit } });
+
+export const listOperationsExecutions = (limit = 50) =>
+  apiRequest<import("./types").ExecutionAuditRecord[]>("/api/operations/executions", { query: { limit } });
+
 export const listExecutionOrders = () => apiRequest<import("./types").ExecutionOrder[]>("/api/execution/orders");
 
 export const listExecutionPositions = () =>
