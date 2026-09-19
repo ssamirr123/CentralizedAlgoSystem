@@ -349,6 +349,19 @@ class StrategyRuntime:
         self._assert_simulated_broker(intent)
         return self._engine.execute(intent)
 
+    @property
+    def idempotency_store(self) -> IdempotencyStore:
+        """Phase 16.10: read-only access to the SAME IdempotencyStore this
+        runtime's engine already uses, so a caller (WorkerCoordinator's new
+        PortfolioRiskManager integration) can check whether an
+        idempotency_key already has a record BEFORE reserving portfolio
+        risk state for it -- an idempotent retry must never consume
+        exposure/order-count budget twice (see
+        trading/common/portfolio_risk.py's module docstring). This exposes
+        the exact same store execute() itself consults; it is not a second
+        idempotency mechanism."""
+        return self._idempotency_store
+
     def _assert_simulated_broker(self, intent: OrderIntent) -> None:
         """Layer 2 of the hard shadow boundary -- see module docstring.
         Resolution mirrors exactly what execute() itself does (via

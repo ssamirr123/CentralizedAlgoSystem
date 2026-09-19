@@ -52,6 +52,7 @@ from trading.common.broker_manager import BrokerManager
 from trading.common.brokers.shadow_broker import ShadowBroker
 from trading.common.kill_switch import CentralKillSwitch
 from trading.common.observability import AuditTrail, MetricsRegistry
+from trading.common.portfolio_risk import PortfolioRiskManager
 from trading.common.risk_manager import RiskManager
 from trading.common.strategies.combined_vwap_nifty import CombinedVwapNiftyStrategy
 from trading.common.strategies.double_straddle import DoubleStraddleStrategy
@@ -112,6 +113,14 @@ class ExecutionState:
     # strategy_runtime -- never a second execution path.
     worker_registry: WorkerRegistry | None = None
     worker_coordinator: WorkerCoordinator | None = None
+    # Phase 16.10 -- see trading/common/portfolio_risk.py. Constructed with
+    # every limit unconfigured (None = not enforced, the same convention
+    # RiskLimits already uses) -- this phase introduces no production
+    # portfolio limit values; an operator/future admin surface configures
+    # real ones. Shared into worker_coordinator below so every worker
+    # submission passes through the SAME PortfolioRiskManager instance the
+    # read-only /api/risk/portfolio endpoints also read.
+    portfolio_risk_manager: PortfolioRiskManager | None = None
 
 
 def build_execution_state() -> ExecutionState:
@@ -175,9 +184,15 @@ def build_execution_state() -> ExecutionState:
     # Phase 16.9 -- zero workers pre-registered; see the ExecutionState
     # field comment above for why these are constructed anyway.
     worker_registry = WorkerRegistry()
+    # Phase 16.10 -- additive central gate, sitting in front of the
+    # existing risk_manager above (see PortfolioRiskManager's own module
+    # docstring for why it is a separate object rather than a change to
+    # RiskManager). No portfolio limit is configured here.
+    portfolio_risk_manager = PortfolioRiskManager()
     worker_coordinator = WorkerCoordinator(
         worker_registry=worker_registry, strategy_registry=strategy_registry,
         strategy_assignment=strategy_assignment, strategy_runtime=strategy_runtime,
+        portfolio_risk_manager=portfolio_risk_manager,
     )
 
     return ExecutionState(
@@ -192,4 +207,5 @@ def build_execution_state() -> ExecutionState:
         strategy_runtime=strategy_runtime,
         worker_registry=worker_registry,
         worker_coordinator=worker_coordinator,
+        portfolio_risk_manager=portfolio_risk_manager,
     )

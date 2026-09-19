@@ -664,6 +664,53 @@ def test_kill_switch_reflected_in_system_status(client, admin_auth):
 
 
 # --------------------------------------------------------------------------- #
+# PORTFOLIO RISK (Phase 16.10, read-only)
+# --------------------------------------------------------------------------- #
+def test_portfolio_risk_starts_healthy_and_zeroed(client, viewer_auth):
+    r = client.get("/api/risk/portfolio", headers=viewer_auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["risk_status"] == "HEALTHY"
+    assert body["daily_pnl"] == 0.0
+    assert body["gross_exposure"] == 0.0
+    assert body["open_orders"] == 0
+    assert body["orders_today"] == 0
+    assert body["limits"]["max_portfolio_exposure"] is None
+
+
+def test_list_account_risk_covers_every_account(client, viewer_auth):
+    r = client.get("/api/risk/accounts", headers=viewer_auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert {row["account_id"] for row in body} == {"ANGEL_MAIN", "DHAN_MAIN", "ICICI_MAIN"}
+    assert all(row["risk_status"] == "HEALTHY" for row in body)
+
+
+def test_get_account_risk_for_unknown_account_is_404(client, viewer_auth):
+    r = client.get("/api/risk/accounts/NO_SUCH_ACCOUNT", headers=viewer_auth)
+    assert r.status_code == 404
+
+
+def test_list_strategy_risk_covers_every_strategy(client, viewer_auth):
+    r = client.get("/api/risk/strategies", headers=viewer_auth)
+    assert r.status_code == 200
+    assert {row["strategy_id"] for row in r.json()} == STRATEGY_IDS
+
+
+def test_get_strategy_risk_for_unknown_strategy_is_404(client, viewer_auth):
+    r = client.get("/api/risk/strategies/NO_SUCH_STRATEGY", headers=viewer_auth)
+    assert r.status_code == 404
+
+
+def test_portfolio_risk_endpoints_never_expose_order_mutation_verbs(client, viewer_auth):
+    for path in ("/api/risk/portfolio", "/api/risk/accounts", "/api/risk/strategies"):
+        r = client.get(path, headers=viewer_auth)
+        body_text = r.text.lower()
+        for forbidden in ("place_order", "buy", "sell", "authorize_live", "go_live"):
+            assert forbidden not in body_text
+
+
+# --------------------------------------------------------------------------- #
 # ORDERS / POSITIONS / P&L -- honestly empty today (Phase 10 stub scope)
 # --------------------------------------------------------------------------- #
 def test_orders_positions_are_empty_today(client, viewer_auth):
@@ -777,7 +824,7 @@ def test_execution_state_never_wires_a_live_authorization_store():
     assert set(ExecutionState.__dataclass_fields__) == {
         "broker_manager", "strategy_assignment", "risk_manager", "strategy_registry",
         "kill_switch", "metrics", "audit_trail", "alerts", "strategy_runtime",
-        "worker_registry", "worker_coordinator",
+        "worker_registry", "worker_coordinator", "portfolio_risk_manager",
     }
     # Phase 16.5's own runtime is present, but it is not a
     # LiveAuthorization store -- it holds no live-authorization state of

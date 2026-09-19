@@ -529,6 +529,56 @@ export interface RiskStatus {
   assigned_strategy_count: number;
 }
 
+// --- Phase 16.10: central portfolio risk (read-only) --------------------
+// Exposure here is notional/quantity based (quantity * price), NOT
+// delta-adjusted -- see trading/common/portfolio_risk.py's own docstring.
+// `limits` values are `null` for anything not configured (never enforced,
+// not a silent zero) -- the same convention RiskLimits above already uses.
+export interface PortfolioRiskLimits {
+  max_strategy_daily_loss?: number | null;
+  max_account_daily_loss?: number | null;
+  max_portfolio_daily_loss?: number | null;
+  max_strategy_exposure?: number | null;
+  max_account_exposure?: number | null;
+  max_portfolio_exposure?: number | null;
+  max_strategy_open_orders?: number | null;
+  max_account_open_orders?: number | null;
+  max_portfolio_open_orders?: number | null;
+  max_strategy_orders_per_day?: number | null;
+  max_account_orders_per_day?: number | null;
+  max_portfolio_orders_per_day?: number | null;
+}
+
+export interface PortfolioRisk {
+  timestamp: string;
+  daily_pnl: number;
+  gross_exposure: number;
+  open_orders: number;
+  orders_today: number;
+  risk_status: string;
+  limits: PortfolioRiskLimits;
+}
+
+export interface AccountRisk {
+  account_id: string;
+  daily_pnl: number;
+  gross_exposure: number;
+  open_orders: number;
+  orders_today: number;
+  risk_status: string;
+  limits: PortfolioRiskLimits;
+}
+
+export interface StrategyRisk {
+  strategy_id: string;
+  daily_pnl: number;
+  gross_exposure: number;
+  open_orders: number;
+  orders_today: number;
+  risk_status: string;
+  limits: PortfolioRiskLimits;
+}
+
 export interface ExecutionOrder {
   order_id: string;
   strategy_id: string;

@@ -1,10 +1,30 @@
 import { useState } from "react";
-import { useRiskStatus, useSetKillSwitch } from "@/api/hooks";
+import { useAccountRisk, usePortfolioRisk, useRiskStatus, useSetKillSwitch, useStrategyRisk } from "@/api/hooks";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { PageHeader } from "@/components/PageHeader";
-import { Loading, ErrorState } from "@/components/States";
+import { Loading, ErrorState, QueryBoundary } from "@/components/States";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import type { AccountRisk, StrategyRisk } from "@/api/types";
+
+function fmt(n: number): string {
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function ExposureRow({ label, dailyPnl, grossExposure, openOrders, ordersToday, status }: {
+  label: string; dailyPnl: number; grossExposure: number; openOrders: number; ordersToday: number; status: string;
+}) {
+  return (
+    <tr>
+      <td>{label}</td>
+      <td className="num" style={{ color: dailyPnl < 0 ? "var(--danger, #b42318)" : undefined }}>{fmt(dailyPnl)}</td>
+      <td className="num">{fmt(grossExposure)}</td>
+      <td className="num">{openOrders}</td>
+      <td className="num">{ordersToday}</td>
+      <td><span className="badge">{status}</span></td>
+    </tr>
+  );
+}
 
 const LIMIT_LABELS: Record<string, string> = {
   max_order_quantity: "Max order quantity",
@@ -22,6 +42,9 @@ export function TccRiskPage() {
 
   const risk = useRiskStatus();
   const killSwitch = useSetKillSwitch();
+  const portfolioRisk = usePortfolioRisk();
+  const accountRisk = useAccountRisk();
+  const strategyRisk = useStrategyRisk();
   const [confirmEngage, setConfirmEngage] = useState(false);
   const [reason, setReason] = useState("");
 
@@ -97,6 +120,110 @@ export function TccRiskPage() {
         <p className="sub" style={{ marginTop: 12 }}>
           A limit of "not configured" always passes that check — it is not the same as a limit of zero.
         </p>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2>Portfolio risk (Phase 16.10)</h2>
+        <p className="sub" style={{ marginTop: -4 }}>
+          Central, additive risk layer for worker-submitted orders — sits in front of the RiskManager above, never
+          replaces it. Exposure is notional/quantity based (quantity × price), not delta-adjusted. Daily P&amp;L is
+          realized-only (from closed shadow fills); no BUY/SELL/PLACE ORDER/AUTHORIZE LIVE control exists on this
+          page or anywhere in this API.
+        </p>
+        <QueryBoundary query={portfolioRisk}>
+          {(data) => (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Scope</th>
+                    <th className="num">Daily P&amp;L</th>
+                    <th className="num">Gross exposure</th>
+                    <th className="num">Open orders</th>
+                    <th className="num">Orders today</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <ExposureRow
+                    label="Portfolio"
+                    dailyPnl={data.daily_pnl}
+                    grossExposure={data.gross_exposure}
+                    openOrders={data.open_orders}
+                    ordersToday={data.orders_today}
+                    status={data.risk_status}
+                  />
+                </tbody>
+              </table>
+            </div>
+          )}
+        </QueryBoundary>
+
+        <h3 style={{ marginTop: 20 }}>Accounts</h3>
+        <QueryBoundary query={accountRisk} empty={(d) => d.length === 0}>
+          {(rows: AccountRisk[]) => (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Account</th>
+                    <th className="num">Daily P&amp;L</th>
+                    <th className="num">Gross exposure</th>
+                    <th className="num">Open orders</th>
+                    <th className="num">Orders today</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <ExposureRow
+                      key={r.account_id}
+                      label={r.account_id}
+                      dailyPnl={r.daily_pnl}
+                      grossExposure={r.gross_exposure}
+                      openOrders={r.open_orders}
+                      ordersToday={r.orders_today}
+                      status={r.risk_status}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </QueryBoundary>
+
+        <h3 style={{ marginTop: 20 }}>Strategies</h3>
+        <QueryBoundary query={strategyRisk} empty={(d) => d.length === 0}>
+          {(rows: StrategyRisk[]) => (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Strategy</th>
+                    <th className="num">Daily P&amp;L</th>
+                    <th className="num">Gross exposure</th>
+                    <th className="num">Open orders</th>
+                    <th className="num">Orders today</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <ExposureRow
+                      key={r.strategy_id}
+                      label={r.strategy_id}
+                      dailyPnl={r.daily_pnl}
+                      grossExposure={r.gross_exposure}
+                      openOrders={r.open_orders}
+                      ordersToday={r.orders_today}
+                      status={r.risk_status}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </QueryBoundary>
       </div>
 
       {confirmEngage && (

@@ -331,6 +331,21 @@ export const useSetKillSwitch = () => {
   });
 };
 
+export const usePortfolioRisk = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["portfolio-risk"], queryFn: api.getPortfolioRisk, refetchInterval: poll });
+};
+
+export const useAccountRisk = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["portfolio-risk-accounts"], queryFn: api.listAccountRisk, refetchInterval: poll });
+};
+
+export const useStrategyRisk = () => {
+  const poll = usePollInterval(POLL_INTERVAL_MS);
+  return useQuery({ queryKey: ["portfolio-risk-strategies"], queryFn: api.listStrategyRisk, refetchInterval: poll });
+};
+
 export const useExecutionOrders = () => {
   const poll = usePollInterval(POLL_INTERVAL_MS);
   return useQuery({ queryKey: ["exec-orders"], queryFn: api.listExecutionOrders, refetchInterval: poll });

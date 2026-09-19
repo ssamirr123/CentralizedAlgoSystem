@@ -211,6 +211,16 @@ export const setKillSwitch = (engaged: boolean, reason?: string) =>
     body: { engaged, reason: reason ?? "" },
   });
 
+// --- Phase 16.10: central portfolio risk (read-only) -------------------
+export const getPortfolioRisk = () =>
+  apiRequest<import("./types").PortfolioRisk>("/api/risk/portfolio");
+
+export const listAccountRisk = () =>
+  apiRequest<import("./types").AccountRisk[]>("/api/risk/accounts");
+
+export const listStrategyRisk = () =>
+  apiRequest<import("./types").StrategyRisk[]>("/api/risk/strategies");
+
 export const listExecutionOrders = () => apiRequest<import("./types").ExecutionOrder[]>("/api/execution/orders");
 
 export const listExecutionPositions = () =>

@@ -30,6 +30,18 @@ result.
                          quantity, and a non-empty instrument
                                       |
                                       v
+                  PortfolioRiskManager.evaluate_and_reserve()  (Phase 16.10
+                      -- ADDITIVE, sits in front of the existing RiskManager,
+                      never replaces or weakens it; see
+                      trading/common/portfolio_risk.py's own module
+                      docstring. Skipped entirely when the intent's
+                      idempotency_key already has an IdempotencyStore
+                      record -- an idempotent retry must never reserve
+                      portfolio exposure/order-count budget twice; it is
+                      simply let through to replay exactly as execute()
+                      would already handle it.)
+                                      |
+                                      v
                     StrategyRuntime.execute_worker_intent()
                         -> kill switch / authorization-state / RiskManager /
                            mode gate / broker resolution / idempotency /
@@ -53,6 +65,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from trading.common.portfolio_risk import PortfolioRiskManager
 from trading.common.strategy_assignment import StrategyAssignment, UnknownAssignmentError
 from trading.common.strategy_registry import StrategyRegistry, UnknownStrategyError
 from trading.common.strategy_runtime import ShadowBoundaryViolation, StrategyRuntime
@@ -73,12 +86,18 @@ class WorkerCoordinator:
         strategy_registry: StrategyRegistry,
         strategy_assignment: StrategyAssignment,
         strategy_runtime: StrategyRuntime,
+        portfolio_risk_manager: PortfolioRiskManager | None = None,
         max_submission_age_seconds: float = DEFAULT_MAX_SUBMISSION_AGE_SECONDS,
     ) -> None:
         self._workers = worker_registry
         self._strategies = strategy_registry
         self._assignments = strategy_assignment
         self._runtime = strategy_runtime
+        # Phase 16.10 -- optional so every pre-existing caller/test
+        # (constructed before this parameter existed) sees zero behavior
+        # change: None disables the portfolio-risk gate entirely, falling
+        # back to exactly the Phase 16.9 pipeline.
+        self._portfolio_risk = portfolio_risk_manager
         self._max_submission_age = max_submission_age_seconds
         self._seen_submission_ids: set[str] = set()
 
@@ -89,9 +108,15 @@ class WorkerCoordinator:
                 submission_id=submission.submission_id, accepted=False, execution_result=None, reason=reason,
             )
 
+        reservation_id = self._reserve_portfolio_risk(submission)
+        if isinstance(reservation_id, OrderIntentResult):
+            return reservation_id
+
         try:
             result = self._runtime.execute_worker_intent(submission.intent, owning_strategy_id=submission.strategy_id)
         except ShadowBoundaryViolation as exc:
+            if reservation_id and self._portfolio_risk is not None:
+                self._portfolio_risk.release_reservation(reservation_id)
             return OrderIntentResult(
                 submission_id=submission.submission_id, accepted=False, execution_result=None, reason=str(exc),
             )
@@ -104,14 +129,56 @@ class WorkerCoordinator:
             # uncaught -- fail closed, report it, same as every other
             # rejection path. Mirrors the identical fix already made in
             # trading/common/strategy_runtime.py's own run_once() loop.
+            if reservation_id and self._portfolio_risk is not None:
+                self._portfolio_risk.release_reservation(reservation_id)
             return OrderIntentResult(
                 submission_id=submission.submission_id, accepted=False, execution_result=None, reason=str(exc),
             )
+
+        if reservation_id and self._portfolio_risk is not None:
+            self._portfolio_risk.commit_reservation(reservation_id, execution_result=result)
 
         return OrderIntentResult(
             submission_id=submission.submission_id, accepted=result.success, execution_result=result,
             reason="" if result.success else result.message,
         )
+
+    def _reserve_portfolio_risk(self, submission: OrderIntentSubmission) -> str | None | OrderIntentResult:
+        """Returns a reservation_id (str) to commit/release later, None if
+        portfolio risk is disabled or was skipped (an idempotent replay --
+        see module docstring), or an OrderIntentResult if portfolio risk
+        rejects the submission outright."""
+        if self._portfolio_risk is None:
+            return None
+
+        key = submission.intent.idempotency_key
+        if key and self._runtime.idempotency_store.get(key) is not None:
+            # Already has a record (COMPLETED/REJECTED/FAILED/AMBIGUOUS/
+            # PENDING) -- this is a replay or a key-reuse case execute()
+            # itself will handle exactly as it already does. Reserving
+            # portfolio risk again here would double-count exposure/order
+            # counts for the SAME underlying order (Phase 16.10 Section 23).
+            return None
+
+        try:
+            account_id = self._assignments.get_account_id(submission.strategy_id)
+        except UnknownAssignmentError:
+            # Already reported by _validate()'s own check -- unreachable
+            # in practice, kept for defense in depth.
+            return OrderIntentResult(
+                submission_id=submission.submission_id, accepted=False, execution_result=None,
+                reason=f"no account assignment exists for strategy {submission.strategy_id!r}",
+            )
+
+        decision = self._portfolio_risk.evaluate_and_reserve(
+            submission.intent, strategy_id=submission.strategy_id, account_id=account_id,
+        )
+        if not decision.allowed:
+            return OrderIntentResult(
+                submission_id=submission.submission_id, accepted=False, execution_result=None,
+                reason=f"{decision.reason_code}: {decision.message}",
+            )
+        return decision.reservation_id
 
     def _validate(self, submission: OrderIntentSubmission) -> str:
         if submission.submission_id in self._seen_submission_ids:

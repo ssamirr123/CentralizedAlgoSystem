@@ -32,6 +32,12 @@ Phase 13 adds the /api/observability/* routes at the bottom of this file.
     GET    /api/risk/limits
     POST   /api/risk/kill-switch
 
+    GET    /api/risk/portfolio                 (Phase 16.10, read-only)
+    GET    /api/risk/accounts
+    GET    /api/risk/accounts/{account_id}
+    GET    /api/risk/strategies
+    GET    /api/risk/strategies/{strategy_id}
+
     GET    /api/execution/orders
     GET    /api/execution/positions
     GET    /api/execution/pnl
@@ -100,6 +106,7 @@ from trading.api.security.permissions import Permission
 from trading.common.assignment_readiness import AssignmentReadiness, check_assignment_readiness
 from trading.common.broker_manager import BrokerUnavailableError, UnknownAccountError
 from trading.common.broker_types import BrokerCapabilities
+from trading.common.portfolio_risk import PortfolioRiskSnapshot
 from trading.common.strategy import InvalidStrategyStateError, StrategyMetrics
 from trading.common.strategy_assignment import Assignment, InvalidAssignmentError, UnknownAssignmentError
 from trading.common.strategy_control import ControlCommand, StrategyControlOutcome, execute_strategy_command
@@ -383,6 +390,67 @@ class RiskStatusOut(BaseModel):
 class KillSwitchIn(BaseModel):
     engaged: bool
     reason: str = Field(default="", max_length=500)
+
+
+# Phase 16.10 -- read-only portfolio-risk schemas. `risk_status` is always
+# "HEALTHY" in this phase (no violation is possible from a pure read --
+# see PortfolioRiskSnapshot's own docstring on why get_snapshot() is
+# side-effect free and never itself evaluates a limit); it is included so
+# a future phase can report a real status without a breaking schema
+# change. Deliberately excludes any BUY/SELL/PLACE ORDER shape -- see
+# module docstring's SAFETY note.
+class PortfolioRiskOut(BaseModel):
+    timestamp: str
+    daily_pnl: float
+    gross_exposure: float
+    open_orders: int
+    orders_today: int
+    risk_status: str
+    limits: dict[str, float | int | None]
+
+    @classmethod
+    def from_snapshot(cls, snapshot: PortfolioRiskSnapshot, limits) -> "PortfolioRiskOut":
+        return cls(
+            timestamp=snapshot.timestamp, daily_pnl=snapshot.portfolio_daily_pnl,
+            gross_exposure=snapshot.portfolio_exposure, open_orders=snapshot.portfolio_open_orders,
+            orders_today=snapshot.portfolio_orders_today, risk_status="HEALTHY", limits=limits.__dict__,
+        )
+
+
+class AccountRiskOut(BaseModel):
+    account_id: str
+    daily_pnl: float
+    gross_exposure: float
+    open_orders: int
+    orders_today: int
+    risk_status: str
+    limits: dict[str, float | int | None]
+
+    @classmethod
+    def from_snapshot(cls, snapshot: PortfolioRiskSnapshot, limits) -> "AccountRiskOut":
+        return cls(
+            account_id=snapshot.account_id, daily_pnl=snapshot.account_daily_pnl,
+            gross_exposure=snapshot.account_exposure, open_orders=snapshot.account_open_orders,
+            orders_today=snapshot.account_orders_today, risk_status="HEALTHY", limits=limits.__dict__,
+        )
+
+
+class StrategyRiskOut(BaseModel):
+    strategy_id: str
+    daily_pnl: float
+    gross_exposure: float
+    open_orders: int
+    orders_today: int
+    risk_status: str
+    limits: dict[str, float | int | None]
+
+    @classmethod
+    def from_snapshot(cls, snapshot: PortfolioRiskSnapshot, limits) -> "StrategyRiskOut":
+        return cls(
+            strategy_id=snapshot.strategy_id, daily_pnl=snapshot.strategy_daily_pnl,
+            gross_exposure=snapshot.strategy_exposure, open_orders=snapshot.strategy_open_orders,
+            orders_today=snapshot.strategy_orders_today, risk_status="HEALTHY", limits=limits.__dict__,
+        )
 
 
 class OrderOut(BaseModel):
@@ -864,6 +932,74 @@ def set_kill_switch(
         engaged=ks.engaged, engaged_by=ks.engaged_by, reason=ks.reason,
         engaged_at=ks.engaged_at, disengaged_at=ks.disengaged_at,
     )
+
+
+# --------------------------------------------------------------------------- #
+# PORTFOLIO RISK (Phase 16.10, read-only)
+#
+# Every route here calls PortfolioRiskManager.get_snapshot() -- a pure,
+# side-effect-free read (see that method's own docstring) -- never
+# evaluate_and_reserve(), which would reserve exposure/order-count budget
+# as a side effect of a GET. No route here can execute, place, modify, or
+# cancel an order, and none accepts a body that could bypass the normal
+# OrderIntent -> WorkerCoordinator -> PortfolioRiskManager path.
+# --------------------------------------------------------------------------- #
+@router.get("/risk/portfolio", response_model=PortfolioRiskOut)
+def portfolio_risk(state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW)) -> PortfolioRiskOut:
+    if state.portfolio_risk_manager is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "portfolio risk is not configured")
+    snapshot = state.portfolio_risk_manager.get_snapshot()
+    return PortfolioRiskOut.from_snapshot(snapshot, state.portfolio_risk_manager.get_portfolio_limits())
+
+
+@router.get("/risk/accounts", response_model=list[AccountRiskOut])
+def list_account_risk(state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW)) -> list[AccountRiskOut]:
+    if state.portfolio_risk_manager is None:
+        return []
+    out = []
+    for account in state.broker_manager.accounts():
+        snapshot = state.portfolio_risk_manager.get_snapshot(account_id=account.account_id)
+        out.append(AccountRiskOut.from_snapshot(snapshot, state.portfolio_risk_manager.get_account_limits(account.account_id)))
+    return out
+
+
+@router.get("/risk/accounts/{account_id}", response_model=AccountRiskOut)
+def get_account_risk(
+    account_id: str, state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW),
+) -> AccountRiskOut:
+    if state.portfolio_risk_manager is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "portfolio risk is not configured")
+    try:
+        state.broker_manager.get_account(account_id)
+    except UnknownAccountError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such account: {account_id!r}") from None
+    snapshot = state.portfolio_risk_manager.get_snapshot(account_id=account_id)
+    return AccountRiskOut.from_snapshot(snapshot, state.portfolio_risk_manager.get_account_limits(account_id))
+
+
+@router.get("/risk/strategies", response_model=list[StrategyRiskOut])
+def list_strategy_risk(state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW)) -> list[StrategyRiskOut]:
+    if state.portfolio_risk_manager is None:
+        return []
+    out = []
+    for strategy in state.strategy_registry.strategies():
+        snapshot = state.portfolio_risk_manager.get_snapshot(strategy_id=strategy.strategy_id)
+        out.append(StrategyRiskOut.from_snapshot(snapshot, state.portfolio_risk_manager.get_strategy_limits(strategy.strategy_id)))
+    return out
+
+
+@router.get("/risk/strategies/{strategy_id}", response_model=StrategyRiskOut)
+def get_strategy_risk(
+    strategy_id: str, state: ExecutionState = Depends(_state), _principal: Principal = Depends(_VIEW),
+) -> StrategyRiskOut:
+    if state.portfolio_risk_manager is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "portfolio risk is not configured")
+    try:
+        state.strategy_registry.get(strategy_id)
+    except UnknownStrategyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {strategy_id!r}") from None
+    snapshot = state.portfolio_risk_manager.get_snapshot(strategy_id=strategy_id)
+    return StrategyRiskOut.from_snapshot(snapshot, state.portfolio_risk_manager.get_strategy_limits(strategy_id))
 
 
 # --------------------------------------------------------------------------- #
