@@ -11,22 +11,26 @@ vi.mock("@/auth/AuthContext");
 const ROWS = [
   {
     strategy_id: "DoubleStraddelAlgo", assignment_id: "DoubleStraddelAlgo", account_id: "ACC_B",
-    strategy_status: "enabled" as const, lifecycle_state: "READY" as const,
+    execution_mode: "SHADOW" as const, strategy_status: "enabled" as const, lifecycle_state: "READY" as const,
     account_authorization_state: "READ_ONLY" as const, live_authorized: false, execution_active: false,
     last_transition_at: "", last_heartbeat_at: "", last_error: "", assignment_exists: true, blocking_reasons: [],
+    runtime_state: "INACTIVE" as const, last_cycle_at: "", last_runtime_error: "", last_result_summary: "",
   },
   {
     strategy_id: "CombinedVwapNifty", assignment_id: null, account_id: null,
-    strategy_status: "disabled" as const, lifecycle_state: "STOPPED" as const,
+    execution_mode: "" as const, strategy_status: "disabled" as const, lifecycle_state: "STOPPED" as const,
     account_authorization_state: null, live_authorized: false, execution_active: false,
     last_transition_at: "", last_heartbeat_at: "", last_error: "", assignment_exists: false,
     blocking_reasons: ["no assignment exists for this strategy"],
+    runtime_state: "INACTIVE" as const, last_cycle_at: "", last_runtime_error: "", last_result_summary: "",
   },
   {
     strategy_id: "Vwap_Algo_Nifty_hedge", assignment_id: "Vwap_Algo_Nifty_hedge", account_id: "ACC_A",
-    strategy_status: "shadow" as const, lifecycle_state: "RUNNING" as const,
+    execution_mode: "SHADOW" as const, strategy_status: "shadow" as const, lifecycle_state: "RUNNING" as const,
     account_authorization_state: "READ_ONLY" as const, live_authorized: false, execution_active: true,
-    last_transition_at: "2026-09-19T00:00:00Z", last_heartbeat_at: "", last_error: "", assignment_exists: true,
+    last_transition_at: "2026-09-19T00:00:00Z", last_heartbeat_at: "2026-09-19T00:05:00Z", last_error: "",
+    assignment_exists: true, runtime_state: "HEALTHY" as const, last_cycle_at: "2026-09-19T00:05:00Z",
+    last_runtime_error: "", last_result_summary: "FILLED",
     blocking_reasons: [],
   },
 ];
@@ -164,5 +168,33 @@ describe("TccLifecyclePage", () => {
     const vwapRow = rows.find((r) => r.textContent?.includes("CombinedVwapNifty"))!;
     expect(vwapRow.textContent).not.toContain("ACC_B");
     expect(vwapRow.textContent).not.toContain("ACC_A");
+  });
+
+  it("shows the runtime state, execution mode, heartbeat, and last result distinctly per row", () => {
+    mockAll(true, true);
+    renderWithProviders(<TccLifecyclePage />);
+    expect(screen.getByText("HEALTHY")).toBeInTheDocument();
+    expect(screen.getAllByText("INACTIVE").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("SHADOW").length).toBe(2);
+    expect(screen.getByText("2026-09-19T00:05:00Z")).toBeInTheDocument();
+    expect(screen.getByText("FILLED")).toBeInTheDocument();
+  });
+
+  it("shows a runtime error distinctly when the runtime has FAILED", () => {
+    vi.mocked(hooks.useStrategyLifecycle).mockReturnValue(
+      makeQueryResult({
+        data: [
+          {
+            ...ROWS[0], runtime_state: "FAILED" as const,
+            last_runtime_error: "resolved broker is not a known-simulated broker",
+          },
+        ],
+      }) as never,
+    );
+    vi.mocked(hooks.useSendStrategyCommand).mockReturnValue(makeMutationResult({}) as never);
+    vi.mocked(auth.useAuth).mockReturnValue({ hasPermission: () => true } as never);
+    renderWithProviders(<TccLifecyclePage />);
+    expect(screen.getByText("FAILED")).toBeInTheDocument();
+    expect(screen.getByText(/not a known-simulated broker/)).toBeInTheDocument();
   });
 });

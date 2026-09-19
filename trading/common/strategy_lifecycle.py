@@ -72,6 +72,12 @@ class StrategyLifecycleView:
     # assignment data" instruction.
     assignment_id: str | None
     account_id: str | None
+    # Phase 16.5: the assignment's own execution_mode (PAPER/SHADOW/LIVE/
+    # LIVE_CANARY), "" when no assignment exists. Needed to show a "Mode"
+    # column in the TCC lifecycle UI (trading/common/strategy_runtime.py
+    # is PAPER/SHADOW-only regardless of what this field reports -- it is
+    # purely informational/display, never itself a gate).
+    execution_mode: str
     strategy_status: str
     lifecycle_state: LifecycleState
     account_authorization_state: str | None
@@ -123,6 +129,7 @@ def check_lifecycle(
     assignment_exists = strategy_assignment.has_assignment(strategy_id)
     account_id: str | None = None
     account_authorization_state: str | None = None
+    execution_mode = ""
     live_authorized = False
     # "Sound" = the assignment itself is structurally fine (enabled, broker
     # available, account not killed/disabled/insufficiently-authorized) --
@@ -144,6 +151,7 @@ def check_lifecycle(
             readiness = None  # race: removed between has_assignment() and here
         if readiness is not None:
             account_id = readiness.account_id
+            execution_mode = readiness.execution_mode
             assignment_sound = readiness.assignment_valid and readiness.authorization_ok
             # Exclude reasons that describe EXECUTION readiness, not
             # assignment/account soundness -- a strategy that simply hasn't
@@ -174,6 +182,7 @@ def check_lifecycle(
         strategy_id=strategy_id,
         assignment_id=strategy_id if assignment_exists else None,
         account_id=account_id,
+        execution_mode=execution_mode,
         strategy_status=strategy_status.value,
         lifecycle_state=lifecycle_state,
         account_authorization_state=account_authorization_state,

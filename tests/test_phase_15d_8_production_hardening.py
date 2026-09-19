@@ -156,12 +156,23 @@ def test_lifespan_startup_succeeds_in_production_with_persistence_paths(tmp_path
 # ======================================================================== #
 # /api/ready broker-readiness probe
 # ======================================================================== #
-def test_ready_endpoint_reports_not_configured_by_default(client):
+def test_ready_endpoint_reports_not_connected_by_default(client):
+    """Phase 16.5: trading/api/execution_state.py's example accounts now
+    eagerly attach a structurally-safe ShadowBroker() (closing a latent
+    gap where those accounts' broker was built by a lazy factory that
+    would have constructed a real, config-gated adapter the first time
+    anything called BrokerManager.get_broker() -- see
+    trading/common/strategy_runtime.py's module docstring). A freshly
+    constructed ShadowBroker() has never had connect() called on it (this
+    readiness probe is deliberately read-only and never calls connect()
+    itself), so it now reports "not_connected", not the old
+    "not_configured" (which meant "no broker_client attached at all" --
+    no longer true)."""
     r = client.get("/api/ready")
     assert r.status_code == 200
     body = r.json()
     assert body["application"] == "ready"
-    assert body["broker"] == "not_configured"  # example accounts never attach a broker_client (see execution_state.py)
+    assert body["broker"] == "not_connected"
     assert body["trading_authorized"] is False
 
 

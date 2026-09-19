@@ -20,12 +20,26 @@ Example accounts (ANGEL_MAIN/DHAN_MAIN/ICICI_MAIN) mirror the Phase 7
 reference registry exactly: all execution_mode=SHADOW, Dhan/ICICI Breeze
 marked broker-unavailable (Phase 8/9 built those adapters but neither has
 been validated against a real account yet, so this phase does not change
-their production-routing posture). Each account's BrokerClient is built
-via a LAZY factory (trading.common.broker.create_broker(), the exact same
-factory production would use) -- but no endpoint in execution_routes.py
-ever calls BrokerManager.get_broker() on it, so that factory is never
-actually invoked and no broker SDK/network/credential is ever touched by
-this API. Accounts are listed by static TradingAccount metadata only.
+their production-routing posture). Accounts are listed by static
+TradingAccount metadata only.
+
+Phase 16.5 fix: each account's BrokerClient used to be built via a LAZY
+factory (trading.common.broker.create_broker(TradingConfig(...,
+trading_mode="paper"))) -- safe only because no endpoint in
+execution_routes.py ever called BrokerManager.get_broker() on it (a
+CONFIGURATION-based guarantee: "paper mode" is a trading_mode setting on
+a real AngelOneBroker/DhanBroker/ICICIBreezeBroker instance, not a
+structural one -- see trading/common/brokers/shadow_broker.py's own
+docstring for that exact distinction). Phase 16.5 introduces
+trading.common.strategy_runtime.StrategyRuntime, which DOES call
+get_broker() (via StrategyExecutionEngine.execute()), so that
+configuration-based guarantee was no longer good enough. These accounts
+now register an eager trading.common.brokers.shadow_broker.ShadowBroker()
+directly instead: STRUCTURALLY incapable of a real broker call (no SDK
+import, no network, no credential anywhere in that file), matching each
+account's own execution_mode=SHADOW. This has zero effect on any
+pre-existing test or route, since get_broker() was never called on these
+accounts before this phase.
 """
 from __future__ import annotations
 
@@ -34,9 +48,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from trading.common.alerts import AlertManager
-from trading.common.broker import create_broker
 from trading.common.broker_manager import BrokerManager
-from trading.common.config import TradingConfig
+from trading.common.brokers.shadow_broker import ShadowBroker
 from trading.common.kill_switch import CentralKillSwitch
 from trading.common.observability import AuditTrail, MetricsRegistry
 from trading.common.risk_manager import RiskManager
@@ -45,6 +58,7 @@ from trading.common.strategies.double_straddle import DoubleStraddleStrategy
 from trading.common.strategies.vwap_algo_nifty_hedge import VwapAlgoNiftyHedgeStrategy
 from trading.common.strategy_assignment import StrategyAssignment
 from trading.common.strategy_registry import StrategyRegistry
+from trading.common.strategy_runtime import StrategyRuntime
 from trading.common.trading_account import ExecutionMode, TradingAccount
 
 _EXAMPLE_ACCOUNTS = (
@@ -83,6 +97,11 @@ class ExecutionState:
     metrics: MetricsRegistry = field(default_factory=MetricsRegistry)
     audit_trail: Any = field(default_factory=AuditTrail)
     alerts: AlertManager = field(default_factory=AlertManager)
+    # Phase 16.5 -- see trading/common/strategy_runtime.py. Constructed
+    # against this SAME broker_manager/strategy_assignment/risk_manager/
+    # kill_switch, so "assigned via the API" and "executed by the runtime"
+    # can never silently diverge onto separate state.
+    strategy_runtime: StrategyRuntime | None = None
 
 
 def build_execution_state() -> ExecutionState:
@@ -121,12 +140,7 @@ def build_execution_state() -> ExecutionState:
             account_id=account_id, account_name=account_name, broker_id=broker_id,
             execution_mode=ExecutionMode.SHADOW,
         )
-        broker_manager.register_account(
-            account,
-            broker_factory=lambda broker_id=broker_id: create_broker(
-                TradingConfig(broker_name=broker_id, trading_mode="paper")
-            ),
-        )
+        broker_manager.register_account(account, broker_client=ShadowBroker())
     broker_manager.set_broker_availability(
         "dhan", False, reason="Dhan adapter (Phase 8) not yet validated against a real account"
     )
@@ -142,6 +156,12 @@ def build_execution_state() -> ExecutionState:
     strategy_registry.register(CombinedVwapNiftyStrategy(metrics_registry=metrics, audit_trail=audit_trail, alerts=alerts))
     strategy_registry.register(VwapAlgoNiftyHedgeStrategy(metrics_registry=metrics, audit_trail=audit_trail, alerts=alerts))
 
+    strategy_runtime = StrategyRuntime(
+        strategy_registry=strategy_registry, strategy_assignment=strategy_assignment,
+        broker_manager=broker_manager, risk_manager=risk_manager, kill_switch=kill_switch,
+        metrics_registry=metrics, audit_trail=audit_trail,
+    )
+
     return ExecutionState(
         broker_manager=broker_manager,
         strategy_assignment=strategy_assignment,
@@ -151,4 +171,5 @@ def build_execution_state() -> ExecutionState:
         metrics=metrics,
         audit_trail=audit_trail,
         alerts=alerts,
+        strategy_runtime=strategy_runtime,
     )

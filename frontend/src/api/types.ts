@@ -411,6 +411,7 @@ export interface StrategyLifecycle {
   strategy_id: string;
   assignment_id: string | null;
   account_id: string | null;
+  execution_mode: ExecutionModeValue | "";
   strategy_status: StrategyStatusValue;
   lifecycle_state: LifecycleStateValue;
   account_authorization_state: ExecutionAccount["authorization_state"] | null;
@@ -421,6 +422,30 @@ export interface StrategyLifecycle {
   last_error: string;
   assignment_exists: boolean;
   blocking_reasons: string[];
+  // Phase 16.5 -- trading/common/strategy_runtime.py. A FOURTH status,
+  // deliberately separate from lifecycle_state/strategy_status/
+  // account_authorization_state.
+  runtime_state: "INACTIVE" | "HEALTHY" | "FAILED";
+  last_cycle_at: string;
+  last_runtime_error: string;
+  last_result_summary: string;
+}
+
+export interface RuntimeExecutionResult {
+  success: boolean;
+  order_id: string;
+  status: string;
+  message: string;
+  filled_quantity: number;
+  account_id: string;
+}
+
+export interface RuntimeCycleResult {
+  strategy_id: string;
+  ticked: boolean;
+  intents_generated: number;
+  executions: RuntimeExecutionResult[];
+  error: string;
 }
 
 // Phase 16.4: the strategy control plane. Exactly two commands exist --

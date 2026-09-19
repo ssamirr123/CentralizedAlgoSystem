@@ -20,6 +20,7 @@ Phase 13 adds the /api/observability/* routes at the bottom of this file.
     GET    /api/strategy-lifecycle
     GET    /api/strategy-lifecycle/{strategy_id}
     POST   /api/strategy-lifecycle/{strategy_id}/command   (Phase 16.4: START | STOP)
+    POST   /api/strategy-lifecycle/{strategy_id}/evaluate  (Phase 16.5: one PAPER/SHADOW cycle)
 
     GET    /api/execution-modes
 
@@ -99,6 +100,7 @@ from trading.common.strategy import InvalidStrategyStateError, StrategyMetrics
 from trading.common.strategy_assignment import Assignment, InvalidAssignmentError, UnknownAssignmentError
 from trading.common.strategy_control import ControlCommand, StrategyControlOutcome, execute_strategy_command
 from trading.common.strategy_lifecycle import StrategyLifecycleView, check_all_lifecycles, check_lifecycle
+from trading.common.strategy_runtime import RuntimeCycleResult, RuntimeStatus
 from trading.common.strategy_registry import UnknownStrategyError
 from trading.common.trading_account import ExecutionMode, TradingAccount
 
@@ -260,6 +262,7 @@ class StrategyLifecycleOut(BaseModel):
     strategy_id: str
     assignment_id: str | None
     account_id: str | None
+    execution_mode: str
     strategy_status: str
     lifecycle_state: str
     account_authorization_state: str | None
@@ -270,16 +273,28 @@ class StrategyLifecycleOut(BaseModel):
     last_error: str
     assignment_exists: bool
     blocking_reasons: list[str]
+    # Phase 16.5 -- trading/common/strategy_runtime.py. A FOURTH,
+    # deliberately separate status from lifecycle_state/strategy_status/
+    # account_authorization_state -- see that module's own docstring.
+    runtime_state: str
+    last_cycle_at: str
+    last_runtime_error: str
+    last_result_summary: str
 
     @classmethod
-    def from_view(cls, v: StrategyLifecycleView) -> "StrategyLifecycleOut":
+    def from_view(cls, v: StrategyLifecycleView, runtime: RuntimeStatus | None = None) -> "StrategyLifecycleOut":
         return cls(
             strategy_id=v.strategy_id, assignment_id=v.assignment_id, account_id=v.account_id,
-            strategy_status=v.strategy_status, lifecycle_state=v.lifecycle_state.value,
+            execution_mode=v.execution_mode, strategy_status=v.strategy_status, lifecycle_state=v.lifecycle_state.value,
             account_authorization_state=v.account_authorization_state, live_authorized=v.live_authorized,
             execution_active=v.execution_active, last_transition_at=v.last_transition_at,
-            last_heartbeat_at=v.last_heartbeat_at, last_error=v.last_error,
-            assignment_exists=v.assignment_exists, blocking_reasons=list(v.blocking_reasons),
+            last_heartbeat_at=(runtime.last_heartbeat_at if runtime and runtime.last_heartbeat_at else v.last_heartbeat_at),
+            last_error=v.last_error, assignment_exists=v.assignment_exists,
+            blocking_reasons=list(v.blocking_reasons),
+            runtime_state=(runtime.state.value if runtime else "INACTIVE"),
+            last_cycle_at=(runtime.last_cycle_at if runtime else ""),
+            last_runtime_error=(runtime.last_error if runtime else ""),
+            last_result_summary=(runtime.last_result_summary if runtime else ""),
         )
 
 
@@ -556,7 +571,11 @@ def list_strategy_lifecycle(state: ExecutionState = Depends(_state), _principal:
         strategy_registry=state.strategy_registry, strategy_assignment=state.strategy_assignment,
         broker_manager=state.broker_manager, kill_switch=state.kill_switch,
     )
-    return [StrategyLifecycleOut.from_view(v) for v in views]
+    out = []
+    for v in views:
+        runtime_status = state.strategy_runtime.get_status(v.strategy_id) if state.strategy_runtime else None
+        out.append(StrategyLifecycleOut.from_view(v, runtime_status))
+    return out
 
 
 @router.get("/strategy-lifecycle/{strategy_id}", response_model=StrategyLifecycleOut)
@@ -570,7 +589,8 @@ def get_strategy_lifecycle(
         )
     except UnknownStrategyError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {strategy_id!r}") from None
-    return StrategyLifecycleOut.from_view(view)
+    runtime_status = state.strategy_runtime.get_status(strategy_id) if state.strategy_runtime else None
+    return StrategyLifecycleOut.from_view(view, runtime_status)
 
 
 # --------------------------------------------------------------------------- #
@@ -628,6 +648,61 @@ def send_strategy_command(
         },
     )
     return StrategyCommandOut.from_outcome(outcome)
+
+
+class ExecutionResultOut(BaseModel):
+    success: bool
+    order_id: str
+    status: str
+    message: str
+    filled_quantity: int
+    account_id: str
+
+
+class RuntimeCycleOut(BaseModel):
+    strategy_id: str
+    ticked: bool
+    intents_generated: int
+    executions: list[ExecutionResultOut]
+    error: str
+
+
+@router.post("/strategy-lifecycle/{strategy_id}/evaluate", response_model=RuntimeCycleOut)
+def evaluate_strategy_runtime(
+    strategy_id: str, request: Request, db: Session = Depends(get_db),
+    state: ExecutionState = Depends(_state), principal: Principal = Depends(_START),
+) -> RuntimeCycleOut:
+    """Phase 16.5: one explicit, PAPER/SHADOW-only strategy evaluation
+    cycle -- see trading/common/strategy_runtime.py. Requires the same
+    START permission as the control-plane START command, since (unlike a
+    GET) this can generate a simulated execution. Never places, modifies,
+    or cancels a real broker order; never consumes a live authorization."""
+    if state.strategy_runtime is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Strategy runtime is not configured.")
+    try:
+        cycle: RuntimeCycleResult = state.strategy_runtime.run_once(strategy_id)
+    except UnknownStrategyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {strategy_id!r}") from None
+
+    _audit(
+        db, request, principal, audit.STRATEGY_RUNTIME_EVALUATED, target=f"strategy:{strategy_id}",
+        outcome=("failed" if cycle.error else "success"),
+        detail={
+            "ticked": cycle.ticked, "intents_generated": cycle.intents_generated,
+            "executions": len(cycle.executions), "error": cycle.error,
+        },
+    )
+    return RuntimeCycleOut(
+        strategy_id=cycle.strategy_id, ticked=cycle.ticked, intents_generated=cycle.intents_generated,
+        executions=[
+            ExecutionResultOut(
+                success=r.success, order_id=r.order_id, status=r.status, message=r.message,
+                filled_quantity=r.filled_quantity, account_id=r.account_id,
+            )
+            for r in cycle.executions
+        ],
+        error=cycle.error,
+    )
 
 
 # --------------------------------------------------------------------------- #

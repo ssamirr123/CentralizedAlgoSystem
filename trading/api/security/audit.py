@@ -54,6 +54,10 @@ STRATEGY_COMMAND_ACCEPTED = "STRATEGY_COMMAND_ACCEPTED"
 STRATEGY_COMMAND_REJECTED = "STRATEGY_COMMAND_REJECTED"
 STRATEGY_COMMAND_NOOP = "STRATEGY_COMMAND_NOOP"
 STRATEGY_COMMAND_FAILED = "STRATEGY_COMMAND_FAILED"
+# Phase 16.5 -- one explicit PAPER/SHADOW strategy runtime evaluation
+# cycle (trading/common/strategy_runtime.py). Records that a cycle ran and
+# its outcome; never records a real broker mutation, since none can occur.
+STRATEGY_RUNTIME_EVALUATED = "STRATEGY_RUNTIME_EVALUATED"
 
 
 def record(

@@ -446,6 +446,76 @@ def test_pre_existing_start_stop_endpoints_are_unchanged_and_still_409_on_repeat
 
 
 # --------------------------------------------------------------------------- #
+# STRATEGY RUNTIME (Phase 16.5)
+# --------------------------------------------------------------------------- #
+def test_lifecycle_list_includes_runtime_fields(client, viewer_auth):
+    r = client.get("/api/strategy-lifecycle", headers=viewer_auth)
+    assert r.status_code == 200
+    for row in r.json():
+        assert row["runtime_state"] == "INACTIVE"
+        assert row["last_cycle_at"] == ""
+        assert row["last_result_summary"] == ""
+
+
+def test_evaluate_unknown_strategy_is_404(client, trader_auth):
+    r = client.post("/api/strategy-lifecycle/NoSuchStrategy/evaluate", headers=trader_auth)
+    assert r.status_code == 404
+
+
+def test_evaluate_requires_start_permission(client, viewer_auth):
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/evaluate", headers=viewer_auth)
+    assert r.status_code == 403
+
+
+def test_evaluate_inactive_strategy_is_a_pure_noop(client, trader_auth):
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/evaluate", headers=trader_auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ticked"] is False
+    assert body["intents_generated"] == 0
+    assert body["executions"] == []
+
+
+def test_evaluate_running_strategy_generates_zero_intents_by_design(client, bearer):
+    """The registered Phase-10 strategy classes generate no real intents
+    (Phase 10 scope) -- evaluating them must tick cleanly with zero
+    executions, never fabricate activity."""
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/evaluate", headers=op)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ticked"] is True
+    assert body["intents_generated"] == 0
+    assert body["error"] == ""
+
+    lifecycle = client.get("/api/strategy-lifecycle/DoubleStraddelAlgo", headers=op).json()
+    assert lifecycle["runtime_state"] == "HEALTHY"
+    assert lifecycle["last_cycle_at"] != ""
+
+
+def test_evaluate_response_never_contains_a_credential_field(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/evaluate", headers=op)
+    body_text = r.text.lower()
+    for forbidden in ("api_key", "api_secret", "access_token", "password", "credential"):
+        assert forbidden not in body_text
+
+
+def test_evaluate_is_audited(client, bearer, db_session):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/evaluate", headers=op)
+    rows = [r for r in db_session.query(models.AuditLog).all() if r.action == "STRATEGY_RUNTIME_EVALUATED"]
+    assert len(rows) == 1
+    assert rows[0].outcome == "success"
+
+
+# --------------------------------------------------------------------------- #
 # EXECUTION MODES
 # --------------------------------------------------------------------------- #
 def test_execution_modes_lists_all_four(client, viewer_auth):
@@ -628,8 +698,12 @@ def test_execution_state_never_wires_a_live_authorization_store():
     assert not hasattr(state, "live_authorization_store")
     assert set(ExecutionState.__dataclass_fields__) == {
         "broker_manager", "strategy_assignment", "risk_manager", "strategy_registry",
-        "kill_switch", "metrics", "audit_trail", "alerts",
+        "kill_switch", "metrics", "audit_trail", "alerts", "strategy_runtime",
     }
+    # Phase 16.5's own runtime is present, but it is not a
+    # LiveAuthorization store -- it holds no live-authorization state of
+    # any kind (see trading/common/strategy_runtime.py's own docstring).
+    assert not hasattr(state.strategy_runtime, "live_authorization_store")
 
 
 def test_full_regression_isolation_between_tests(client, bearer):

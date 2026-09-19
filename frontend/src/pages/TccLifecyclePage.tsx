@@ -6,17 +6,22 @@ import { PageHeader } from "@/components/PageHeader";
 import { QueryBoundary } from "@/components/States";
 import type { StrategyCommandResult } from "@/api/types";
 
-// Phase 16.3/16.4: read-only lifecycle display plus two control-plane
-// commands (START/STOP). Deliberately shows three SEPARATE columns
-// (Lifecycle / Authorization / Execution) rather than one merged status --
-// see trading/common/strategy_lifecycle.py's module docstring for why
+// Phase 16.3/16.4/16.5: read-only lifecycle + runtime display plus two
+// control-plane commands (START/STOP). Deliberately shows FOUR separate
+// facts (Lifecycle / Authorization / Execution / Runtime) rather than one
+// merged status -- see trading/common/strategy_lifecycle.py's and
+// trading/common/strategy_runtime.py's own module docstrings for why
 // these must never be collapsed into a single value.
 //
 //     STRATEGY LIFECYCLE STATE  !=  LIVE AUTHORIZATION  !=  ORDER EXECUTION
 //
 // START/STOP here only flip the strategy's own in-memory lifecycle flag
 // (trading/common/strategy_control.py) -- neither ever calls a broker,
-// consumes a live authorization, or begins order execution. This page
+// consumes a live authorization, or begins order execution. Runtime state
+// (Phase 16.5) reflects whether trading/common/strategy_runtime.py's
+// PAPER/SHADOW-only evaluation cycle last completed cleanly -- it is
+// display-only on this page; no "run"/"evaluate" button is exposed here,
+// a deliberate, conservative scoping choice for this phase. This page
 // contains no BUY/SELL/PLACE ORDER/CLOSE POSITION/AUTHORIZE LIVE/GO LIVE
 // control of any kind, and never will.
 export function TccLifecyclePage() {
@@ -57,10 +62,13 @@ export function TccLifecyclePage() {
                     <th>Strategy</th>
                     <th>Account</th>
                     <th>Lifecycle</th>
+                    <th>Mode</th>
                     <th>Authorization</th>
                     <th>Execution</th>
+                    <th>Runtime</th>
                     <th>Control</th>
                     <th>Last transition</th>
+                    <th>Last heartbeat</th>
                     <th>Last error</th>
                   </tr>
                 </thead>
@@ -75,8 +83,14 @@ export function TccLifecyclePage() {
                         <td>
                           <span className={`badge lifecycle-${r.lifecycle_state.toLowerCase()}`}>{r.lifecycle_state}</span>
                         </td>
+                        <td>{r.execution_mode || "—"}</td>
                         <td>{r.account_authorization_state ?? "—"}{r.live_authorized ? " (LIVE_AUTHORIZED)" : ""}</td>
                         <td>{r.execution_active ? "ACTIVE" : "INACTIVE"}</td>
+                        <td>
+                          <span className={`badge runtime-${r.runtime_state.toLowerCase()}`}>{r.runtime_state}</span>
+                          {r.last_result_summary && <div className="inline-note">{r.last_result_summary}</div>}
+                          {r.last_runtime_error && <div className="form-error">{r.last_runtime_error}</div>}
+                        </td>
                         <td>
                           <div className="filters" style={{ gap: 6 }}>
                             <button
@@ -107,6 +121,7 @@ export function TccLifecyclePage() {
                           )}
                         </td>
                         <td className="mono">{r.last_transition_at || "—"}</td>
+                        <td className="mono">{r.last_heartbeat_at || "—"}</td>
                         <td>{r.last_error || "—"}</td>
                       </tr>
                     );
