@@ -19,6 +19,7 @@ Phase 13 adds the /api/observability/* routes at the bottom of this file.
 
     GET    /api/strategy-lifecycle
     GET    /api/strategy-lifecycle/{strategy_id}
+    POST   /api/strategy-lifecycle/{strategy_id}/command   (Phase 16.4: START | STOP)
 
     GET    /api/execution-modes
 
@@ -96,6 +97,7 @@ from trading.common.broker_manager import BrokerUnavailableError, UnknownAccount
 from trading.common.broker_types import BrokerCapabilities
 from trading.common.strategy import InvalidStrategyStateError, StrategyMetrics
 from trading.common.strategy_assignment import Assignment, InvalidAssignmentError, UnknownAssignmentError
+from trading.common.strategy_control import ControlCommand, StrategyControlOutcome, execute_strategy_command
 from trading.common.strategy_lifecycle import StrategyLifecycleView, check_all_lifecycles, check_lifecycle
 from trading.common.strategy_registry import UnknownStrategyError
 from trading.common.trading_account import ExecutionMode, TradingAccount
@@ -113,9 +115,12 @@ def _state(request: Request) -> ExecutionState:
     return request.app.state.execution
 
 
-def _audit(db, request: Request, principal: Principal, action: str, target: str | None = None, detail: dict | None = None) -> None:
+def _audit(
+    db, request: Request, principal: Principal, action: str, target: str | None = None,
+    detail: dict | None = None, outcome: str = "success",
+) -> None:
     audit.record(
-        db, actor=principal.actor, actor_label=principal.label, action=action,
+        db, actor=principal.actor, actor_label=principal.label, action=action, outcome=outcome,
         target=target, ip=client_ip(request), user_agent=request.headers.get("user-agent"), detail=detail,
     )
 
@@ -275,6 +280,35 @@ class StrategyLifecycleOut(BaseModel):
             execution_active=v.execution_active, last_transition_at=v.last_transition_at,
             last_heartbeat_at=v.last_heartbeat_at, last_error=v.last_error,
             assignment_exists=v.assignment_exists, blocking_reasons=list(v.blocking_reasons),
+        )
+
+
+class StrategyCommandIn(BaseModel):
+    command: str  # "START" | "STOP" -- validated against ControlCommand below
+    reason: str = Field(default="", max_length=500)
+
+
+class StrategyCommandOut(BaseModel):
+    command_id: str
+    strategy_id: str
+    assignment_id: str | None
+    account_id: str | None
+    command: str
+    result: str
+    previous_state: str
+    new_state: str
+    accepted: bool
+    live_authorized: bool
+    execution_started: bool
+    reason: str
+
+    @classmethod
+    def from_outcome(cls, o: StrategyControlOutcome) -> "StrategyCommandOut":
+        return cls(
+            command_id=o.command_id, strategy_id=o.strategy_id, assignment_id=o.assignment_id,
+            account_id=o.account_id, command=o.command.value, result=o.result.value,
+            previous_state=o.previous_state.value, new_state=o.new_state.value, accepted=o.accepted,
+            live_authorized=o.live_authorized, execution_started=o.execution_started, reason=o.reason,
         )
 
 
@@ -537,6 +571,63 @@ def get_strategy_lifecycle(
     except UnknownStrategyError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {strategy_id!r}") from None
     return StrategyLifecycleOut.from_view(view)
+
+
+# --------------------------------------------------------------------------- #
+# STRATEGY CONTROL PLANE (Phase 16.4)
+#
+# Exactly two commands exist: START and STOP. Neither ever generates an
+# OrderIntent, resolves a broker, or constructs an execution engine -- see
+# trading/common/strategy_control.py's own module docstring. This is the
+# ONLY control surface for strategy lifecycle mutation added in Phase
+# 16.4; the pre-existing POST /api/strategies/{id}/start|stop (Phase 11)
+# is left completely unchanged (including its existing 409-on-invalid-
+# transition contract, which several pre-existing tests pin) -- this
+# endpoint is additive, reusing the exact same underlying Strategy.enable/
+# start/stop() primitives, but with idempotent NOOP handling, an explicit
+# Phase 16.2 readiness pre-check, and a richer, auditable result.
+# --------------------------------------------------------------------------- #
+@router.post("/strategy-lifecycle/{strategy_id}/command", response_model=StrategyCommandOut)
+def send_strategy_command(
+    strategy_id: str, body: StrategyCommandIn, request: Request, db: Session = Depends(get_db),
+    state: ExecutionState = Depends(_state), principal: Principal = Depends(get_principal),
+) -> StrategyCommandOut:
+    try:
+        command = ControlCommand(body.command)
+    except ValueError:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unsupported command: {body.command!r}") from None
+
+    required_permission = Permission.START if command == ControlCommand.START else Permission.STOP
+    if not principal.has(required_permission):
+        _audit(db, request, principal, audit.PERMISSION_DENIED, target=f"{request.method} {request.url.path}",
+               outcome="denied")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Requires {required_permission.value} permission.")
+
+    try:
+        outcome = execute_strategy_command(
+            strategy_registry=state.strategy_registry, strategy_assignment=state.strategy_assignment,
+            broker_manager=state.broker_manager, kill_switch=state.kill_switch,
+            strategy_id=strategy_id, command=command,
+        )
+    except UnknownStrategyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such strategy: {strategy_id!r}") from None
+
+    _audit_action = {
+        "ACCEPTED": audit.STRATEGY_COMMAND_ACCEPTED, "REJECTED": audit.STRATEGY_COMMAND_REJECTED,
+        "NOOP": audit.STRATEGY_COMMAND_NOOP, "FAILED": audit.STRATEGY_COMMAND_FAILED,
+    }[outcome.result.value]
+    _audit_outcome = {
+        "ACCEPTED": "success", "REJECTED": "denied", "NOOP": "success", "FAILED": "failed",
+    }[outcome.result.value]
+    _audit(
+        db, request, principal, _audit_action, target=f"strategy:{strategy_id}", outcome=_audit_outcome,
+        detail={
+            "command_id": outcome.command_id, "command": outcome.command.value,
+            "previous_state": outcome.previous_state.value, "new_state": outcome.new_state.value,
+            "reason": body.reason or outcome.reason,
+        },
+    )
+    return StrategyCommandOut.from_outcome(outcome)
 
 
 # --------------------------------------------------------------------------- #

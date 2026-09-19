@@ -43,6 +43,7 @@ export function makeMutationResult(overrides: {
   isSuccess?: boolean;
   error?: unknown;
   reset?: () => void;
+  variables?: unknown;
 }) {
   return {
     mutate: overrides.mutate ?? (() => {}),
@@ -50,5 +51,6 @@ export function makeMutationResult(overrides: {
     isSuccess: overrides.isSuccess ?? false,
     error: overrides.error ?? null,
     reset: overrides.reset ?? (() => {}),
+    variables: overrides.variables,
   };
 }

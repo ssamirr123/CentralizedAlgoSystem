@@ -423,6 +423,33 @@ export interface StrategyLifecycle {
   blocking_reasons: string[];
 }
 
+// Phase 16.4: the strategy control plane. Exactly two commands exist --
+// never BUY/SELL/PLACE_ORDER/AUTHORIZE_LIVE/GO_LIVE. execution_started is
+// always false: a control command activates the strategy's own lifecycle
+// flag only, never order execution.
+export type ControlCommandValue = "START" | "STOP";
+export type CommandResultValue = "ACCEPTED" | "REJECTED" | "NOOP" | "FAILED";
+
+export interface StrategyCommandRequest {
+  command: ControlCommandValue;
+  reason?: string;
+}
+
+export interface StrategyCommandResult {
+  command_id: string;
+  strategy_id: string;
+  assignment_id: string | null;
+  account_id: string | null;
+  command: ControlCommandValue;
+  result: CommandResultValue;
+  previous_state: LifecycleStateValue;
+  new_state: LifecycleStateValue;
+  accepted: boolean;
+  live_authorized: boolean;
+  execution_started: boolean;
+  reason: string;
+}
+
 export interface ExecutionModeOption {
   value: ExecutionModeValue;
 }

@@ -190,6 +190,12 @@ export const listStrategyLifecycle = () =>
 export const getStrategyLifecycle = (strategyId: string) =>
   apiRequest<import("./types").StrategyLifecycle>(`/api/strategy-lifecycle/${encodeURIComponent(strategyId)}`);
 
+export const sendStrategyCommand = (strategyId: string, body: import("./types").StrategyCommandRequest) =>
+  apiRequest<import("./types").StrategyCommandResult>(
+    `/api/strategy-lifecycle/${encodeURIComponent(strategyId)}/command`,
+    { method: "POST", body },
+  );
+
 export const listExecutionModes = () =>
   apiRequest<import("./types").ExecutionModeOption[]>("/api/execution-modes");
 

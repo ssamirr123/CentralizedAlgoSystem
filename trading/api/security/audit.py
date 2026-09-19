@@ -45,6 +45,15 @@ STRATEGY_STOPPED = "STRATEGY_STOPPED"
 ASSIGNMENT_SET = "ASSIGNMENT_SET"
 KILL_SWITCH_ENGAGED = "KILL_SWITCH_ENGAGED"
 KILL_SWITCH_DISENGAGED = "KILL_SWITCH_DISENGAGED"
+# Phase 16.4 -- strategy control-plane commands (START/STOP), distinct from
+# STRATEGY_STARTED/STRATEGY_STOPPED above (which record only the raw Phase
+# 11 lifecycle mutation itself, when one actually occurred). These record
+# the OUTCOME of a control-plane command, including when no mutation
+# happened at all (REJECTED/NOOP).
+STRATEGY_COMMAND_ACCEPTED = "STRATEGY_COMMAND_ACCEPTED"
+STRATEGY_COMMAND_REJECTED = "STRATEGY_COMMAND_REJECTED"
+STRATEGY_COMMAND_NOOP = "STRATEGY_COMMAND_NOOP"
+STRATEGY_COMMAND_FAILED = "STRATEGY_COMMAND_FAILED"
 
 
 def record(

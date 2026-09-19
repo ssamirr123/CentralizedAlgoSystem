@@ -296,6 +296,19 @@ export const useStrategyLifecycle = () => {
   return useQuery({ queryKey: ["strategy-lifecycle"], queryFn: api.listStrategyLifecycle, refetchInterval: poll });
 };
 
+export const useSendStrategyCommand = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { strategyId: string; command: import("./types").ControlCommandValue; reason?: string }) =>
+      api.sendStrategyCommand(v.strategyId, { command: v.command, reason: v.reason }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["strategy-lifecycle"] });
+      qc.invalidateQueries({ queryKey: ["exec-strategies"] });
+      qc.invalidateQueries({ queryKey: ["exec-system-status"] });
+    },
+  });
+};
+
 export const useExecutionModes = () =>
   useQuery({ queryKey: ["exec-modes"], queryFn: api.listExecutionModes, staleTime: Infinity });
 

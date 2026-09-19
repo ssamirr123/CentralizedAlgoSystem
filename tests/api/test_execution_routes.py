@@ -344,6 +344,108 @@ def test_strategy_lifecycle_reading_never_starts_a_strategy_or_mutates_anything(
 
 
 # --------------------------------------------------------------------------- #
+# STRATEGY CONTROL PLANE (Phase 16.4)
+# --------------------------------------------------------------------------- #
+def test_command_requires_start_permission_for_start(client, viewer_auth):
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=viewer_auth, json={"command": "START"})
+    assert r.status_code == 403
+
+
+def test_command_rejects_unknown_command_string(client, trader_auth):
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=trader_auth, json={"command": "GO_LIVE"})
+    assert r.status_code == 422
+
+
+def test_command_for_unknown_strategy_is_404(client, trader_auth):
+    r = client.post("/api/strategy-lifecycle/NoSuchStrategy/command", headers=trader_auth, json={"command": "START"})
+    assert r.status_code == 404
+
+
+def test_start_command_rejected_with_no_assignment(client, trader_auth):
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=trader_auth, json={"command": "START"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["result"] == "REJECTED"
+    assert body["accepted"] is False
+    assert body["execution_started"] is False
+
+
+def test_start_command_accepted_once_assigned(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["result"] == "ACCEPTED"
+    assert body["new_state"] == "RUNNING"
+    assert body["live_authorized"] is False
+    assert body["execution_started"] is False
+
+
+def test_repeated_start_command_is_idempotent_noop_not_409(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    assert r.status_code == 200  # never 409 -- idempotent, per this phase's own requirement
+    assert r.json()["result"] == "NOOP"
+
+
+def test_stop_command_noop_when_already_stopped(client, trader_auth):
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=trader_auth, json={"command": "STOP"})
+    assert r.status_code == 200
+    assert r.json()["result"] == "NOOP"
+
+
+def test_stop_command_requires_stop_permission(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    viewer = bearer(role="viewer")
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=viewer, json={"command": "STOP"})
+    assert r.status_code == 403
+
+
+def test_command_start_then_stop_round_trip(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    r1 = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    assert r1.json()["new_state"] == "RUNNING"
+    r2 = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "STOP"})
+    assert r2.json()["new_state"] == "STOPPED"
+    assert r2.json()["previous_state"] == "RUNNING"
+
+
+def test_command_response_never_contains_a_credential_field(client, bearer):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    r = client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    body_text = r.text.lower()
+    for forbidden in ("api_key", "api_secret", "access_token", "password", "credential"):
+        assert forbidden not in body_text
+
+
+def test_command_is_audited(client, bearer, db_session):
+    op = bearer(role="operator")
+    client.post("/api/assignments", headers=op, json={"strategy_id": "DoubleStraddelAlgo", "account_id": "ANGEL_MAIN"})
+    client.post("/api/strategy-lifecycle/DoubleStraddelAlgo/command", headers=op, json={"command": "START"})
+    rows = [r for r in db_session.query(models.AuditLog).all() if r.action == "STRATEGY_COMMAND_ACCEPTED"]
+    assert len(rows) == 1
+    assert rows[0].outcome == "success"
+    assert rows[0].target == "strategy:DoubleStraddelAlgo"
+
+
+def test_pre_existing_start_stop_endpoints_are_unchanged_and_still_409_on_repeat(client, trader_auth):
+    """Phase 16.4 must not alter the pre-existing Phase 11 contract of
+    POST /api/strategies/{id}/start|stop -- only ADD the new control-plane
+    endpoint above it."""
+    r1 = client.post("/api/strategies/CombinedVwapNifty/start", headers=trader_auth)
+    assert r1.status_code == 200
+    r2 = client.post("/api/strategies/CombinedVwapNifty/start", headers=trader_auth)
+    assert r2.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
 # EXECUTION MODES
 # --------------------------------------------------------------------------- #
 def test_execution_modes_lists_all_four(client, viewer_auth):
