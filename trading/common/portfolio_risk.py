@@ -100,10 +100,12 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from enum import Enum
+from typing import Any
 
 from trading.common.broker import OrderSide
 from trading.common.execution import TERMINAL_STATUSES, ExecutionResult
 from trading.common.order_intent import OrderIntent
+from trading.common.portfolio_risk_store import PortfolioRiskReadiness, SqlitePortfolioRiskStore
 
 __all__ = [
     "ConflictInfo",
@@ -121,6 +123,7 @@ __all__ = [
     "REASON_PORTFOLIO_EXPOSURE_LIMIT",
     "REASON_PORTFOLIO_LOSS_LIMIT",
     "REASON_RISK_DATA_UNAVAILABLE",
+    "REASON_RISK_NOT_READY",
     "REASON_STRATEGY_EXPOSURE_LIMIT",
     "REASON_STRATEGY_LOSS_LIMIT",
 ]
@@ -136,6 +139,7 @@ REASON_ORDER_COUNT_LIMIT = "ORDER_COUNT_LIMIT"
 REASON_OPEN_ORDER_LIMIT = "OPEN_ORDER_LIMIT"
 REASON_INVALID_RISK_STATE = "INVALID_RISK_STATE"
 REASON_RISK_DATA_UNAVAILABLE = "RISK_DATA_UNAVAILABLE"
+REASON_RISK_NOT_READY = "RISK_NOT_READY"
 
 _PORTFOLIO_SCOPE = "*"
 
@@ -310,7 +314,25 @@ class PortfolioRiskManager:
         concentration_warn_ratio: float = 0.75,
         hard_block_conflicts: frozenset[ConflictType] = frozenset(),
         clock=None,
+        store: SqlitePortfolioRiskStore | None = None,
+        readiness: PortfolioRiskReadiness = PortfolioRiskReadiness.READY,
+        idempotency_store: Any | None = None,
     ) -> None:
+        """Phase 17.2-P: `store`/`readiness` are optional and default to
+        the exact pre-existing behavior (pure in-memory, always READY) --
+        zero behavior change for every caller/test that predates this
+        phase. A caller wiring real persistence (see
+        trading/api/execution_state.py) is responsible for having already
+        run `portfolio_risk_store.open_or_diagnose()` and passing whatever
+        it returned straight through here -- this constructor never tries
+        to open/repair a database itself; it only ever RECOVERS from one
+        that has already been proven READY, or respects a `readiness` of
+        RECOVERY_REQUIRED/NOT_READY passed in by that diagnosis.
+
+        `idempotency_store`, if given, is used ONLY for the one-time
+        cross-store consistency pass at recovery (Section 29-30) -- this
+        class never claims/writes to it, never calls execute() again, and
+        never places a broker order because of what it finds there."""
         self._portfolio_limits = portfolio_limits or PortfolioRiskLimits()
         self._strategy_limits: dict[str, PortfolioRiskLimits] = dict(strategy_limits or {})
         self._account_limits: dict[str, PortfolioRiskLimits] = dict(account_limits or {})
@@ -323,6 +345,121 @@ class PortfolioRiskManager:
         self._reservations: dict[str, _Outstanding] = {}
         self._open_orders: dict[str, _Outstanding] = {}
         self._order_counts: dict[tuple[str, str, date], int] = {}
+
+        self._store = store
+        self._readiness = readiness
+        if self._store is not None and self._readiness == PortfolioRiskReadiness.READY:
+            try:
+                self._recover(idempotency_store)
+            except Exception as exc:  # noqa: BLE001 -- fail closed: recovery must never half-succeed silently
+                self._readiness = PortfolioRiskReadiness.NOT_READY
+                self._recovery_error = str(exc)
+            else:
+                self._recovery_error = ""
+        else:
+            self._recovery_error = "" if self._readiness == PortfolioRiskReadiness.READY else "store unavailable at construction time"
+
+    @property
+    def readiness(self) -> PortfolioRiskReadiness:
+        return self._readiness
+
+    @property
+    def recovery_error(self) -> str:
+        return self._recovery_error
+
+    @property
+    def outstanding_reservation_count(self) -> int:
+        """Read-only, for observability (Section 55) -- the number of
+        non-terminal reservations (RESERVED + OPEN + AMBIGUOUS) currently
+        held, across every strategy/account. Never a live-control action."""
+        with self._lock:
+            return len(self._reservations) + len(self._open_orders)
+
+    # -- Phase 17.2-P: restart recovery ---------------------------------------- #
+    def _recover(self, idempotency_store: Any | None) -> None:
+        """Reloads durable state into the SAME in-memory dicts every other
+        method already reads/writes -- recovery produces exactly the
+        working set a live PortfolioRiskManager would have had if it had
+        never restarted, never a second, parallel representation."""
+        assert self._store is not None
+        for persisted in self._store.list_non_terminal():
+            outstanding = _Outstanding(
+                reservation_id=persisted.reservation_id, strategy_id=persisted.strategy_id,
+                account_id=persisted.account_id, symbol=persisted.symbol,
+                side=OrderSide(persisted.side), quantity=persisted.quantity, price=persisted.price,
+                notional=persisted.notional, order_count_day=date.fromisoformat(persisted.order_count_day),
+                idempotency_key=persisted.idempotency_key,
+            )
+            if persisted.status == "RESERVED":
+                self._reservations[persisted.reservation_id] = outstanding
+            else:  # OPEN or AMBIGUOUS -- both live in _open_orders, exactly as the live code already does
+                self._open_orders[persisted.reservation_id] = outstanding
+
+        for pos in self._store.list_ledger_positions():
+            self._ledger[(pos.strategy_id, pos.account_id, pos.symbol)] = _LedgerPosition(
+                quantity=pos.quantity, avg_price=pos.avg_price, realized_pnl=pos.realized_pnl,
+            )
+
+        for scope_type, scope_id, trading_date_iso, count in self._store.list_order_counts():
+            self._order_counts[(scope_type, scope_id, date.fromisoformat(trading_date_iso))] = count
+
+        if idempotency_store is not None:
+            self._reconcile_with_idempotency(idempotency_store)
+
+    def _reconcile_with_idempotency(self, idempotency_store: Any) -> None:
+        """Section 29-30's cross-store convergence pass: never a broker
+        call, never a new claim -- a pure read of IdempotencyStore's
+        already-durable, already-authoritative terminal state, applied to
+        whatever this store's own reservations still show as
+        non-terminal. Runs once per recovery; also safe to call multiple
+        times (every transition it makes is itself idempotent/CAS-guarded)."""
+        from trading.common.idempotency_store import STATUS_COMPLETED, STATUS_REJECTED, STATUS_FAILED
+
+        for reservation_id, outstanding in list(self._reservations.items()) + list(self._open_orders.items()):
+            if not outstanding.idempotency_key:
+                continue  # never claimed yet, or portfolio risk predates the idempotency claim step -- genuinely still in-flight, not an error
+            record = idempotency_store.get(outstanding.idempotency_key)
+            if record is None:
+                continue  # no idempotency record exists yet for this key -- still genuinely in-flight
+            if record.status == STATUS_COMPLETED:
+                self._converge_to_committed(reservation_id, outstanding, fill_price=outstanding.price)
+            elif record.status in (STATUS_REJECTED, STATUS_FAILED):
+                self._converge_to_released(reservation_id, outstanding)
+            # STATUS_AMBIGUOUS / STATUS_PENDING -- leave held exactly as-is;
+            # still requires reconciliation, never converged to anything else here.
+
+    def _converge_to_committed(self, reservation_id: str, outstanding: "_Outstanding", *, fill_price: float) -> None:
+        """Dedicated convergence logic for the idempotency cross-store
+        pass -- deliberately separate from _apply_commit_locked (which is
+        _reservations-only, see its own comment): this path must be able
+        to resolve an entry sitting in EITHER dict, since a reservation
+        that reached AMBIGUOUS (filed in _open_orders) is exactly the
+        common case IdempotencyStore later resolves to COMPLETED."""
+        self._reservations.pop(reservation_id, None)
+        self._open_orders.pop(reservation_id, None)
+        key = (outstanding.strategy_id, outstanding.account_id, outstanding.symbol)
+        new_position = _apply_fill_to_position(self._ledger.get(key), outstanding.side, outstanding.quantity, fill_price)
+        self._ledger[key] = new_position
+        self._persist_transition(reservation_id, to_status="COMMITTED", fill_price=fill_price)
+        self._persist_ledger(key, new_position)
+
+    def _converge_to_released(self, reservation_id: str, outstanding: "_Outstanding") -> None:
+        """See _converge_to_committed's docstring -- the release-side
+        equivalent, resolving an entry from either dict."""
+        self._reservations.pop(reservation_id, None)
+        self._open_orders.pop(reservation_id, None)
+        self._rollback_order_count(outstanding)
+        self._persist_transition(reservation_id, to_status="RELEASED")
+
+    def reconcile_with_idempotency(self, idempotency_store: Any) -> None:
+        """Public, re-runnable entry point for the same convergence pass
+        _recover() runs once at construction -- exposed so an operator/
+        health-check path can re-trigger it on demand (e.g. after a
+        cross-store crash window, Section 30) without needing a full
+        PortfolioRiskManager restart. Safe to call repeatedly: every
+        transition it makes is itself idempotent/CAS-guarded."""
+        with self._lock:
+            self._reconcile_with_idempotency(idempotency_store)
 
     # -- limit configuration (owned centrally -- see module docstring) ------ #
     def set_strategy_limits(self, strategy_id: str, limits: PortfolioRiskLimits) -> None:
@@ -360,6 +497,14 @@ class PortfolioRiskManager:
         account_id: str,
         reference_price: float | None = None,
     ) -> PortfolioRiskDecision:
+        if self._readiness != PortfolioRiskReadiness.READY:
+            # Section 24: fail closed -- a NOT_READY/RECOVERY_REQUIRED risk
+            # store must never silently let a fresh reservation through
+            # while its own restart-recovered state cannot be trusted.
+            return PortfolioRiskDecision(
+                allowed=False, reason_code=REASON_RISK_NOT_READY,
+                message=f"portfolio risk store is not ready ({self._readiness.value}): {self._recovery_error}",
+            )
         try:
             with self._lock:
                 return self._evaluate_and_reserve_locked(intent, strategy_id, account_id, reference_price)
@@ -456,6 +601,24 @@ class PortfolioRiskManager:
             price=price if price is not None else 0.0, notional=order_notional or 0.0,
             order_count_day=today, idempotency_key=intent.idempotency_key or "",
         )
+
+        if self._store is not None:
+            # Section 16 -- durable BEFORE the caller is ever told it may
+            # proceed. If this raises, the in-memory dicts below are never
+            # touched, and evaluate_and_reserve()'s own outer try/except
+            # turns it into a fail-closed REASON_INVALID_RISK_STATE
+            # rejection -- no execution, exactly as if the risk check
+            # itself had failed.
+            self._store.create_reservation(
+                reservation_id=reservation_id, idempotency_key=outstanding.idempotency_key,
+                strategy_id=strategy_id, account_id=account_id, symbol=intent.symbol,
+                side=intent.side.value, quantity=intent.quantity, price=outstanding.price,
+                notional=outstanding.notional, order_count_day=today,
+            )
+            self._store.adjust_order_count(scope_type="strategy", scope_id=strategy_id, trading_date=today, delta=1)
+            self._store.adjust_order_count(scope_type="account", scope_id=account_id, trading_date=today, delta=1)
+            self._store.adjust_order_count(scope_type=_PORTFOLIO_SCOPE, scope_id=_PORTFOLIO_SCOPE, trading_date=today, delta=1)
+
         self._reservations[reservation_id] = outstanding
         self._order_counts[("strategy", strategy_id, today)] = snapshot.strategy_orders_today + 1
         self._order_counts[("account", account_id, today)] = snapshot.account_orders_today + 1
@@ -476,34 +639,52 @@ class PortfolioRiskManager:
         have already been resolved, or never existed for this manager
         instance) -- never raises into the caller's execution path."""
         with self._lock:
-            outstanding = self._reservations.pop(reservation_id, None)
-            if outstanding is None:
-                return
-            if execution_result is not None and execution_result.status == "AMBIGUOUS":
-                # Phase 17.1 Section 27 fix: the broker outcome is UNKNOWN --
-                # it may have actually accepted/filled this order. Releasing
-                # the reservation here (as every other failure path does)
-                # would silently understate real exposure/order-count if the
-                # order in fact went through. Keep the exposure/order-count
-                # footprint exactly like a still-open order, until an
-                # operator/reconciliation flow explicitly resolves it via
-                # resolve_open_order() -- never auto-released on a timer or
-                # on the next unrelated call.
-                self._open_orders[reservation_id] = outstanding
-                return
-            if execution_result is None or not execution_result.success:
-                self._rollback_order_count(outstanding)
-                return
-            if execution_result.status in TERMINAL_STATUSES:
-                key = (outstanding.strategy_id, outstanding.account_id, outstanding.symbol)
-                self._ledger[key] = _apply_fill_to_position(
-                    self._ledger.get(key), outstanding.side, outstanding.quantity, outstanding.price,
-                )
-            else:
-                # OPEN / partially filled -- keep its exposure/open-order
-                # footprint until resolve_open_order() is called; not
-                # auto-polled in this phase (see module docstring).
-                self._open_orders[reservation_id] = outstanding
+            self._apply_commit_locked(reservation_id, execution_result)
+
+    def _apply_commit_locked(self, reservation_id: str, execution_result: ExecutionResult | None) -> None:
+        # Deliberately _reservations ONLY -- never _open_orders (matches
+        # the exact pre-Phase-17.2-P behavior). An id already sitting in
+        # _open_orders (OPEN or AMBIGUOUS) must never be silently
+        # re-resolved by a stray/duplicate commit_reservation() call; see
+        # test_release_reservation_is_a_noop_for_already_committed_ambiguous_id's
+        # release-side equivalent for why. The idempotency-driven
+        # convergence path (_reconcile_with_idempotency) resolves
+        # _open_orders entries through its OWN dedicated logic below,
+        # never through this method.
+        outstanding = self._reservations.pop(reservation_id, None)
+        if outstanding is None:
+            return
+        if execution_result is not None and execution_result.status == "AMBIGUOUS":
+            # Phase 17.1 Section 27 fix: the broker outcome is UNKNOWN --
+            # it may have actually accepted/filled this order. Releasing
+            # the reservation here (as every other failure path does)
+            # would silently understate real exposure/order-count if the
+            # order in fact went through. Keep the exposure/order-count
+            # footprint exactly like a still-open order, until an
+            # operator/reconciliation flow explicitly resolves it via
+            # resolve_open_order() -- never auto-released on a timer or
+            # on the next unrelated call.
+            self._open_orders[reservation_id] = outstanding
+            self._persist_transition(reservation_id, to_status="AMBIGUOUS")
+            return
+        if execution_result is None or not execution_result.success:
+            self._rollback_order_count(outstanding)
+            self._persist_transition(reservation_id, to_status="RELEASED")
+            return
+        if execution_result.status in TERMINAL_STATUSES:
+            key = (outstanding.strategy_id, outstanding.account_id, outstanding.symbol)
+            new_position = _apply_fill_to_position(
+                self._ledger.get(key), outstanding.side, outstanding.quantity, outstanding.price,
+            )
+            self._ledger[key] = new_position
+            self._persist_transition(reservation_id, to_status="COMMITTED", fill_price=outstanding.price)
+            self._persist_ledger(key, new_position)
+        else:
+            # OPEN / partially filled -- keep its exposure/open-order
+            # footprint until resolve_open_order() is called; not
+            # auto-polled in this phase (see module docstring).
+            self._open_orders[reservation_id] = outstanding
+            self._persist_transition(reservation_id, to_status="OPEN")
 
     def release_reservation(self, reservation_id: str) -> None:
         """A rejected/failed downstream execution must give back both the
@@ -511,18 +692,69 @@ class PortfolioRiskManager:
         mirroring RiskManager's own '_record_order_approved_for_daily_count
         only called once every check has passed' discipline."""
         with self._lock:
-            outstanding = self._reservations.pop(reservation_id, None)
-            if outstanding is None:
-                return
-            self._rollback_order_count(outstanding)
+            self._apply_release_locked(reservation_id)
+
+    def _apply_release_locked(self, reservation_id: str) -> None:
+        # Deliberately _reservations ONLY -- see _apply_commit_locked's
+        # identical comment. release_reservation() must remain a no-op for
+        # an id already held in _open_orders (OPEN or AMBIGUOUS); only
+        # resolve_open_order()/resolve_reconciliation()/the idempotency
+        # convergence pass may ever resolve an _open_orders entry.
+        outstanding = self._reservations.pop(reservation_id, None)
+        if outstanding is None:
+            return
+        self._rollback_order_count(outstanding)
+        self._persist_transition(reservation_id, to_status="RELEASED")
 
     def resolve_open_order(self, reservation_id: str) -> None:
         """Explicit, manual resolution of a still-OPEN order recorded by
         commit_reservation() -- e.g. an operator confirms it was later
         filled or cancelled. Not wired to any automatic broker polling in
-        this phase (see module docstring)."""
+        this phase (see module docstring). Pre-existing behavior, UNCHANGED
+        by Phase 17.2-P: never rolls back the order-count budget (the slot
+        was genuinely consumed) and never touches the ledger (the caller is
+        assumed to already know/have recorded the real outcome elsewhere)
+        -- persisted as COMMITTED (terminal, no further order-count
+        rollback) as the closest existing status to that contract, purely
+        so this row stops showing up in list_non_terminal() on the next
+        restart; it was never meant to represent "definitely filled"."""
         with self._lock:
             self._open_orders.pop(reservation_id, None)
+            self._persist_transition(reservation_id, to_status="COMMITTED")
+
+    # -- Phase 17.2-P: best-effort durable transitions ------------------------- #
+    def _persist_transition(self, reservation_id: str, *, to_status: str, fill_price: float | None = None) -> None:
+        """Best-effort durable write for a status transition that has
+        ALREADY happened in memory (unlike the reserve path, which is
+        durable-BEFORE-proceeding -- see evaluate_and_reserve()). By the
+        time commit/release/resolve is called, the broker call (or its
+        absence, for a confirmed rejection) has already happened; failing
+        the in-memory transition here would not undo that. If this write
+        fails, the discrepancy is caught and repaired by
+        _reconcile_with_idempotency() on the NEXT restart (Section 30) --
+        this is never silently lost, only deferred to the deterministic
+        convergence pass. Never raises into the caller."""
+        if self._store is None:
+            return
+        try:
+            self._store.transition(
+                reservation_id,
+                from_statuses=("RESERVED", "OPEN", "AMBIGUOUS"),
+                to_status=to_status, fill_price=fill_price,
+            )
+        except Exception:  # noqa: BLE001 -- see docstring: deferred to next-restart convergence, never raised here
+            pass
+
+    def _persist_ledger(self, key: tuple[str, str, str], position: _LedgerPosition) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.upsert_ledger_position(
+                strategy_id=key[0], account_id=key[1], symbol=key[2],
+                quantity=position.quantity, avg_price=position.avg_price, realized_pnl=position.realized_pnl,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # -- Phase 17.1-R Remediation E: reconciliation feedback ------------------ #
     def find_reservation_by_idempotency_key(self, idempotency_key: str) -> str | None:
@@ -574,11 +806,15 @@ class PortfolioRiskManager:
             if found:
                 price = fill_price if fill_price is not None else outstanding.price
                 key = (outstanding.strategy_id, outstanding.account_id, outstanding.symbol)
-                self._ledger[key] = _apply_fill_to_position(
+                new_position = _apply_fill_to_position(
                     self._ledger.get(key), outstanding.side, outstanding.quantity, price,
                 )
+                self._ledger[key] = new_position
+                self._persist_transition(reservation_id, to_status="COMMITTED", fill_price=price)
+                self._persist_ledger(key, new_position)
             else:
                 self._rollback_order_count(outstanding)
+                self._persist_transition(reservation_id, to_status="RELEASED")
             return True
 
     def _rollback_order_count(self, outstanding: _Outstanding) -> None:

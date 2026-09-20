@@ -60,6 +60,7 @@ from trading.common.observability import AuditTrail, MetricsRegistry
 from trading.common.operational_alerts import OperationalAlertStore
 from trading.common.worker_auth import WorkerAuthRegistry
 from trading.common.portfolio_risk import PortfolioRiskLimits, PortfolioRiskManager
+from trading.common.portfolio_risk_store import PortfolioRiskReadiness, open_or_diagnose
 from trading.common.risk_manager import RiskManager
 from trading.common.strategies.combined_vwap_nifty import CombinedVwapNiftyStrategy
 from trading.common.strategies.double_straddle import DoubleStraddleStrategy
@@ -284,12 +285,41 @@ def build_execution_state() -> ExecutionState:
     # production value is invented here, and no other limit is wired to
     # an env var yet -- see the Phase 16.12 report for the remaining gap).
     _portfolio_max_exposure = os.environ.get("PORTFOLIO_MAX_EXPOSURE", "").strip()
+    # Phase 17.2-P: PORTFOLIO_RISK_DB_PATH, when set, opts this deployment
+    # into durable reservation/ledger/order-count persistence and restart
+    # recovery -- see trading/common/portfolio_risk_store.py's own module
+    # docstring for the full design. Unset (the default) keeps
+    # PortfolioRiskManager's original pure-in-memory behavior byte-for-byte
+    # (store=None, readiness=READY unconditionally) -- zero behavior change
+    # for every existing test/deployment. open_or_diagnose() (never a bare
+    # constructor call here) is what turns "database exists but is corrupt/
+    # missing-when-expected" into a NOT_READY readiness rather than an
+    # uncaught exception or a silently-recreated-empty database.
+    _portfolio_risk_db_path = os.environ.get("PORTFOLIO_RISK_DB_PATH", "").strip()
+    if _portfolio_risk_db_path:
+        _pr_store, _pr_readiness, _pr_detail = open_or_diagnose(_portfolio_risk_db_path)
+    else:
+        _pr_store, _pr_readiness, _pr_detail = None, PortfolioRiskReadiness.READY, ""
     portfolio_risk_manager = PortfolioRiskManager(
         portfolio_limits=(
             PortfolioRiskLimits(max_portfolio_exposure=float(_portfolio_max_exposure))
             if _portfolio_max_exposure else None
         ),
+        store=_pr_store, readiness=_pr_readiness, idempotency_store=runtime_idempotency_store,
     )
+    if _portfolio_risk_db_path and portfolio_risk_manager.readiness != PortfolioRiskReadiness.READY:
+        # Fail-closed, loud: recovery/diagnosis failed (Section 21-23,
+        # 57-58) -- this deployment must not silently start with an empty,
+        # untrustworthy risk ledger. evaluate_and_reserve() itself already
+        # refuses every new reservation while not READY (Section 24); this
+        # audit event makes the failure visible without requiring anyone
+        # to already know to check portfolio_risk_manager.readiness.
+        try:
+            audit_trail.append(
+                "PORTFOLIO_RISK_NOT_READY", reason=_pr_detail or portfolio_risk_manager.recovery_error,
+            )
+        except Exception:  # noqa: BLE001 -- never let an audit failure mask the underlying NOT_READY state
+            pass
     worker_coordinator = WorkerCoordinator(
         worker_registry=worker_registry, strategy_registry=strategy_registry,
         strategy_assignment=strategy_assignment, strategy_runtime=strategy_runtime,

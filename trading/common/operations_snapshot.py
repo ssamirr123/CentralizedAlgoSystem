@@ -136,6 +136,14 @@ class SafetyView:
     kill_switch_reason: str
     execution_mode_banner: str
     live_trading_disabled: bool
+    # Phase 17.2-P Section 55-56: deliberately separate from `ready` on
+    # SystemHealthView -- a process can be process-healthy (DB connected,
+    # serving requests) while its portfolio-risk store failed restart
+    # recovery (RECOVERY_REQUIRED/NOT_READY). Read-only; never a live
+    # control action. See trading/common/portfolio_risk_store.py's own
+    # PortfolioRiskReadiness enum for the exact values.
+    portfolio_risk_readiness: str
+    portfolio_risk_outstanding_reservations: int
 
 
 @dataclass(frozen=True)
@@ -198,10 +206,13 @@ def build_operations_snapshot(
         "MIXED"
     )
 
+    _risk_readiness = portfolio_risk_manager.readiness.value if portfolio_risk_manager is not None else "READY"
+    _risk_outstanding = portfolio_risk_manager.outstanding_reservation_count if portfolio_risk_manager is not None else 0
     safety = SafetyView(
         kill_switch_engaged=kill_switch.engaged, kill_switch_engaged_by=kill_switch.engaged_by,
         kill_switch_reason=kill_switch.reason, execution_mode_banner=execution_mode_banner,
         live_trading_disabled=True,
+        portfolio_risk_readiness=_risk_readiness, portfolio_risk_outstanding_reservations=_risk_outstanding,
     )
 
     system = SystemHealthView(
