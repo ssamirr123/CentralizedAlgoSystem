@@ -1278,6 +1278,12 @@ class SafetyOut(BaseModel):
     kill_switch_reason: str
     execution_mode_banner: str
     live_trading_disabled: bool
+    # Phase 17.2-P: read-only observability for PortfolioRiskManager's
+    # restart-recovery readiness -- distinct from process health (a
+    # NOT_READY/RECOVERY_REQUIRED backend can still be "up" and answer
+    # /api/health while correctly refusing new reservations).
+    portfolio_risk_readiness: str
+    portfolio_risk_outstanding_reservations: int
 
 
 class OperationalAlertOut(BaseModel):
