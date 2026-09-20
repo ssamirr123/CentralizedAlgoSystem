@@ -1033,6 +1033,7 @@ def test_execution_state_wires_live_authorization_only_via_dedicated_fields():
         "kill_switch", "metrics", "audit_trail", "alerts", "strategy_runtime",
         "worker_registry", "worker_coordinator", "portfolio_risk_manager", "operational_alerts",
         "worker_auth_registry", "idempotency_store", "live_authorization_store", "authorization_service",
+        "reconciliation_service",
     }
     # Phase 16.5's own runtime is present, but it is not a
     # LiveAuthorization store -- it holds no live-authorization state of

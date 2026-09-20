@@ -55,6 +55,7 @@ from trading.common.idempotency_store import IdempotencyStore, InMemoryIdempoten
 from trading.common.kill_switch import CentralKillSwitch
 from trading.common.live_authorization import SqliteLiveAuthorizationStore
 from trading.common.live_authorization_service import AuthorizationService
+from trading.common.reconciliation import ReconciliationService, SqliteReconciliationStore
 from trading.common.observability import AuditTrail, MetricsRegistry
 from trading.common.operational_alerts import OperationalAlertStore
 from trading.common.worker_auth import WorkerAuthRegistry
@@ -156,14 +157,10 @@ class ExecutionState:
     # that module's own docstring for why.
     worker_auth_registry: WorkerAuthRegistry = field(default_factory=WorkerAuthRegistry.from_env)
     # Phase 17.1-R Remediation F -- see trading/api/live_authorization_routes.py.
-    # `idempotency_store` here is a SEPARATE instance from whatever
-    # StrategyExecutionEngine/StrategyRuntime uses (that engine is not
-    # wired to persistent idempotency in this process at all today, a
-    # pre-existing, documented gap unchanged by this phase) -- it exists
-    # only so the new /api/live-authorization/* routes can perform their
-    # OWN request-time "is this idempotency_key novel" preview check
-    # (validate_request()/run_preflight() in live_authorization_workflow.py
-    # already require one). `live_authorization_store` and
+    # `idempotency_store` here is now (Phase 17.2 fix) the SAME instance
+    # StrategyRuntime's own execution engine uses -- see build_execution_state()
+    # below, which threads one authoritative SqliteIdempotencyStore (when
+    # IDEMPOTENCY_DB_PATH is set) into both. `live_authorization_store` and
     # `authorization_service` are the same Phase 15D.5/15D.7 objects every
     # historical canary script already used, now wired to a real HTTP
     # boundary for the first time -- see that route module's own docstring
@@ -171,6 +168,16 @@ class ExecutionState:
     idempotency_store: IdempotencyStore = field(default_factory=InMemoryIdempotencyStore)
     live_authorization_store: SqliteLiveAuthorizationStore = field(default_factory=_default_live_authorization_store)
     authorization_service: AuthorizationService = field(default_factory=AuthorizationService)
+    # Phase 17.2 -- see trading/common/reconciliation.py. None by default
+    # (zero behavior change for every pre-existing caller/test); when
+    # constructed (build_execution_state() below, gated on
+    # RECONCILIATION_DB_PATH), it shares this SAME idempotency_store,
+    # audit_trail, and portfolio_risk_manager -- extending the existing
+    # authoritative subsystem, never a second one. Not exposed via any HTTP
+    # route in this phase -- reconciliation remains an operator-invoked,
+    # off-band action (scan_and_register()/reconcile_one()), exactly as
+    # every historical canary/reconciliation exercise has already used it.
+    reconciliation_service: Any | None = None
 
 
 def build_execution_state() -> ExecutionState:
@@ -225,10 +232,27 @@ def build_execution_state() -> ExecutionState:
     strategy_registry.register(CombinedVwapNiftyStrategy(metrics_registry=metrics, audit_trail=audit_trail, alerts=alerts))
     strategy_registry.register(VwapAlgoNiftyHedgeStrategy(metrics_registry=metrics, audit_trail=audit_trail, alerts=alerts))
 
+    # Phase 17.2 fix: IDEMPOTENCY_DB_PATH, when set, opts StrategyRuntime's
+    # own execution engine into the SAME durable SqliteIdempotencyStore the
+    # new /api/live-authorization/* routes already use (Phase 17.1-R) --
+    # ONE authoritative store, never two divergent ones. Unset (the
+    # default) keeps StrategyRuntime's own prior default
+    # (InMemoryIdempotencyStore) byte-for-byte, so no existing test's
+    # behavior changes. Before this fix, a worker-submitted intent's
+    # idempotency state never survived a TCC restart -- harmless only
+    # because the SAME StrategyRuntime engine is permanently dry_run=True
+    # (Section 3, trading/common/worker_coordinator.py's own docstring),
+    # never because idempotency itself was safe to lose.
+    _idempotency_db_path_for_runtime = os.environ.get("IDEMPOTENCY_DB_PATH", "").strip()
+    runtime_idempotency_store: IdempotencyStore = (
+        SqliteIdempotencyStore(db_path=_idempotency_db_path_for_runtime) if _idempotency_db_path_for_runtime
+        else InMemoryIdempotencyStore()
+    )
+
     strategy_runtime = StrategyRuntime(
         strategy_registry=strategy_registry, strategy_assignment=strategy_assignment,
         broker_manager=broker_manager, risk_manager=risk_manager, kill_switch=kill_switch,
-        metrics_registry=metrics, audit_trail=audit_trail,
+        metrics_registry=metrics, audit_trail=audit_trail, idempotency_store=runtime_idempotency_store,
     )
 
     # Phase 16.11 -- shared alert store; see trading/common/
@@ -273,20 +297,28 @@ def build_execution_state() -> ExecutionState:
         audit_trail=audit_trail, operational_alerts=operational_alerts,
     )
 
-    # Phase 17.1-R Remediation F: IDEMPOTENCY_DB_PATH/LIVE_AUTHORIZATION_DB_PATH,
-    # when set, opt this deployment into durable storage for the new
-    # /api/live-authorization/* routes -- unset (the default) keeps the
-    # dataclass field's own safe, test-isolated default (in-memory / a
-    # fresh per-instance temp file) exactly as every other optional store
-    # on this class already behaves.
-    _idempotency_db_path = os.environ.get("IDEMPOTENCY_DB_PATH", "").strip()
-    idempotency_store: IdempotencyStore = (
-        SqliteIdempotencyStore(db_path=_idempotency_db_path) if _idempotency_db_path else InMemoryIdempotencyStore()
-    )
+    # Phase 17.1-R Remediation F / Phase 17.2: IDEMPOTENCY_DB_PATH/
+    # LIVE_AUTHORIZATION_DB_PATH, when set, opt this deployment into
+    # durable storage -- unset (the default) keeps every store's own safe,
+    # test-isolated default (in-memory / a fresh per-instance temp file).
+    # `runtime_idempotency_store` (computed above, already passed into
+    # StrategyRuntime) is reused here as the SAME instance the new
+    # /api/live-authorization/* routes consult -- ONE authoritative
+    # idempotency store for the whole process, never two divergent ones.
+    idempotency_store: IdempotencyStore = runtime_idempotency_store
     _live_auth_db_path = os.environ.get("LIVE_AUTHORIZATION_DB_PATH", "").strip()
     live_authorization_store = (
         SqliteLiveAuthorizationStore(db_path=_live_auth_db_path) if _live_auth_db_path
         else _default_live_authorization_store()
+    )
+
+    _reconciliation_db_path = os.environ.get("RECONCILIATION_DB_PATH", "").strip()
+    reconciliation_service = (
+        ReconciliationService(
+            SqliteReconciliationStore(db_path=_reconciliation_db_path), idempotency_store, audit_trail,
+            portfolio_risk_manager=portfolio_risk_manager,
+        )
+        if _reconciliation_db_path else None
     )
 
     return ExecutionState(
@@ -305,4 +337,5 @@ def build_execution_state() -> ExecutionState:
         operational_alerts=operational_alerts,
         idempotency_store=idempotency_store,
         live_authorization_store=live_authorization_store,
+        reconciliation_service=reconciliation_service,
     )
