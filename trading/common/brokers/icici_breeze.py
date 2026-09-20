@@ -477,7 +477,12 @@ class ICICIBreezeBroker(BrokerClient):
         )
 
     def modify_order(self, order_id: str, quantity: int, limit_price: float) -> bool:
+        # Phase 17.1-R Remediation A: see AngelOneBroker.modify_order()'s
+        # identical comment -- this method previously lacked the is_live
+        # check its own place_order()/cancel_order() already have.
         self._require_not_read_only("modify_order")
+        if not self._config.is_live:
+            raise LiveTradingDisabledError("Refusing to modify a real ICICI Breeze order: TRADING_MODE is not 'live'.")
         self._require_connected()
         row = self._fetch_order_row(order_id)
         if row is None:

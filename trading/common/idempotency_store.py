@@ -157,6 +157,22 @@ class IdempotencyStore(Protocol):
         which is exactly the race this method exists to close."""
         ...
 
+    def resolve_ambiguous(
+        self, idempotency_key: str, *, new_status: str, broker_order_id: str = "", result_json: str = "",
+    ) -> bool:
+        """Phase 17.1-R Remediation E: an atomic compare-and-swap that
+        transitions a record FROM STATUS_AMBIGUOUS/STATUS_PENDING ONLY to a
+        new terminal status (`new_status` must not itself be AMBIGUOUS/
+        PENDING) -- the reconciliation subsystem's sole write path back into
+        this store. Returns True if this call performed the transition,
+        False if the record did not exist or was not at AMBIGUOUS/PENDING
+        (already resolved by a concurrent caller, or never ambiguous in the
+        first place) -- never raises, never overwrites an already-terminal
+        record, never deletes history. A caller MUST treat False as "someone
+        else already resolved this (or it wasn't ambiguous) -- do nothing
+        further", exactly like claim()'s own False case."""
+        ...
+
 
 def compute_intent_hash(intent) -> str:  # noqa: ANN001 -- trading.common.order_intent.OrderIntent, avoiding an import cycle concern is moot but kept loose intentionally
     """A stable identity hash of an OrderIntent's TRADEABLE content --
@@ -302,6 +318,29 @@ class SqliteIdempotencyStore:
                 conn.close()
         return [IdempotencyRecord(**{k: row[k] for k in row.keys()}) for row in rows]
 
+    def resolve_ambiguous(
+        self, idempotency_key: str, *, new_status: str, broker_order_id: str = "", result_json: str = "",
+    ) -> bool:
+        if new_status in (STATUS_AMBIGUOUS, STATUS_PENDING):
+            raise ValueError(f"resolve_ambiguous() cannot resolve TO {new_status!r} -- that is not a resolution")
+        now = _now()
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE idempotency_records SET
+                        status = ?, broker_order_id = COALESCE(NULLIF(?, ''), broker_order_id),
+                        result_json = COALESCE(NULLIF(?, ''), result_json), updated_at = ?
+                    WHERE idempotency_key = ? AND status IN (?, ?)
+                    """,
+                    (new_status, broker_order_id, result_json, now, idempotency_key, STATUS_AMBIGUOUS, STATUS_PENDING),
+                )
+                conn.commit()
+                return cur.rowcount == 1
+            finally:
+                conn.close()
+
 
 class InMemoryIdempotencyStore:
     """Explicitly NOT for production use -- does not survive a restart,
@@ -339,3 +378,21 @@ class InMemoryIdempotencyStore:
     def list_by_status(self, status: str) -> list[IdempotencyRecord]:
         with self._lock:
             return [r for r in self._records.values() if r.status == status]
+
+    def resolve_ambiguous(
+        self, idempotency_key: str, *, new_status: str, broker_order_id: str = "", result_json: str = "",
+    ) -> bool:
+        if new_status in (STATUS_AMBIGUOUS, STATUS_PENDING):
+            raise ValueError(f"resolve_ambiguous() cannot resolve TO {new_status!r} -- that is not a resolution")
+        with self._lock:
+            existing = self._records.get(idempotency_key)
+            if existing is None or existing.status not in (STATUS_AMBIGUOUS, STATUS_PENDING):
+                return False
+            self._records[idempotency_key] = IdempotencyRecord(
+                idempotency_key=existing.idempotency_key, strategy_id=existing.strategy_id,
+                account_id=existing.account_id, intent_hash=existing.intent_hash, status=new_status,
+                broker_order_id=broker_order_id or existing.broker_order_id,
+                result_json=result_json or existing.result_json,
+                created_at=existing.created_at, updated_at=_now(),
+            )
+            return True

@@ -378,6 +378,15 @@ def test_modify_order_blocked_in_read_only_mode():
         broker.modify_order("ANY-ID", 10, 100.0)
 
 
+def test_modify_order_refuses_when_not_live():
+    """Phase 17.1-R Remediation A: modify_order() previously had no is_live
+    check at all, unlike place_order()/cancel_order() -- closing that gap."""
+    broker, _ = _broker(config=_config(live=False))
+    broker.connect()
+    with pytest.raises(LiveTradingDisabledError):
+        broker.modify_order("ANY-ID", 10, 100.0)
+
+
 def test_cancel_order():
     broker, _fake = _broker(config=_config(live=True))
     broker.connect()

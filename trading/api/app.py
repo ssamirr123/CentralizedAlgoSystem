@@ -37,6 +37,7 @@ from trading.api.straddle_pulse_routes import router as straddle_pulse_router  #
 from trading.api.security.bootstrap import bootstrap_admin  # noqa: E402
 from trading.api.watcher import stale_heartbeat_watcher  # noqa: E402
 from trading.api.worker_routes import router as worker_router  # noqa: E402
+from trading.api.live_authorization_routes import router as live_authorization_router  # noqa: E402
 from trading.core.config import load_settings  # noqa: E402
 from trading.database.connection import init_db  # noqa: E402
 
@@ -199,6 +200,7 @@ def create_app() -> FastAPI:
     app.include_router(straddle_pulse_router, prefix="/api")  # /api/market/straddle-pulse/*
     app.include_router(health_router, prefix="/api")  # GET /api/health, unauthenticated
     app.include_router(worker_router, prefix="/api")  # Phase 16.12: /api/worker/* (machine auth, not human RBAC)
+    app.include_router(live_authorization_router, prefix="/api")  # Phase 17.1-R: /api/live-authorization/* (authenticated human operator only)
     if load_settings().realtime_enabled:
         app.include_router(realtime_router, prefix="/api")  # WS /api/ws (Stage 19)
     return app

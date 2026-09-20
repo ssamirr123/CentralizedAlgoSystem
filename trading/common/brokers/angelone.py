@@ -469,7 +469,14 @@ class AngelOneBroker(BrokerClient):
         )
 
     def modify_order(self, order_id: str, quantity: int, limit_price: float) -> bool:
+        # Phase 17.1-R Remediation A: modify_order() previously carried only
+        # the read_only guard, unlike place_order()/cancel_order() which
+        # also require TRADING_MODE=live -- a real gap even though nothing
+        # in the central execution path calls this method today (see
+        # docs/phase-17-1-r-live-readiness-safety-remediation-report.md).
         self._require_not_read_only("modify_order")
+        if not self._config.is_live:
+            raise LiveTradingDisabledError("Refusing to modify a real AngelOne order: TRADING_MODE is not 'live'.")
         self._require_connected()
         row = self._fetch_order_row(order_id)
         if row is None:

@@ -970,36 +970,69 @@ def test_execution_routes_module_never_calls_get_broker():
 
 def test_execution_routes_module_never_touches_live_authorization():
     """Phase 16.1 (Control Center foundation validation): this control-
-    center API layer must never create or consume a LiveAuthorization, and
-    must never construct a StrategyExecutionEngine -- both belong
-    exclusively to the separate, script-driven, human-authorized canary
-    path (trading/common/live_authorization*.py,
-    trading/preflight/live_canary.py), never to an HTTP route a browser
-    session could reach. Mirrors the existing
-    test_execution_routes_module_never_calls_get_broker's own structural
-    source-scan pattern."""
+    center EXECUTION API layer (strategy/account/risk/assignment control)
+    must never itself create or consume a LiveAuthorization, and must never
+    construct a StrategyExecutionEngine -- Phase 17.1-R Remediation F
+    deliberately wired LiveAuthorization into a SEPARATE, dedicated router
+    (trading/api/live_authorization_routes.py, see that module's own
+    docstring for the full authenticated-operator-identity design) rather
+    than into this module, specifically so this architectural boundary
+    stays meaningful: execution_routes.py's own routes remain exactly as
+    LiveAuthorization-free as they were before that phase. Mirrors the
+    existing test_execution_routes_module_never_calls_get_broker's own
+    structural source-scan pattern."""
     import trading.api.execution_routes as mod
-    import trading.api.execution_state as state_mod
 
-    for mod_under_test in (mod, state_mod):
-        source = open(mod_under_test.__file__, encoding="utf-8").read()
-        assert "LiveAuthorization" not in source
-        assert "try_consume(" not in source
-        assert "StrategyExecutionEngine(" not in source
+    source = open(mod.__file__, encoding="utf-8").read()
+    assert "LiveAuthorization" not in source
+    assert "try_consume(" not in source
+    assert "StrategyExecutionEngine(" not in source
 
 
-def test_execution_state_never_wires_a_live_authorization_store():
+def test_live_authorization_routes_module_is_the_sole_owner_of_that_capability():
+    """Phase 17.1-R companion to the guard above: proves the NEW
+    live-authorization capability lives exclusively in its own dedicated
+    router, never leaking into execution_routes.py, and that it is wired
+    through the SAME Depends(require_permission(...)) RBAC every other
+    route in this API already uses -- never a separate, weaker auth path."""
+    import trading.api.live_authorization_routes as live_auth_mod
+
+    source = open(live_auth_mod.__file__, encoding="utf-8").read()
+    assert "require_permission" in source
+    # never actually IMPORTS the worker-auth machine lane as a substitute
+    # for operator identity -- checked against the module's real import
+    # statements, not its own docstring prose (which explains this exact
+    # design choice using these same words).
+    import ast
+    tree = ast.parse(source)
+    imported_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    assert "worker_auth" not in imported_names
+    assert "WorkerAuthRegistry" not in imported_names
+
+
+def test_execution_state_wires_live_authorization_only_via_dedicated_fields():
     """Read-only structural check on the actual constructed ExecutionState
-    used by every route in this module -- not just its source text."""
+    used by every route in this module -- not just its source text.
+
+    Phase 17.1-R Remediation F deliberately added `idempotency_store`,
+    `live_authorization_store`, and `authorization_service` to
+    ExecutionState (see that module's own docstring for why) -- this test
+    now asserts the FULL exact field set, so any FUTURE addition here is
+    equally deliberate and equally reviewed, not silent creep. It no longer
+    asserts absence, since presence is now the reviewed, intended state."""
     from trading.api.execution_state import ExecutionState, build_execution_state
 
     state = build_execution_state()
-    assert not hasattr(state, "live_authorization_store")
+    assert hasattr(state, "live_authorization_store")
     assert set(ExecutionState.__dataclass_fields__) == {
         "broker_manager", "strategy_assignment", "risk_manager", "strategy_registry",
         "kill_switch", "metrics", "audit_trail", "alerts", "strategy_runtime",
         "worker_registry", "worker_coordinator", "portfolio_risk_manager", "operational_alerts",
-        "worker_auth_registry",
+        "worker_auth_registry", "idempotency_store", "live_authorization_store", "authorization_service",
     }
     # Phase 16.5's own runtime is present, but it is not a
     # LiveAuthorization store -- it holds no live-authorization state of

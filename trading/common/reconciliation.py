@@ -24,12 +24,32 @@ file for the proof.
 
 A reconciliation RESULT (RECONCILED_FILLED/REJECTED/NOT_FOUND/UNKNOWN/
 RECONCILIATION_FAILED) is a plain data value written to durable storage
-and to the audit trail. Nothing in this module, or in any caller this
-phase adds, ever feeds that result back into `StrategyExecutionEngine`,
-`RiskManager`, or any broker-mutating call. Turning "an order came back
-ambiguous" into corrective trading action (Phase 15D.2's human-authorized
-canary, a future auto-reconciliation-with-hedge feature, ...) is
-explicitly out of scope and explicitly NOT built here.
+and to the audit trail.
+
+Phase 17.1-R Remediation E (extending this same module, not a second
+subsystem -- see `_feed_back_to_idempotency_and_risk` below): a TERMINAL
+result (FILLED/ACCEPTED/REJECTED/NOT_FOUND) is additionally fed back, via
+one atomic compare-and-swap (`IdempotencyStore.resolve_ambiguous()`), into
+the ORIGINAL idempotency record this reconciliation was resolving --
+transitioning it from AMBIGUOUS/PENDING to a genuine terminal COMPLETED
+(FOUND) or REJECTED (NOT_FOUND) outcome, so a future retry of that exact
+idempotency_key is replayed from the resolved record and never calls the
+broker again. If a `PortfolioRiskManager` was wired in, the SAME resolution
+also commits (FOUND) or releases (NOT_FOUND) whatever reservation
+Section 27's AMBIGUOUS-outcome fix left held open. A non-terminal result
+(RECONCILIATION_UNKNOWN/FAILED, "evidence insufficient") changes NEITHER --
+both stay held/unresolved, requiring operator review, exactly as before.
+
+This feedback is still never a broker-mutating call, never a retry, never
+a new order, and never touches `StrategyExecutionEngine`'s per-order
+`RiskManager.validate()` gate (which only ever runs for a NEW intent, not a
+resolved historical one) -- it only ever changes durable BOOKKEEPING state
+about an order that has ALREADY happened (or definitively never happened).
+Turning "an order came back ambiguous" into NEW corrective trading action
+(a future auto-reconciliation-with-hedge feature, an automatic replacement
+order, ...) remains explicitly out of scope and explicitly NOT built here;
+Section 23's policy is deliberately fail-closed: NOT_FOUND releases the
+reservation and resolves the record, but authorizes no new attempt.
 
 --------------------------------------------------------------------------
 Where "expected" comes from
@@ -95,7 +115,14 @@ from trading.common.observability import EVENT_ORDER_INTENT_CREATED
 from trading.common.broker import BrokerClient, BrokerConnectionError
 from trading.common.deployment_info import get_deployment_info
 from trading.common.file_permissions import harden_file_permissions
-from trading.common.idempotency_store import IdempotencyStore, STATUS_AMBIGUOUS, STATUS_PENDING
+from trading.common.execution import ExecutionResult
+from trading.common.idempotency_store import (
+    IdempotencyStore,
+    STATUS_AMBIGUOUS,
+    STATUS_COMPLETED,
+    STATUS_PENDING,
+    STATUS_REJECTED,
+)
 
 _DEFAULT_DB_PATH = "trading_reconciliation.db"
 
@@ -537,12 +564,20 @@ class ReconciliationService:
 
     def __init__(
         self, store: SqliteReconciliationStore, idempotency_store: IdempotencyStore, audit_trail: Any,
-        *, worker_id: str = "",
+        *, worker_id: str = "", portfolio_risk_manager: Any | None = None,
     ) -> None:
         self._store = store
         self._idempotency_store = idempotency_store
         self._audit_trail = audit_trail
         self._worker_id = worker_id or f"worker-{id(self)}"
+        # Phase 17.1-R Remediation E/24 -- optional, additive, same
+        # zero-behavior-change-by-default discipline as every other
+        # optional dependency in trading.common (PortfolioRiskManager
+        # itself, WorkerCoordinator's audit_trail/operational_alerts, ...):
+        # None (the default) means reconcile_one() resolves the
+        # idempotency record only, exactly as before this remediation,
+        # with no portfolio-risk side effect at all.
+        self._portfolio_risk = portfolio_risk_manager
 
     def scan_and_register(self) -> list[str]:
         """Read-only: finds every STATUS_AMBIGUOUS/STATUS_PENDING
@@ -616,6 +651,8 @@ class ReconciliationService:
             error_message=outcome.get("error_message", ""),
         )
 
+        self._feed_back_to_idempotency_and_risk(record, completed)
+
         try:
             self._audit_trail.append(
                 EVENT_RECONCILIATION_COMPLETED, correlation_id=record.correlation_id, strategy_id=record.strategy_id,
@@ -641,6 +678,67 @@ class ReconciliationService:
                 pass
 
         return completed
+
+    # -- Phase 17.1-R Remediation E/22/24: feed a definitive reconciliation
+    # result back into the authoritative idempotency store, and (if wired)
+    # into PortfolioRiskManager's held reservation -- extending this
+    # existing, authoritative subsystem, never a second one. This is the
+    # ONE place a reconciliation outcome is allowed to change state outside
+    # reconciliation_records itself; it never places, retries, or resubmits
+    # anything -- see ReadOnlyBrokerView above, unchanged. ------------------ #
+    def _feed_back_to_idempotency_and_risk(self, record: ReconciliationRecord, completed: ReconciliationRecord) -> None:
+        if completed.status in (
+            ReconciliationStatus.RECONCILIATION_UNKNOWN.value, ReconciliationStatus.RECONCILIATION_FAILED.value,
+        ):
+            # REQUIRES_REVIEW-equivalent (Section 21): evidence was
+            # insufficient -- HOLD. Leave the idempotency record at
+            # AMBIGUOUS/PENDING and the portfolio-risk reservation open,
+            # exactly as they already are. Never guess.
+            return
+
+        found = completed.status in (
+            ReconciliationStatus.RECONCILED_FILLED.value, ReconciliationStatus.RECONCILED_ACCEPTED.value,
+        )
+        if found:
+            new_status = STATUS_COMPLETED
+            result = ExecutionResult(
+                success=True, order_id=completed.broker_order_id, status=completed.broker_status or "COMPLETE",
+                filled_quantity=completed.filled_quantity, average_price=completed.average_price,
+                account_id=record.account_id, correlation_id=record.correlation_id, strategy_id=record.strategy_id,
+                message="resolved by reconciliation: broker evidence confirms this order exists",
+            )
+        else:
+            # RECONCILED_REJECTED or RECONCILED_NOT_FOUND -- Section 23's
+            # explicit fail-closed policy: both become a permanent,
+            # terminal REJECTED idempotency outcome. A future retry of this
+            # exact idempotency_key replays this rejection and never calls
+            # the broker again; it does NOT authorize a new order under a
+            # different key -- that requires a distinct, explicitly
+            # authorized logical action, same as any other confirmed
+            # rejection (Section 23/18).
+            new_status = STATUS_REJECTED
+            result = ExecutionResult(
+                success=False, status="REJECTED", account_id=record.account_id,
+                correlation_id=record.correlation_id, strategy_id=record.strategy_id,
+                message=f"resolved by reconciliation: {completed.status} ({completed.rejection_reason or completed.error_message or 'no broker evidence found'})",
+            )
+
+        resolved = self._idempotency_store.resolve_ambiguous(
+            record.idempotency_key, new_status=new_status,
+            broker_order_id=completed.broker_order_id, result_json=result.to_json(),
+        )
+        if not resolved:
+            # Someone else already resolved this key (or it was never
+            # AMBIGUOUS/PENDING to begin with) -- never double-resolve the
+            # portfolio-risk side either; avoids exactly the "idempotency
+            # says FOUND but risk reservation was released twice" hazard
+            # Section 24 warns about.
+            return
+
+        if self._portfolio_risk is not None:
+            reservation_id = self._portfolio_risk.find_reservation_by_idempotency_key(record.idempotency_key)
+            if reservation_id is not None:
+                self._portfolio_risk.resolve_reconciliation(reservation_id, found=found, fill_price=completed.average_price)
 
     def _lookup_and_compare(self, record: ReconciliationRecord, view: ReadOnlyBrokerView) -> dict[str, Any]:
         """Area D (lookup order) + Area E/F (expected-vs-actual, partial

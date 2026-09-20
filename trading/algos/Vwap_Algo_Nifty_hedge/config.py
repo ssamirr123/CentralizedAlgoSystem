@@ -1,3 +1,34 @@
+import os
+
+
+def _env_flag(*names, default="false"):
+    """Return a bool for the first environment variable in `names` that is
+    set (non-empty), else parse `default`. Truthy values: 1/true/yes/y/on
+    (case-insensitive). Copied verbatim from CombinedVwapNifty/config.py --
+    Phase 17.1-R Remediation B: this algo previously had NO DRY_RUN gate of
+    its own at all (unlike the other two legacy algos), meaning its
+    place_market_order()/place_stoploss_order() calls would always attempt
+    the real broker call whenever the central kill switch was disengaged,
+    with no independent "paper mode" fallback. See
+    docs/phase-17-1-r-live-readiness-safety-remediation-report.md."""
+    val = None
+    for n in names:
+        v = os.environ.get(n)
+        if v is not None and str(v).strip() != "":
+            val = v
+            break
+    if val is None:
+        val = default
+    return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+# Set env var BOT_DRY_RUN=false to enable REAL orders (BOT_DY_RUN kept as a
+# typo-tolerant alias, matching CombinedVwapNifty/DoubleStraddelAlgo).
+# Defaults to True -- DRY_RUN is the safe default posture, same as the other
+# two legacy algos.
+DRY_RUN = _env_flag("BOT_DRY_RUN", "BOT_DY_RUN", default="true")
+
+
 # ============================ CREDENTIALS ============================
 # Never commit real broker credentials -- fill these in directly on the
 # target EC2 instance (not in git). See DoubleStraddelAlgo/config.py for

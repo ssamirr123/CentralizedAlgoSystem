@@ -356,3 +356,90 @@ def test_two_instances_on_different_accounts_never_cross_contaminate():
     assert len(a_intents) == 2
     assert all(i.account_id == "ACC_A" for i in a_intents)
     assert b_intents == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 17.1-R Remediation C: trading-date-safe idempotency identity.
+# --------------------------------------------------------------------------- #
+def _on(year, month, day, h, m) -> callable:
+    return lambda: dt.datetime(year, month, day, h, m, 0)
+
+
+def test_same_day_worker_restart_produces_the_same_idempotency_key():
+    """A worker crash/restart re-evaluating the SAME logical event on the
+    SAME trading day (a brand-new strategy instance, exactly what happens
+    on process restart -- no persisted in-memory state) must derive the
+    identical idempotency_key, so the idempotency store correctly treats a
+    post-restart retry as a replay, not a fresh order."""
+    clock = _on(2026, 9, 19, 10, 20)
+    first_process = _strategy(clock)
+    first_intents = first_process.generate_order_intents(_md())
+
+    second_process = _strategy(clock)  # simulates a fresh worker process after restart
+    second_intents = second_process.generate_order_intents(_md())
+
+    assert {i.idempotency_key for i in first_intents} == {i.idempotency_key for i in second_intents}
+
+
+def test_next_trading_day_produces_a_different_idempotency_key():
+    """The exact bug this remediation closes: the SAME logical event
+    (hedge entry) on two different trading days must never collide."""
+    day1 = _strategy(_on(2026, 9, 19, 10, 20))
+    day1_intents = day1.generate_order_intents(_md())
+
+    day2 = _strategy(_on(2026, 9, 22, 10, 20))  # next trading day (Mon after Fri 9/19 -- weekends are not this strategy's concern)
+    day2_intents = day2.generate_order_intents(_md())
+
+    day1_keys = {i.idempotency_key for i in day1_intents}
+    day2_keys = {i.idempotency_key for i in day2_intents}
+    assert day1_keys.isdisjoint(day2_keys)
+    assert len(day1_keys) == 2 and len(day2_keys) == 2
+
+
+def test_morning_vs_afternoon_logical_event_have_distinct_keys_same_day():
+    clock_state = {"now": dt.datetime(2026, 9, 19, 10, 20, 0)}
+    s = _strategy(lambda: clock_state["now"])
+    s.generate_order_intents(_md())  # hedge entry
+
+    clock_state["now"] = dt.datetime(2026, 9, 19, 10, 25, 0)
+    morning_intents = s.generate_order_intents(_md())
+
+    clock_state["now"] = dt.datetime(2026, 9, 19, 14, 16, 0)
+    afternoon_intents = s.generate_order_intents(_md())
+
+    morning_keys = {i.idempotency_key for i in morning_intents}
+    afternoon_keys = {i.idempotency_key for i in afternoon_intents}
+    assert morning_keys.isdisjoint(afternoon_keys)
+    assert any("morning" in k for k in morning_keys)
+    assert any("afternoon" in k for k in afternoon_keys)
+
+
+def test_ce_and_pe_leg_have_distinct_keys():
+    s = _strategy(_on(2026, 9, 19, 10, 20))
+    intents = s.generate_order_intents(_md())
+    keys = {i.symbol: i.idempotency_key for i in intents}
+    assert keys[HCE] != keys[HPE]
+
+
+def test_idempotency_key_carries_an_isoformat_trading_date():
+    s = _strategy(_on(2026, 9, 19, 10, 20))
+    intents = s.generate_order_intents(_md())
+    for intent in intents:
+        assert "2026-09-19" in intent.idempotency_key
+
+
+def test_same_day_duplicate_evaluation_is_still_a_stable_key_not_a_new_one():
+    """Calling generate_order_intents twice within the same trading day for
+    a DIFFERENT logical event (hedge, then morning) must not accidentally
+    produce colliding keys, and re-deriving the date each call must not
+    introduce drift for events firing minutes apart on the same day."""
+    clock_state = {"now": dt.datetime(2026, 9, 19, 10, 20, 0)}
+    s = _strategy(lambda: clock_state["now"])
+    hedge_intents = s.generate_order_intents(_md())
+
+    clock_state["now"] = dt.datetime(2026, 9, 19, 10, 25, 0)
+    morning_intents = s.generate_order_intents(_md())
+
+    hedge_keys = {i.idempotency_key for i in hedge_intents}
+    morning_keys = {i.idempotency_key for i in morning_intents}
+    assert hedge_keys.isdisjoint(morning_keys)

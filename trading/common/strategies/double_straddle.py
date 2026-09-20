@@ -254,8 +254,23 @@ class DoubleStraddleStrategy(BaseStrategy):
         return intents
 
     def _intent(self, instrument: str, side: OrderSide, key_suffix: str, reason: str) -> OrderIntent:
+        # Phase 17.1-R Remediation C: the idempotency key previously carried
+        # no trading-date component at all (strategy_id:instrument:suffix,
+        # where suffix is a fixed time-slot label like "morning:ENTRY") --
+        # the exact same key was regenerated on every trading day, so a real
+        # day-2 order would have been treated as a replay of day-1's
+        # COMPLETED order and never reached the broker. Deriving the date
+        # from self._clock() (the same injectable clock already used for
+        # every wall-clock comparison above, see __init__'s own docstring)
+        # uses this strategy's existing "canonical trading timezone" seam
+        # rather than inventing a new one: same trading day -> same date
+        # string regardless of worker restart; a new trading day -> a
+        # different key, exactly as a genuinely new logical event requires.
+        # No entry/exit/SL/target/timing rule above this line changed.
+        trading_date = self._clock().date().isoformat()
         return OrderIntent(
             strategy_id=self.strategy_id, account_id=self._account_id, symbol=instrument,
             exchange=self._exchange, side=side, quantity=self._quantity, order_type=OrderType.MARKET,
-            reason=f"DoubleStraddelAlgo: {reason}", idempotency_key=f"{self.strategy_id}:{instrument}:{key_suffix}",
+            reason=f"DoubleStraddelAlgo: {reason}",
+            idempotency_key=f"{self.strategy_id}:{trading_date}:{instrument}:{key_suffix}",
         )

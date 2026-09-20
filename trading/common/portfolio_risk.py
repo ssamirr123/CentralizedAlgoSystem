@@ -264,6 +264,7 @@ class _Outstanding:
     price: float
     notional: float
     order_count_day: date
+    idempotency_key: str = ""
 
 
 def _apply_fill_to_position(existing: _LedgerPosition | None, side: OrderSide, fill_qty: int, fill_price: float) -> _LedgerPosition:
@@ -453,7 +454,7 @@ class PortfolioRiskManager:
             reservation_id=reservation_id, strategy_id=strategy_id, account_id=account_id,
             symbol=intent.symbol, side=intent.side, quantity=intent.quantity,
             price=price if price is not None else 0.0, notional=order_notional or 0.0,
-            order_count_day=today,
+            order_count_day=today, idempotency_key=intent.idempotency_key or "",
         )
         self._reservations[reservation_id] = outstanding
         self._order_counts[("strategy", strategy_id, today)] = snapshot.strategy_orders_today + 1
@@ -522,6 +523,63 @@ class PortfolioRiskManager:
         this phase (see module docstring)."""
         with self._lock:
             self._open_orders.pop(reservation_id, None)
+
+    # -- Phase 17.1-R Remediation E: reconciliation feedback ------------------ #
+    def find_reservation_by_idempotency_key(self, idempotency_key: str) -> str | None:
+        """Read-only lookup used by ReconciliationService to translate a
+        resolved idempotency_key back into the reservation_id it must
+        commit/release -- searches both still-pending reservations and
+        already-open (including ambiguous-held) entries. Returns None if no
+        reservation was ever made for this key (e.g. portfolio risk was
+        disabled, or the key was a replay that skipped reservation
+        entirely) -- a caller must treat that as "nothing to resolve here",
+        never as an error."""
+        if not idempotency_key:
+            return None
+        with self._lock:
+            for outstanding in (*self._reservations.values(), *self._open_orders.values()):
+                if outstanding.idempotency_key == idempotency_key:
+                    return outstanding.reservation_id
+        return None
+
+    def resolve_reconciliation(self, reservation_id: str, *, found: bool, fill_price: float | None = None) -> bool:
+        """Resolves a reservation that Section 27's AMBIGUOUS-outcome fix
+        left held open (in self._open_orders, never auto-released) once
+        reconciliation has produced a definitive answer against the real
+        broker:
+
+          found=True  (reconciliation FOUND the order at the broker) ->
+              COMMIT: apply the fill to the ledger exactly like a normal
+              terminal commit_reservation() would have, using the actual
+              reconciled fill_price when known, else the original
+              reservation price.
+          found=False (reconciliation proves the order does NOT exist) ->
+              RELEASE: give back the exposure/order-count budget, exactly
+              like release_reservation() -- consistent with this phase's
+              explicit fail-closed NOT_FOUND policy (Section 23): this
+              method never places a new order and never implies one is
+              authorized; it only stops reserving budget for one that
+              provably never happened.
+
+        Looks in self._open_orders ONLY (never self._reservations) --
+        an AMBIGUOUS outcome is always filed there by commit_reservation(),
+        never left in self._reservations. Returns False (a no-op) if no
+        such open reservation exists -- already resolved by a concurrent
+        caller, or never held open in the first place; never raises,
+        mirroring every other resolution method in this class."""
+        with self._lock:
+            outstanding = self._open_orders.pop(reservation_id, None)
+            if outstanding is None:
+                return False
+            if found:
+                price = fill_price if fill_price is not None else outstanding.price
+                key = (outstanding.strategy_id, outstanding.account_id, outstanding.symbol)
+                self._ledger[key] = _apply_fill_to_position(
+                    self._ledger.get(key), outstanding.side, outstanding.quantity, price,
+                )
+            else:
+                self._rollback_order_count(outstanding)
+            return True
 
     def _rollback_order_count(self, outstanding: _Outstanding) -> None:
         day = outstanding.order_count_day

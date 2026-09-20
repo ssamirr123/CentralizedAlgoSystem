@@ -44,13 +44,17 @@ accounts before this phase.
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
 from trading.common.alerts import AlertManager
 from trading.common.broker_manager import BrokerManager
 from trading.common.brokers.shadow_broker import ShadowBroker
+from trading.common.idempotency_store import IdempotencyStore, InMemoryIdempotencyStore, SqliteIdempotencyStore
 from trading.common.kill_switch import CentralKillSwitch
+from trading.common.live_authorization import SqliteLiveAuthorizationStore
+from trading.common.live_authorization_service import AuthorizationService
 from trading.common.observability import AuditTrail, MetricsRegistry
 from trading.common.operational_alerts import OperationalAlertStore
 from trading.common.worker_auth import WorkerAuthRegistry
@@ -65,6 +69,19 @@ from trading.common.strategy_runtime import StrategyRuntime
 from trading.common.trading_account import ExecutionMode, TradingAccount
 from trading.common.worker_coordinator import WorkerCoordinator
 from trading.common.worker_registry import WorkerRegistry
+
+def _default_live_authorization_store() -> SqliteLiveAuthorizationStore:
+    """A per-instance, per-process-unique temp file -- NEVER the class's own
+    literal default path (a fixed, CWD-relative "trading_live_authorization.db"),
+    which would otherwise silently share persisted authorization state
+    across every test that builds a fresh ExecutionState (tests/conftest.py's
+    own `app` fixture calls create_app() once per test -- see this module's
+    own docstring for why that isolation matters). Production opts into a
+    REAL persistent path via LIVE_AUTHORIZATION_DB_PATH in
+    build_execution_state() below, exactly like AUDIT_DB_PATH/
+    KILL_SWITCH_PERSISTENCE_PATH already do."""
+    return SqliteLiveAuthorizationStore(db_path=tempfile.mktemp(suffix="-live-authorization.db"))
+
 
 _EXAMPLE_ACCOUNTS = (
     ("ANGEL_MAIN", "Angel One (main)", "angelone"),
@@ -138,6 +155,22 @@ class ExecutionState:
     # existing CONTROL_API_KEY machine lane (trading/api/deps.py) -- see
     # that module's own docstring for why.
     worker_auth_registry: WorkerAuthRegistry = field(default_factory=WorkerAuthRegistry.from_env)
+    # Phase 17.1-R Remediation F -- see trading/api/live_authorization_routes.py.
+    # `idempotency_store` here is a SEPARATE instance from whatever
+    # StrategyExecutionEngine/StrategyRuntime uses (that engine is not
+    # wired to persistent idempotency in this process at all today, a
+    # pre-existing, documented gap unchanged by this phase) -- it exists
+    # only so the new /api/live-authorization/* routes can perform their
+    # OWN request-time "is this idempotency_key novel" preview check
+    # (validate_request()/run_preflight() in live_authorization_workflow.py
+    # already require one). `live_authorization_store` and
+    # `authorization_service` are the same Phase 15D.5/15D.7 objects every
+    # historical canary script already used, now wired to a real HTTP
+    # boundary for the first time -- see that route module's own docstring
+    # for the full authenticated-operator-identity design.
+    idempotency_store: IdempotencyStore = field(default_factory=InMemoryIdempotencyStore)
+    live_authorization_store: SqliteLiveAuthorizationStore = field(default_factory=_default_live_authorization_store)
+    authorization_service: AuthorizationService = field(default_factory=AuthorizationService)
 
 
 def build_execution_state() -> ExecutionState:
@@ -240,6 +273,22 @@ def build_execution_state() -> ExecutionState:
         audit_trail=audit_trail, operational_alerts=operational_alerts,
     )
 
+    # Phase 17.1-R Remediation F: IDEMPOTENCY_DB_PATH/LIVE_AUTHORIZATION_DB_PATH,
+    # when set, opt this deployment into durable storage for the new
+    # /api/live-authorization/* routes -- unset (the default) keeps the
+    # dataclass field's own safe, test-isolated default (in-memory / a
+    # fresh per-instance temp file) exactly as every other optional store
+    # on this class already behaves.
+    _idempotency_db_path = os.environ.get("IDEMPOTENCY_DB_PATH", "").strip()
+    idempotency_store: IdempotencyStore = (
+        SqliteIdempotencyStore(db_path=_idempotency_db_path) if _idempotency_db_path else InMemoryIdempotencyStore()
+    )
+    _live_auth_db_path = os.environ.get("LIVE_AUTHORIZATION_DB_PATH", "").strip()
+    live_authorization_store = (
+        SqliteLiveAuthorizationStore(db_path=_live_auth_db_path) if _live_auth_db_path
+        else _default_live_authorization_store()
+    )
+
     return ExecutionState(
         broker_manager=broker_manager,
         strategy_assignment=strategy_assignment,
@@ -254,4 +303,6 @@ def build_execution_state() -> ExecutionState:
         worker_coordinator=worker_coordinator,
         portfolio_risk_manager=portfolio_risk_manager,
         operational_alerts=operational_alerts,
+        idempotency_store=idempotency_store,
+        live_authorization_store=live_authorization_store,
     )

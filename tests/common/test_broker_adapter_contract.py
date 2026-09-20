@@ -214,6 +214,23 @@ def test_adapter_cancel_order_refuses_when_not_live(make_adapter):
         broker.cancel_order("ANY-ID")
 
 
+# -- Phase 17.1-R Remediation A: modify_order() must refuse the SAME way -- #
+@_ADAPTERS
+def test_adapter_modify_order_blocked_in_read_only_mode(make_adapter):
+    broker, _ = make_adapter(live=True, read_only=True)
+    broker.connect()
+    with pytest.raises(ReadOnlyModeError):
+        broker.modify_order("ANY-ID", 10, 100.0)
+
+
+@_ADAPTERS
+def test_adapter_modify_order_refuses_when_not_live(make_adapter):
+    broker, _ = make_adapter(live=False, read_only=False)
+    broker.connect()
+    with pytest.raises(LiveTradingDisabledError):
+        broker.modify_order("ANY-ID", 10, 100.0)
+
+
 @_ADAPTERS
 def test_adapter_repr_never_exposes_secrets(make_adapter):
     broker, _ = make_adapter(live=False, read_only=True)

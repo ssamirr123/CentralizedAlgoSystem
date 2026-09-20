@@ -417,7 +417,7 @@ def test_modify_order_reuses_order_book_row_for_identifying_fields():
         "tradingsymbol": "NIFTY30JUL2625000CE", "symboltoken": "99999", "exchange": "NFO",
         "producttype": "INTRADAY",
     }
-    broker, _ = _broker(fake=fake)
+    broker, _ = _broker(config=_config(live=True), fake=fake)
     broker.connect()
 
     ok = broker.modify_order("AO-1", 30, 128.0)
@@ -430,11 +430,20 @@ def test_modify_order_reuses_order_book_row_for_identifying_fields():
 
 
 def test_modify_order_unknown_id_raises():
-    broker, _ = _broker()
+    broker, _ = _broker(config=_config(live=True))
     broker.connect()
 
     with pytest.raises(BrokerConnectionError):
         broker.modify_order("NO-SUCH-ID", 10, 100.0)
+
+
+def test_modify_order_refuses_when_not_live():
+    """Phase 17.1-R Remediation A: modify_order() previously had no is_live
+    check at all, unlike place_order()/cancel_order() -- closing that gap."""
+    broker, _ = _broker(config=_config(live=False))
+    broker.connect()
+    with pytest.raises(LiveTradingDisabledError):
+        broker.modify_order("AO-1", 10, 100.0)
 
 
 def test_cancel_order():
