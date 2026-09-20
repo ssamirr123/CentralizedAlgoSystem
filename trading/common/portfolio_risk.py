@@ -478,6 +478,18 @@ class PortfolioRiskManager:
             outstanding = self._reservations.pop(reservation_id, None)
             if outstanding is None:
                 return
+            if execution_result is not None and execution_result.status == "AMBIGUOUS":
+                # Phase 17.1 Section 27 fix: the broker outcome is UNKNOWN --
+                # it may have actually accepted/filled this order. Releasing
+                # the reservation here (as every other failure path does)
+                # would silently understate real exposure/order-count if the
+                # order in fact went through. Keep the exposure/order-count
+                # footprint exactly like a still-open order, until an
+                # operator/reconciliation flow explicitly resolves it via
+                # resolve_open_order() -- never auto-released on a timer or
+                # on the next unrelated call.
+                self._open_orders[reservation_id] = outstanding
+                return
             if execution_result is None or not execution_result.success:
                 self._rollback_order_count(outstanding)
                 return

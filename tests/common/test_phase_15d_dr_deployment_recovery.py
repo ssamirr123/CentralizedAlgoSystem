@@ -100,6 +100,9 @@ def test_ambiguous_broker_exception_does_not_retry_place_order():
     result = engine.execute(_intent())
     assert result.success is False
     assert "ambiguous" in result.message.lower()
+    # Phase 17.1 Section 27: distinct from a confirmed REJECTED outcome, so
+    # a caller such as PortfolioRiskManager can tell them apart.
+    assert result.status == "AMBIGUOUS"
     assert broker.call_count == 1  # NEVER retried -- the whole point of this fix
 
 

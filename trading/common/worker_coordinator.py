@@ -178,6 +178,24 @@ class WorkerCoordinator:
             # uncaught -- fail closed, report it, same as every other
             # rejection path. Mirrors the identical fix already made in
             # trading/common/strategy_runtime.py's own run_once() loop.
+            #
+            # Phase 17.1 Section 27: AmbiguousIdempotencyStateError is also
+            # caught here (it is a plain RuntimeError, not special-cased) --
+            # execute() only ever raises it when a record for this exact
+            # idempotency_key ALREADY exists at AMBIGUOUS/PENDING (see
+            # idempotency_store.py), and _reserve_portfolio_risk() above
+            # deliberately returns reservation_id=None whenever such a
+            # record already exists (never double-reserves for a replay).
+            # So `reservation_id` is always None at this exact except-block
+            # for that exception, and release_reservation(None) is already
+            # a documented no-op -- this exception can therefore never
+            # release a reservation that is still tracking a genuinely
+            # unknown broker outcome. A NEW (first-attempt) ambiguous
+            # outcome never raises here at all -- it returns normally as an
+            # ExecutionResult with status="AMBIGUOUS" (see execute()'s
+            # _handle_ambiguous()), which PortfolioRiskManager.
+            # commit_reservation() below handles explicitly by keeping the
+            # reservation open, never releasing it.
             if reservation_id and self._portfolio_risk is not None:
                 self._portfolio_risk.release_reservation(reservation_id)
             self._raise_execution_alert("EXECUTION_FAILED", submission, str(exc))

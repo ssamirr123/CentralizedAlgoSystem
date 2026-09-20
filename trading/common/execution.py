@@ -261,6 +261,20 @@ class ExecutionResult:
         )
 
     @classmethod
+    def ambiguous(cls, intent: OrderIntent, reason: str) -> "ExecutionResult":
+        """Phase 17.1 Section 27 fix: a distinct, non-terminal status for a
+        broker call whose outcome is genuinely UNKNOWN (the broker may have
+        actually accepted/filled the order) -- deliberately never "REJECTED",
+        which would tell a caller such as PortfolioRiskManager it is safe to
+        release the exposure/order-count this order reserved. See
+        PortfolioRiskManager.commit_reservation()'s own handling of
+        status == "AMBIGUOUS"."""
+        return cls(
+            success=False, client_order_id=intent.client_order_id, status="AMBIGUOUS", message=reason,
+            correlation_id=intent.correlation_id, strategy_id=intent.strategy_id, created_at=intent.created_at,
+        )
+
+    @classmethod
     def from_order_result(
         cls, order_result: OrderResult, intent: OrderIntent, account_id: str, broker_id: str
     ) -> "ExecutionResult":
@@ -1025,16 +1039,21 @@ class StrategyExecutionEngine:
         # surface.
         self._obs("idempotency_store", "put", lambda: self._idempotency_store.put(record))
 
-    def _fail(self, intent: OrderIntent, reason: str, *, started: float) -> ExecutionResult:
+    def _fail(self, intent: OrderIntent, reason: str, *, started: float, status: str = "REJECTED") -> ExecutionResult:
         """Shared tail for every execute() failure path after the risk
         check passed: records latency/error metrics and an execution_error
-        alert, then returns the same ExecutionResult.rejected() shape every
-        caller already expects."""
+        alert, then returns the ExecutionResult shape every caller already
+        expects. `status="AMBIGUOUS"` (Phase 17.1 Section 27) is the one
+        exception -- see ExecutionResult.ambiguous()'s own docstring for why
+        an unknown-outcome result must never be indistinguishable from a
+        confirmed REJECTED one."""
         if self._metrics is not None:
             self._obs("metrics", "record_execution_latency", lambda: self._metrics.record_execution_latency(intent.strategy_id, time.monotonic() - started))
             self._obs("metrics", "record_error", lambda: self._metrics.record_error(f"execution:{intent.strategy_id}"))
         if self._alerts is not None:
             self._obs("alerts", "execution_error", lambda: self._alerts.execution_error(intent.strategy_id, reason, correlation_id=intent.correlation_id))
+        if status == "AMBIGUOUS":
+            return ExecutionResult.ambiguous(intent, reason)
         return ExecutionResult.rejected(intent, reason)
 
     def _handle_ambiguous(
@@ -1059,7 +1078,7 @@ class StrategyExecutionEngine:
                     account_id=account_id, idempotency_key=intent.idempotency_key, reason=str(exc),
                 ),
             )
-        return self._fail(intent, reason, started=started)  # _fail() records metrics/alerts once
+        return self._fail(intent, reason, started=started, status="AMBIGUOUS")  # _fail() records metrics/alerts once
 
     def _handle_confirmed_rejection(
         self, intent: OrderIntent, account_id: str, exc: "ConfirmedRejectionError", *, started: float,
