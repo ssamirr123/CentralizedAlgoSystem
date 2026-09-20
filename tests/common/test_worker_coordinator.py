@@ -185,7 +185,11 @@ def test_malformed_order_intent_missing_symbol_is_rejected():
     assert "instrument" in result.reason
 
 
-def test_duplicate_submission_id_is_rejected_on_replay():
+def test_duplicate_submission_id_is_replayed_verbatim_not_rejected():
+    # Phase 16.12 Section 17/18 -- a network retry of the exact same
+    # submission_id (e.g. the worker never saw the first response) must
+    # get the SAME original result back, not a generic rejection that
+    # would hide whether the first attempt actually succeeded.
     manager, registry, assignment, runtime, workers, coordinator, strategy, kill_switch = _stack()
     worker = workers.register_worker(worker_id="w1", name="A")
     workers.assign_strategy(STRATEGY_A, "w1")
@@ -196,8 +200,8 @@ def test_duplicate_submission_id_is_rejected_on_replay():
     first = coordinator.submit_order_intent(submission)
     second = coordinator.submit_order_intent(submission)  # exact same submission object, retried
     assert first.accepted is True
-    assert second.accepted is False
-    assert "duplicate submission_id" in second.reason
+    assert second.accepted is True
+    assert second is first or second == first
 
 
 def test_stale_submission_is_rejected():

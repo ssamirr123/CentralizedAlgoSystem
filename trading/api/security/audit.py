@@ -58,6 +58,11 @@ STRATEGY_COMMAND_FAILED = "STRATEGY_COMMAND_FAILED"
 # cycle (trading/common/strategy_runtime.py). Records that a cycle ran and
 # its outcome; never records a real broker mutation, since none can occur.
 STRATEGY_RUNTIME_EVALUATED = "STRATEGY_RUNTIME_EVALUATED"
+# Phase 16.12 -- an operator assigning strategy ownership to a distributed
+# worker (trading/common/worker_registry.py's own assign_strategy(), now
+# reachable via POST /api/workers/{worker_id}/assign). Distinct from
+# STRATEGY_COMMAND_*, which govern lifecycle (START/STOP), not placement.
+STRATEGY_WORKER_ASSIGNED = "STRATEGY_WORKER_ASSIGNED"
 
 
 def record(

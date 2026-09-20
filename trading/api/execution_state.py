@@ -53,7 +53,8 @@ from trading.common.brokers.shadow_broker import ShadowBroker
 from trading.common.kill_switch import CentralKillSwitch
 from trading.common.observability import AuditTrail, MetricsRegistry
 from trading.common.operational_alerts import OperationalAlertStore
-from trading.common.portfolio_risk import PortfolioRiskManager
+from trading.common.worker_auth import WorkerAuthRegistry
+from trading.common.portfolio_risk import PortfolioRiskLimits, PortfolioRiskManager
 from trading.common.risk_manager import RiskManager
 from trading.common.strategies.combined_vwap_nifty import CombinedVwapNiftyStrategy
 from trading.common.strategies.double_straddle import DoubleStraddleStrategy
@@ -129,6 +130,14 @@ class ExecutionState:
     # portfolio-risk/execution outcomes all raise/resolve alerts on this
     # SAME store the read-only /api/operations/* endpoints also read.
     operational_alerts: OperationalAlertStore = field(default_factory=OperationalAlertStore)
+    # Phase 16.12 -- see trading/common/worker_auth.py. Empty by default
+    # (WORKER_AUTH_SECRETS unset): NO worker can authenticate against the
+    # new /api/worker/* machine routes until an operator explicitly
+    # provisions a secret for it -- fail-closed, no production value
+    # invented. Entirely separate from Permission/RBAC and from the
+    # existing CONTROL_API_KEY machine lane (trading/api/deps.py) -- see
+    # that module's own docstring for why.
+    worker_auth_registry: WorkerAuthRegistry = field(default_factory=WorkerAuthRegistry.from_env)
 
 
 def build_execution_state() -> ExecutionState:
@@ -196,12 +205,34 @@ def build_execution_state() -> ExecutionState:
 
     # Phase 16.9 -- zero workers pre-registered; see the ExecutionState
     # field comment above for why these are constructed anyway.
-    worker_registry = WorkerRegistry(audit_trail=audit_trail)
+    # Phase 16.12: WORKER_HEARTBEAT_TIMEOUT_SECONDS lets a deployment (or a
+    # test proving restart-after-timeout semantics deterministically and
+    # quickly, rather than waiting a real 30s) override the default --
+    # unset keeps DEFAULT_HEARTBEAT_TIMEOUT_SECONDS (30.0) exactly as
+    # every prior phase's tests already assume.
+    _heartbeat_timeout_raw = os.environ.get("WORKER_HEARTBEAT_TIMEOUT_SECONDS", "").strip()
+    worker_registry = WorkerRegistry(
+        audit_trail=audit_trail,
+        **({"heartbeat_timeout_seconds": float(_heartbeat_timeout_raw)} if _heartbeat_timeout_raw else {}),
+    )
     # Phase 16.10 -- additive central gate, sitting in front of the
     # existing risk_manager above (see PortfolioRiskManager's own module
     # docstring for why it is a separate object rather than a change to
-    # RiskManager). No portfolio limit is configured here.
-    portfolio_risk_manager = PortfolioRiskManager()
+    # RiskManager). Every limit defaults to None (unenforced) -- the same
+    # convention RiskLimits/PortfolioRiskLimits already use -- unless an
+    # operator explicitly sets PORTFOLIO_MAX_EXPOSURE (Phase 16.12: the
+    # one limit this deployment surface currently exposes, added so a
+    # real distributed shadow-validation run can exercise a genuine
+    # portfolio-risk rejection without reaching into process memory; no
+    # production value is invented here, and no other limit is wired to
+    # an env var yet -- see the Phase 16.12 report for the remaining gap).
+    _portfolio_max_exposure = os.environ.get("PORTFOLIO_MAX_EXPOSURE", "").strip()
+    portfolio_risk_manager = PortfolioRiskManager(
+        portfolio_limits=(
+            PortfolioRiskLimits(max_portfolio_exposure=float(_portfolio_max_exposure))
+            if _portfolio_max_exposure else None
+        ),
+    )
     worker_coordinator = WorkerCoordinator(
         worker_registry=worker_registry, strategy_registry=strategy_registry,
         strategy_assignment=strategy_assignment, strategy_runtime=strategy_runtime,

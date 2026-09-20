@@ -594,6 +594,50 @@ def test_worker_response_never_contains_a_credential_field(client, viewer_auth, 
 
 
 # --------------------------------------------------------------------------- #
+# WORKER ASSIGNMENT (Phase 16.12)
+# --------------------------------------------------------------------------- #
+def test_assign_worker_strategy_requires_trading_control(client, bearer, app):
+    app.state.execution.worker_registry.register_worker(worker_id="w1", name="A")
+    trader = bearer(role="trader")
+    r = client.post("/api/workers/w1/assign", headers=trader, json={"strategy_id": "DoubleStraddelAlgo"})
+    assert r.status_code == 403
+
+
+def test_assign_worker_strategy_succeeds_for_operator(client, bearer, app):
+    app.state.execution.worker_registry.register_worker(worker_id="w1", name="A")
+    op = bearer(role="operator")
+    r = client.post("/api/workers/w1/assign", headers=op, json={"strategy_id": "DoubleStraddelAlgo"})
+    assert r.status_code == 200
+    assert r.json()["assigned_strategy_ids"] == ["DoubleStraddelAlgo"]
+
+
+def test_assign_worker_strategy_unknown_worker_is_404(client, bearer):
+    op = bearer(role="operator")
+    r = client.post("/api/workers/ghost/assign", headers=op, json={"strategy_id": "DoubleStraddelAlgo"})
+    assert r.status_code == 404
+
+
+def test_assign_worker_strategy_already_owned_by_online_worker_is_409(client, bearer, app):
+    app.state.execution.worker_registry.register_worker(worker_id="w1", name="A")
+    app.state.execution.worker_registry.register_worker(worker_id="w2", name="B")
+    op = bearer(role="operator")
+    r1 = client.post("/api/workers/w1/assign", headers=op, json={"strategy_id": "DoubleStraddelAlgo"})
+    assert r1.status_code == 200
+    r2 = client.post("/api/workers/w2/assign", headers=op, json={"strategy_id": "DoubleStraddelAlgo"})
+    assert r2.status_code == 409
+
+
+def test_assign_worker_strategy_is_audited(client, bearer, app, db_session):
+    from trading.database import models
+
+    app.state.execution.worker_registry.register_worker(worker_id="w1", name="A")
+    op = bearer(role="operator")
+    client.post("/api/workers/w1/assign", headers=op, json={"strategy_id": "DoubleStraddelAlgo"})
+    rows = [r for r in db_session.query(models.AuditLog).all() if r.action == "STRATEGY_WORKER_ASSIGNED"]
+    assert len(rows) == 1
+
+
+# --------------------------------------------------------------------------- #
 # EXECUTION MODES
 # --------------------------------------------------------------------------- #
 def test_execution_modes_lists_all_four(client, viewer_auth):
@@ -955,6 +999,7 @@ def test_execution_state_never_wires_a_live_authorization_store():
         "broker_manager", "strategy_assignment", "risk_manager", "strategy_registry",
         "kill_switch", "metrics", "audit_trail", "alerts", "strategy_runtime",
         "worker_registry", "worker_coordinator", "portfolio_risk_manager", "operational_alerts",
+        "worker_auth_registry",
     }
     # Phase 16.5's own runtime is present, but it is not a
     # LiveAuthorization store -- it holds no live-authorization state of

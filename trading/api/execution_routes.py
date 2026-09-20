@@ -123,7 +123,7 @@ from trading.common.strategy_assignment import Assignment, InvalidAssignmentErro
 from trading.common.strategy_control import ControlCommand, StrategyControlOutcome, execute_strategy_command
 from trading.common.strategy_lifecycle import StrategyLifecycleView, check_all_lifecycles, check_lifecycle
 from trading.common.strategy_runtime import RuntimeCycleResult, RuntimeStatus
-from trading.common.worker_registry import UnknownWorkerError
+from trading.common.worker_registry import StrategyAlreadyOwnedError, UnknownWorkerError
 from trading.common.strategy_registry import UnknownStrategyError
 from trading.common.trading_account import ExecutionMode, TradingAccount
 
@@ -895,6 +895,37 @@ def get_worker_strategies(
     except UnknownWorkerError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such worker: {worker_id!r}") from None
     return list(info.assigned_strategy_ids)
+
+
+class WorkerAssignIn(BaseModel):
+    strategy_id: str
+
+
+@router.post("/workers/{worker_id}/assign", response_model=WorkerOut)
+def assign_worker_strategy(
+    worker_id: str, body: WorkerAssignIn, request: Request, db: Session = Depends(get_db),
+    state: ExecutionState = Depends(_state), principal: Principal = Depends(_TRADING_CONTROL),
+) -> WorkerOut:
+    """Phase 16.12 -- closes a gap Phase 16.9/16.10/16.11 left open (no
+    operator-facing way to assign strategy ownership to a worker; those
+    phases' own tests called WorkerRegistry.assign_strategy() directly).
+    Gated by TRADING_CONTROL, the same permission /api/assignments already
+    requires for the analogous "reroute a strategy" class of change --
+    this never starts/stops a strategy or a worker, it only records
+    ownership, exactly like WorkerRegistry.assign_strategy() already did
+    when called in-process."""
+    if state.worker_registry is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such worker: {worker_id!r}")
+    try:
+        state.worker_registry.assign_strategy(body.strategy_id, worker_id)
+    except UnknownWorkerError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such worker: {worker_id!r}") from None
+    except StrategyAlreadyOwnedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+
+    _audit(db, request, principal, audit.STRATEGY_WORKER_ASSIGNED, target=f"worker:{worker_id}",
+           detail={"strategy_id": body.strategy_id})
+    return WorkerOut.from_info(state.worker_registry.get_worker(worker_id))
 
 
 # --------------------------------------------------------------------------- #

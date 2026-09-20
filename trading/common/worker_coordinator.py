@@ -63,6 +63,7 @@ ignoring intent.account_id), and cannot reach a broker adapter directly
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -79,6 +80,8 @@ from trading.common.worker_registry import UnknownWorkerError, WorkerRegistry
 __all__ = ["DEFAULT_MAX_SUBMISSION_AGE_SECONDS", "WorkerCoordinator"]
 
 DEFAULT_MAX_SUBMISSION_AGE_SECONDS = 30.0
+
+_IN_FLIGHT = object()
 
 
 class WorkerCoordinator:
@@ -114,9 +117,39 @@ class WorkerCoordinator:
         self._audit_trail = audit_trail
         self._operational_alerts = operational_alerts
         self._max_submission_age = max_submission_age_seconds
-        self._seen_submission_ids: set[str] = set()
+        # Phase 16.12 -- network-retry safety (Sections 17/18): keyed by
+        # submission_id, NOT idempotency_key (a different concern -- see
+        # the module docstring's step 9: idempotency_key identifies the
+        # underlying LOGICAL order; submission_id identifies one HTTP
+        # attempt at delivering it). A value of `_IN_FLIGHT` closes the
+        # race window between "accepted this submission_id" and "finished
+        # processing it" for two near-simultaneous deliveries of the exact
+        # same retried request; a real OrderIntentResult means a later
+        # retry gets the SAME answer replayed verbatim, never a second
+        # execution and never a generic "duplicate" rejection that would
+        # hide the original outcome from a legitimately retrying worker.
+        self._submission_results: dict[str, object] = {}
+        self._submission_lock = threading.Lock()
 
     def submit_order_intent(self, submission: OrderIntentSubmission) -> OrderIntentResult:
+        with self._submission_lock:
+            existing = self._submission_results.get(submission.submission_id)
+            if existing is _IN_FLIGHT:
+                return OrderIntentResult(
+                    submission_id=submission.submission_id, accepted=False, execution_result=None,
+                    reason="this submission_id is currently being processed by a concurrent request -- retry shortly",
+                )
+            if existing is not None:
+                return existing  # type: ignore[return-value]
+            self._submission_results[submission.submission_id] = _IN_FLIGHT
+
+        result = self._process_submission(submission)
+
+        with self._submission_lock:
+            self._submission_results[submission.submission_id] = result
+        return result
+
+    def _process_submission(self, submission: OrderIntentSubmission) -> OrderIntentResult:
         reason = self._validate(submission)
         if reason:
             return OrderIntentResult(
@@ -255,9 +288,11 @@ class WorkerCoordinator:
             )
 
     def _validate(self, submission: OrderIntentSubmission) -> str:
-        if submission.submission_id in self._seen_submission_ids:
-            return "duplicate submission_id -- already processed"
-
+        # Duplicate/in-flight submission_id detection now happens in
+        # submit_order_intent() itself (Phase 16.12), which replays the
+        # ORIGINAL OrderIntentResult on a retry rather than a generic
+        # rejection here -- this method is only ever reached for a
+        # submission_id seen for the first time.
         try:
             generated_at = datetime.fromisoformat(submission.generated_at)
         except (ValueError, TypeError):
@@ -304,5 +339,4 @@ class WorkerCoordinator:
         if not submission.intent.symbol:
             return "OrderIntent has no instrument/symbol"
 
-        self._seen_submission_ids.add(submission.submission_id)
         return ""
