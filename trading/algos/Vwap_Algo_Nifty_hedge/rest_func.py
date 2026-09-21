@@ -3,6 +3,18 @@ import pandas as pd
 import pandas_ta as ta
 import config,make_data,token_file,time,threading,manager
 
+# Phase 15D.9 (Blocker 1 remediation): the ONE control-center kill switch
+# now reaches this legacy, pre-Phase-15D order path too -- see
+# trading/common/legacy_execution_guard.py's own docstring for exactly
+# what this does and does not close. Note: unlike the other two legacy
+# algos, this file has no DRY_RUN gate of its own at all -- that
+# pre-existing gap is documented separately (not fixed here, to avoid
+# introducing a new, untested behavior change beyond this phase's scope
+# -- see docs/phase-15d-9-final-readiness-report.md).
+from trading.common.legacy_execution_guard import assert_live_mutation_allowed
+
+_STRATEGY_ID = "Vwap_Algo_Nifty_hedge"
+
 def _retry_call(fn, retries=5, base_delay=2, label=''):
     """
     Call fn() up to `retries` times with exponential back-off.
@@ -97,6 +109,15 @@ def make_vwap(dff):
     return dff
 
 def place_market_order(symbol,token,qty,ordertype):
+    # Phase 17.1-R Remediation B: this algo previously had NO DRY_RUN gate
+    # at all -- unlike CombinedVwapNifty/DoubleStraddelAlgo, a real broker
+    # call was attempted here whenever the central kill switch was merely
+    # disengaged, with no independent "paper mode" fallback. Mirrors
+    # CombinedVwapNifty.rest_func.place_market_order's exact DRY_RUN shape.
+    if config.DRY_RUN:
+        fake_id = f'DRYRUN-{int(time.time()*1000)}'
+        print(f'[DRY_RUN] place_market_order SKIPPED (paper) {symbol} {ordertype} qty={qty} -> {fake_id}')
+        return fake_id
     orderparams = {
         "variety": "NORMAL",
         "tradingsymbol": str(symbol),
@@ -113,6 +134,7 @@ def place_market_order(symbol,token,qty,ordertype):
     }
 
     def _call():
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         order_id = config.objconn.placeOrder(orderparams)
         if order_id is None:
             raise ValueError('Market order response missing order id')
@@ -122,6 +144,12 @@ def place_market_order(symbol,token,qty,ordertype):
     return _retry_call(_call, retries=5, base_delay=1, label=f'place_market_order({symbol},{ordertype})')
 
 def place_stoploss_order(symbol,token,qty,stoploss):
+    # Phase 17.1-R Remediation B: see place_market_order()'s identical
+    # comment -- this function previously had no DRY_RUN gate either.
+    if config.DRY_RUN:
+        fake_id = f'DRYRUN-{int(time.time()*1000)}'
+        print(f'[DRY_RUN] place_stoploss_order SKIPPED (paper) {symbol} qty={qty} sl={stoploss} -> {fake_id}')
+        return fake_id
     stoploss = round(float(stoploss))
     price = stoploss+2
     orderparams = {
@@ -139,6 +167,7 @@ def place_stoploss_order(symbol,token,qty,stoploss):
     }
 
     def _call():
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         order_id = config.objconn.placeOrder(orderparams)
         if order_id is None:
             raise ValueError('Stoploss order response missing order id')
@@ -148,6 +177,17 @@ def place_stoploss_order(symbol,token,qty,stoploss):
     return _retry_call(_call, retries=5, base_delay=1, label=f'place_stoploss_order({symbol})')
 
 def modify_stoploss_order(symbol,token,qty,stoploss,orderid):
+    # Phase 17.1-R Remediation A/B: this function previously had NEITHER a
+    # DRY_RUN gate NOR the central kill-switch check its own sibling
+    # place_*_order() functions in this file already carry -- the single
+    # weakest mutation surface identified by the Phase 17.1 review. Now
+    # matches place_market_order()/place_stoploss_order() exactly: DRY_RUN
+    # short-circuits before any real params are built, and the real call is
+    # gated by assert_live_mutation_allowed() the same way every other
+    # legacy mutation call in this codebase already is.
+    if config.DRY_RUN:
+        print(f'[DRY_RUN] modify_stoploss_order SKIPPED (paper) {symbol} {orderid} -> sl={stoploss}')
+        return orderid
     stoploss = round(float(stoploss))
     price = stoploss+2
     orderparams = {
@@ -165,6 +205,7 @@ def modify_stoploss_order(symbol,token,qty,stoploss,orderid):
     }
 
     def _call():
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         order_id = config.objconn.modifyOrder(orderparams)
         if order_id is None:
             raise ValueError('Modify stoploss response missing order id')

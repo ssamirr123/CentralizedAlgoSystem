@@ -1,3 +1,34 @@
+import os
+
+
+def _env_flag(*names, default="false"):
+    """Return a bool for the first environment variable in `names` that is
+    set (non-empty), else parse `default`. Truthy values: 1/true/yes/y/on
+    (case-insensitive). Copied verbatim from CombinedVwapNifty/config.py --
+    Phase 17.1-R Remediation B: this algo previously had NO DRY_RUN gate of
+    its own at all (unlike the other two legacy algos), meaning its
+    place_market_order()/place_stoploss_order() calls would always attempt
+    the real broker call whenever the central kill switch was disengaged,
+    with no independent "paper mode" fallback. See
+    docs/phase-17-1-r-live-readiness-safety-remediation-report.md."""
+    val = None
+    for n in names:
+        v = os.environ.get(n)
+        if v is not None and str(v).strip() != "":
+            val = v
+            break
+    if val is None:
+        val = default
+    return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+# Set env var BOT_DRY_RUN=false to enable REAL orders (BOT_DY_RUN kept as a
+# typo-tolerant alias, matching CombinedVwapNifty/DoubleStraddelAlgo).
+# Defaults to True -- DRY_RUN is the safe default posture, same as the other
+# two legacy algos.
+DRY_RUN = _env_flag("BOT_DRY_RUN", "BOT_DY_RUN", default="true")
+
+
 # ============================ CREDENTIALS ============================
 # Never commit real broker credentials -- fill these in directly on the
 # target EC2 instance (not in git). See DoubleStraddelAlgo/config.py for
@@ -8,9 +39,28 @@ def _angel_creds() -> dict:
     """AngelOne credentials from the environment (Stage 20). Falls back to a
     git-ignored trading/.env at the repo root so a strategy box that does not
     inject them via systemd still works. Real values live there or in AWS
-    Secrets Manager -> env -- NEVER in this tracked file."""
+    Secrets Manager -> env -- NEVER in this tracked file.
+
+    Phase 15D.3-R fix: only the specific Angel One credential keys this
+    function actually consumes (_REQUIRED_ENV_KEYS below) are ever read from
+    trading/.env and set into os.environ (via setdefault, so an explicit
+    caller-supplied value is never overwritten). Previously this loop set
+    EVERY key found in the file into process-global os.environ, which
+    silently leaked unrelated configuration (CANARY_*, ANGELONE_A_*,
+    ANGELONE_B_*, ...) into any process that happened to import this module
+    -- see tests/algos/test_doublestraddel_execution_bridge.py's own
+    "CREDENTIAL-LEAK GUARD" docstring for the specific incident this caused
+    and docs/phase-15d-3-post-canary-verification-report.md for the full
+    diagnosis. This loader is responsible for its own isolation: a future
+    key added to trading/.env for an unrelated purpose must never become a
+    process-global environment variable just because this function ran."""
     import os
     from pathlib import Path as _P
+
+    _REQUIRED_ENV_KEYS = (
+        "ANGELONE_CLIENT_ID", "ANGELONE_API_KEY", "ANGELONE_MPIN",
+        "ANGELONE_PASSWORD", "ANGELONE_TOTP_SECRET",
+    )
 
     _envf = _P(__file__).resolve().parents[3] / "trading" / ".env"
     if _envf.is_file():
@@ -18,7 +68,9 @@ def _angel_creds() -> dict:
             _raw = _raw.strip()
             if _raw and not _raw.startswith("#") and "=" in _raw:
                 _k, _, _v = _raw.partition("=")
-                os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+                _k = _k.strip()
+                if _k in _REQUIRED_ENV_KEYS:
+                    os.environ.setdefault(_k, _v.strip().strip("'\""))
 
     def _g(*names):
         for _n in names:

@@ -20,6 +20,20 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _env_alias(*names: str, default: str = "") -> str:
+    """Like _env(), but checks multiple env var names in order and returns
+    the first one that's actually set (non-empty). Used for
+    ANGELONE_PASSWORD/ANGELONE_MPIN, which trading/algos/DoubleStraddelAlgo/
+    config.py already treats as interchangeable names for the same
+    credential -- this keeps the shared config loader consistent with that
+    existing convention rather than only recognizing one of the two."""
+    for name in names:
+        val = os.environ.get(name, "").strip()
+        if val:
+            return val
+    return default
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     return int(raw) if raw else default
@@ -40,12 +54,22 @@ class BrokerCredentials:
 
     angelone_api_key: str = field(default_factory=lambda: _env("ANGELONE_API_KEY"))
     angelone_client_id: str = field(default_factory=lambda: _env("ANGELONE_CLIENT_ID"))
-    angelone_password: str = field(default_factory=lambda: _env("ANGELONE_PASSWORD"))
+    # ANGELONE_MPIN is accepted as an alias of ANGELONE_PASSWORD -- Angel
+    # One's own login flow calls this field an MPIN, and
+    # DoubleStraddelAlgo/config.py already treats the two names as
+    # interchangeable for the same credential.
+    angelone_password: str = field(default_factory=lambda: _env_alias("ANGELONE_PASSWORD", "ANGELONE_MPIN"))
     angelone_totp_secret: str = field(default_factory=lambda: _env("ANGELONE_TOTP_SECRET"))
 
     icici_breeze_api_key: str = field(default_factory=lambda: _env("ICICI_BREEZE_API_KEY"))
     icici_breeze_api_secret: str = field(default_factory=lambda: _env("ICICI_BREEZE_API_SECRET"))
     icici_breeze_session_token: str = field(default_factory=lambda: _env("ICICI_BREEZE_SESSION_TOKEN"))
+
+    # Dhan has no TOTP/password login flow -- the access token is generated
+    # externally (Dhan's web console / partner OAuth flow) and supplied
+    # directly as a long-lived credential. See trading/common/brokers/dhan.py.
+    dhan_client_id: str = field(default_factory=lambda: _env("DHAN_CLIENT_ID"))
+    dhan_access_token: str = field(default_factory=lambda: _env("DHAN_ACCESS_TOKEN"))
 
 
 @dataclass(frozen=True)

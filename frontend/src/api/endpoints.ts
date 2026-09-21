@@ -151,3 +151,98 @@ export const getSessionChart = (sessionId: number) =>
 
 export const getSessionOI = (sessionId: number) =>
   apiRequest<import("./types").StraddleSessionOI>(`/api/market/straddle-pulse/sessions/${sessionId}/oi`);
+
+// --- Trading Control Center execution framework (Phase 11/12) --------
+// trading/api/execution_routes.py -- the broker-agnostic execution
+// framework's own API, distinct from the legacy algos/positions/pnl/logs
+// endpoints above. See api/types.ts's matching comment.
+export const listExecutionStrategies = () =>
+  apiRequest<import("./types").ExecutionStrategy[]>("/api/strategies");
+
+export const getExecutionStrategy = (strategyId: string) =>
+  apiRequest<import("./types").ExecutionStrategy>(`/api/strategies/${encodeURIComponent(strategyId)}`);
+
+export const startExecutionStrategy = (strategyId: string) =>
+  apiRequest<import("./types").ExecutionStrategy>(`/api/strategies/${encodeURIComponent(strategyId)}/start`, {
+    method: "POST",
+  });
+
+export const stopExecutionStrategy = (strategyId: string) =>
+  apiRequest<import("./types").ExecutionStrategy>(`/api/strategies/${encodeURIComponent(strategyId)}/stop`, {
+    method: "POST",
+  });
+
+export const listExecutionAccounts = () =>
+  apiRequest<import("./types").ExecutionAccount[]>("/api/accounts");
+
+export const listExecutionBrokers = () =>
+  apiRequest<import("./types").ExecutionBroker[]>("/api/brokers");
+
+export const listExecutionAssignments = () =>
+  apiRequest<import("./types").ExecutionAssignment[]>("/api/assignments");
+
+export const createExecutionAssignment = (body: import("./types").ExecutionAssignmentCreate) =>
+  apiRequest<import("./types").ExecutionAssignment>("/api/assignments", { method: "POST", body });
+
+export const listStrategyLifecycle = () =>
+  apiRequest<import("./types").StrategyLifecycle[]>("/api/strategy-lifecycle");
+
+export const getStrategyLifecycle = (strategyId: string) =>
+  apiRequest<import("./types").StrategyLifecycle>(`/api/strategy-lifecycle/${encodeURIComponent(strategyId)}`);
+
+export const sendStrategyCommand = (strategyId: string, body: import("./types").StrategyCommandRequest) =>
+  apiRequest<import("./types").StrategyCommandResult>(
+    `/api/strategy-lifecycle/${encodeURIComponent(strategyId)}/command`,
+    { method: "POST", body },
+  );
+
+export const listWorkers = () => apiRequest<import("./types").Worker[]>("/api/workers");
+
+export const listExecutionModes = () =>
+  apiRequest<import("./types").ExecutionModeOption[]>("/api/execution-modes");
+
+export const getRiskStatus = () => apiRequest<import("./types").RiskStatus>("/api/risk/status");
+
+export const getRiskLimits = () => apiRequest<import("./types").RiskLimits>("/api/risk/limits");
+
+export const setKillSwitch = (engaged: boolean, reason?: string) =>
+  apiRequest<import("./types").KillSwitchState>("/api/risk/kill-switch", {
+    method: "POST",
+    body: { engaged, reason: reason ?? "" },
+  });
+
+// --- Phase 16.10: central portfolio risk (read-only) -------------------
+export const getPortfolioRisk = () =>
+  apiRequest<import("./types").PortfolioRisk>("/api/risk/portfolio");
+
+export const listAccountRisk = () =>
+  apiRequest<import("./types").AccountRisk[]>("/api/risk/accounts");
+
+export const listStrategyRisk = () =>
+  apiRequest<import("./types").StrategyRisk[]>("/api/risk/strategies");
+
+// --- Phase 16.11: TCC operations console (read-only) ---------------------
+export const getOperationsSummary = () =>
+  apiRequest<import("./types").OperationsSummary>("/api/operations/summary");
+
+export const listOperationsAlerts = (q: { active_only?: boolean; severity?: string; category?: string } = {}) =>
+  apiRequest<import("./types").OperationalAlert[]>("/api/operations/alerts", { query: { ...q } });
+
+export const listOperationsAudit = (q: { limit?: number; strategy_id?: string; event_type?: string } = {}) =>
+  apiRequest<import("./types").ExecutionAuditRecord[]>("/api/operations/audit", { query: { ...q } });
+
+export const listOperationsIntents = (limit = 50) =>
+  apiRequest<import("./types").ExecutionAuditRecord[]>("/api/operations/intents", { query: { limit } });
+
+export const listOperationsExecutions = (limit = 50) =>
+  apiRequest<import("./types").ExecutionAuditRecord[]>("/api/operations/executions", { query: { limit } });
+
+export const listExecutionOrders = () => apiRequest<import("./types").ExecutionOrder[]>("/api/execution/orders");
+
+export const listExecutionPositions = () =>
+  apiRequest<import("./types").ExecutionPosition[]>("/api/execution/positions");
+
+export const getExecutionPnl = () => apiRequest<import("./types").ExecutionPnl>("/api/execution/pnl");
+
+export const getExecutionSystemStatus = () =>
+  apiRequest<import("./types").ExecutionSystemStatus>("/api/system/status");

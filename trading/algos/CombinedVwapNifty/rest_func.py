@@ -4,6 +4,14 @@ import threading
 import pandas as pd
 import config, make_data, token_file
 
+# Phase 15D.9 (Blocker 1 remediation): the ONE control-center kill switch
+# now reaches this legacy, pre-Phase-15D order path too -- see
+# trading/common/legacy_execution_guard.py's own docstring for exactly
+# what this does and does not close.
+from trading.common.legacy_execution_guard import assert_live_mutation_allowed
+
+_STRATEGY_ID = "CombinedVwapNifty"
+
 
 def _retry_call(fn, retries=5, base_delay=2, label=''):
     """
@@ -123,6 +131,7 @@ def place_market_order(symbol, token, qty, ordertype):
     }
 
     def _call():
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         order_id = config.objconn.placeOrder(orderparams)
         if order_id is None:
             raise ValueError('Market order response missing order id')
@@ -153,6 +162,7 @@ def place_limit_order(symbol, token, qty, ordertype, price):
     }
 
     def _call():
+        assert_live_mutation_allowed(strategy_id=_STRATEGY_ID)
         order_id = config.objconn.placeOrder(orderparams)
         if order_id is None:
             raise ValueError('Limit order response missing order id')
