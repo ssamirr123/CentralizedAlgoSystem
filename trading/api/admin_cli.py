@@ -16,11 +16,19 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
+from datetime import datetime, timezone
 
+from trading.api.security import audit
 from trading.api.security.passwords import WeakPasswordError, hash_password, validate_password_strength
 from trading.api.security.permissions import VALID_ROLES
 from trading.database import models
 from trading.database.connection import SessionLocal, init_db
+
+# Actor recorded on audit events raised by this CLI -- distinguishes an
+# offline, host-access-gated administrative action from any HTTP-request
+# actor (a "user:<id>" for an authenticated dashboard operator, or
+# "anonymous"/"service:control-api-key" for the other API-level actors).
+CLI_ACTOR = "cli:admin_cli"
 
 
 def _prompt_password() -> str:
@@ -102,21 +110,59 @@ def cmd_set_role(args: argparse.Namespace) -> int:
 
 
 def cmd_reset_password(args: argparse.Namespace) -> int:
+    """Administrative password recovery for an EXISTING user only -- never
+    creates a user, never changes username/role/permissions/id. Reuses the
+    same hashing (hash_password) and strength policy
+    (validate_password_strength) as the normal authenticated
+    POST /api/auth/change-password path; see trading/api/auth_routes.py.
+    Requires interactive confirmation and hidden password input -- refuses
+    --password on argv by design (no such flag exists)."""
     db = SessionLocal()
     try:
         u = db.query(models.User).filter(models.User.username == args.username).one_or_none()
         if u is None:
             print(f"no such user: {args.username}", file=sys.stderr)
             return 1
-        from datetime import datetime, timezone
 
-        u.password_hash = hash_password(_prompt_password())
-        u.must_change_password = not args.no_force_change
-        db.query(models.AuthSession).filter(
-            models.AuthSession.user_id == u.id, models.AuthSession.revoked_at.is_(None)
-        ).update({models.AuthSession.revoked_at: datetime.now(timezone.utc)})
-        db.commit()
-        print(f"password reset for {args.username}; sessions revoked")
+        print("\nAdministrative password recovery\n")
+        print(f"Target user: {u.username}")
+        print("User exists: YES")
+        print(f"Roles: {u.role}")
+        print("\nThis will replace the password credential for this existing user.")
+        if input("Type RESET to continue: ").strip() != "RESET":
+            print("aborted -- confirmation not given", file=sys.stderr)
+            return 1
+
+        new_hash = hash_password(_prompt_password())
+
+        # Transactional: password + must_change_password + session
+        # revocation are staged on the same session and committed together
+        # (or none at all, on any exception below -- db.rollback() in the
+        # except clause). Preserves id/username/role/extra_permissions/
+        # is_active untouched.
+        try:
+            u.password_hash = new_hash
+            u.must_change_password = not args.no_force_change
+            revoked_count = (
+                db.query(models.AuthSession)
+                .filter(models.AuthSession.user_id == u.id, models.AuthSession.revoked_at.is_(None))
+                .update({models.AuthSession.revoked_at: datetime.now(timezone.utc)})
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        audit.record(
+            db, actor=CLI_ACTOR, action=audit.USER_PASSWORD_RESET,
+            actor_label="offline administrative CLI", target=f"user:{u.id}",
+            detail={
+                "target_user_id": u.id, "target_username": u.username,
+                "mechanism": "offline_cli", "sessions_revoked": revoked_count,
+            },
+        )
+        print(f"password reset for {args.username}; {revoked_count} session(s) revoked")
+        print(f"roles unchanged: {u.role}")
         return 0
     finally:
         db.close()
