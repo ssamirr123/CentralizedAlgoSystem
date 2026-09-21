@@ -39,11 +39,18 @@ services:
     environment:
       APP_ENV: production
     # breeze-connect does `os.makedirs("logs")` relative to CWD (/app) at
-    # import time; the image runs as non-root `appuser` and /app is not
-    # writable, so the market-data provider import blew up with
-    # PermissionError. Give it a writable, throwaway /app/logs.
+    # import time, then immediately opens a FileHandler on
+    # logs/apiLogs.log; the image runs as non-root `appuser` (uid/gid
+    # 10001) and /app is not writable, so the market-data provider import
+    # blew up with PermissionError. Give it a writable, throwaway
+    # /app/logs -- Phase 17.2-MD: a bare `tmpfs: - /app/logs` mounts the
+    # tmpfs as root:root 0755 (root's own umask, not tied to the
+    # container's runtime user), which is NOT writable by appuser either
+    # -- reproduced live in production (PermissionError: [Errno 13]
+    # Permission denied: '/app/logs/apiLogs.log'). Pin uid/gid explicitly
+    # so the mount is actually writable by the user the container runs as.
     tmpfs:
-      - /app/logs
+      - "/app/logs:uid=10001,gid=10001,mode=0770"
     # Phase 15D.10-R: the safety-critical SQLite stores (kill switch,
     # audit, and any future idempotency/reconciliation/live-authorization
     # store) must survive container recreation, not just a plain restart
