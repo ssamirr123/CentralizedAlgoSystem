@@ -345,15 +345,36 @@ class MarketDataService:
 
     # --- option universe -------------------------------------
     def _persist_contracts(self) -> None:
+        """One-time sweep at startup: seed self._contract_ids from every
+        instrument the master currently knows about. Instruments that enter
+        the live subscription window LATER in the day (as the underlying
+        moves and _resubscribe_option_universe() below picks up new
+        strikes) are NOT covered by this sweep -- see _ensure_contract_ids,
+        which _resubscribe_option_universe calls for exactly those."""
+        self._ensure_contract_ids(self.master._by_symbol.values())  # noqa: SLF001 - internal, read-only
+
+    def _ensure_contract_ids(self, insts) -> None:
+        """Get-or-create an option_contracts.id for each instrument and
+        record it in self._contract_ids, the map _on_tick() looks up on
+        every tick to decide whether to feed the candle aggregator. A
+        symbol missing from this map has its ticks silently dropped from
+        candle persistence forever (the live quote cache still updates via
+        self.cache.put() regardless) -- so anything that can become part of
+        the subscribed universe MUST run through here, not just the
+        one-time startup sweep in _persist_contracts()."""
         from trading.database import models
 
-        insts = self.master._by_symbol.values()  # noqa: SLF001 - internal, read-only
+        insts = list(insts)
+        if not insts:
+            return
         db = self._session_factory()
         try:
             existing = {c.symbol: c.id for c in db.query(models.OptionContract).all()}
             for inst in insts:
                 if inst.internal_symbol in existing:
                     self._contract_ids[inst.internal_symbol] = existing[inst.internal_symbol]
+                    continue
+                if inst.internal_symbol in self._contract_ids:
                     continue
                 row = models.OptionContract(
                     underlying=inst.underlying, exchange=inst.exchange.value, provider=inst.provider or "icici_breeze",
@@ -400,6 +421,12 @@ class MarketDataService:
             add = [i for i in wanted if i.internal_symbol not in current]
             drop_syms = current - wanted_syms
             if add:
+                # Newly-relevant instruments (e.g. a fresh ATM window as
+                # spot moves) must get a contract_id BEFORE their ticks
+                # start arriving, or _on_tick() silently drops every one of
+                # them from candle persistence for the rest of the process's
+                # life (see _ensure_contract_ids's own docstring).
+                self._ensure_contract_ids(add)
                 try:
                     self._provider.subscribe(add, self._on_tick, resolver=self._resolve_tick)
                 except Exception:  # noqa: BLE001
