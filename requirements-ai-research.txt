@@ -1,0 +1,23 @@
+# OPTIONAL -- AI Research Engine (TradingAgents integration). NOT installed
+# by default and NOT referenced by the main Dockerfile/requirements.txt.
+# Only needed in an environment where AI_RESEARCH_ENABLED=true is actually
+# used. Installing this has zero effect on the existing trading backend
+# when the flag is left at its default (false) -- see
+# trading/ai_research/trading_agents_adapter.py's lazy-import discipline.
+#
+# Install from GitHub, pinned to a tag -- NEVER `pip install tradingagents`.
+# The PyPI package of that exact name is a DIFFERENT, unrelated project
+# (depends on backtrader/chainlit/redis; confirmed by inspecting its
+# actual dependency list during Phase 1 validation). The real project
+# (TauricResearch/TradingAgents) is not published to PyPI at all -- its
+# own README installs it via `git clone` + `pip install .`.
+tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@v0.5.0
+
+# TradingAgents' own floor is pandas>=2.3.0 with NO upper bound, which
+# would otherwise let pip resolve pandas 3.x (a major version with real
+# breaking changes) for the WHOLE backend if this file is ever installed
+# into the same environment as requirements.txt (pandas>=2.2.2, also
+# unbounded). Existing strategy/market-data code has only ever been
+# exercised against pandas 2.x. Pin explicitly so installing AI Research
+# alongside the existing app can never silently upgrade pandas to 3.x.
+pandas>=2.3.0,<3.0.0

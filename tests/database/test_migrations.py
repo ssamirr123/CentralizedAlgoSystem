@@ -49,6 +49,9 @@ def test_baseline_matches_create_all(tmp_path):
 
     from trading.database.connection import Base
     from trading.database import models  # noqa: F401
+    from trading.ai_research import models as ai_research_models  # noqa: F401
+    from trading.ai_research.backtest import models as ai_research_backtest_models  # noqa: F401
+    from trading.ai_options_research import models as ai_options_research_models  # noqa: F401
     Base.metadata.create_all(bind=create_engine(ca_url))
 
     r = _alembic(al_url, "upgrade", "head")
@@ -68,6 +71,8 @@ def test_stamp_head_on_create_all_db_is_clean(tmp_path):
     url = f"sqlite:///{tmp_path / 'stamp.db'}"
     from trading.database.connection import Base
     from trading.database import models  # noqa: F401
+    from trading.ai_research import models as ai_research_models  # noqa: F401
+    from trading.ai_research.backtest import models as ai_research_backtest_models  # noqa: F401
     Base.metadata.create_all(bind=create_engine(url))
 
     assert _alembic(url, "stamp", "head").returncode == 0

@@ -33,7 +33,7 @@ from trading.market_data.providers.base import (
     TickCallback,
 )
 from trading.market_data.schemas import Candle, IndexQuote, OptionChain, OptionChainRow, OptionQuote
-from trading.market_data.symbols import Exchange, Instrument, option_instrument
+from trading.market_data.symbols import Exchange, Instrument, InstrumentType, option_instrument
 
 logger = logging.getLogger("trading.market_data.icici_breeze")
 
@@ -41,12 +41,32 @@ logger = logging.getLogger("trading.market_data.icici_breeze")
 # NOTE: verify these against the live Breeze account -- Bank Nifty in
 # particular has historically been "CNXBAN". SENSEX requires BSE data
 # entitlement on the account.
+#
+# Phase 8: "FINNIFTY": "NIFFIN" verified live (2026-09-22) by downloading
+# ICICI's own published security master
+# (https://directlink.icicidirect.com/NewSecurityMaster/SecurityMaster.zip)
+# and reading the real FUTIDX row in FONSEScripMaster.txt --
+# ShortName="NIFFIN", InstrumentName="NIFTY FINANCIAL SERVICES INDEX". The
+# same download independently re-confirmed "NIFTY" and "CNXBAN" for NIFTY/
+# BANKNIFTY against the live FUTIDX ShortName column.
 _INDEX_CODES: dict[str, tuple[str, str]] = {
     "NIFTY": ("NIFTY", "NSE"),
     "BANKNIFTY": ("CNXBAN", "NSE"),
+    "FINNIFTY": ("NIFFIN", "NSE"),
     "INDIA_VIX": ("INDVIX", "NSE"),
     "SENSEX": ("BSESEN", "BSE"),
 }
+
+# Phase 8 Section 10 -- the ONLY interval values Breeze's historical-data
+# API documents, verified live 2026-09-22 against
+# https://api.icicidirect.com/breezeapi/documents/index.html
+# ("interval (String): '1minute','5minute','30minute','1day' (documented
+# values only)"). 15minute/1hour are NOT documented/supported by the
+# provider -- never claimed here. Local resampling from 5minute is not
+# implemented in this phase (would need to be clearly labeled
+# locally-resampled vs. provider-native per Section 10's own instruction;
+# out of scope until a later phase actually needs it).
+BACKTEST_SUPPORTED_INTERVALS: frozenset[str] = frozenset({"1minute", "5minute", "30minute", "1day"})
 
 _RIGHT_TO_OT = {"call": "CE", "ce": "CE", "put": "PE", "pe": "PE"}
 _OT_TO_RIGHT = {"CE": "call", "PE": "put"}
@@ -109,6 +129,7 @@ class ICICIBreezeProvider(MarketDataProvider):
         session_token: str,
         client_factory: Callable[[str], Any] | None = None,
         master_loader: Callable[[], list[dict]] | None = None,
+        equity_master_loader: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         """``client_factory(api_key) -> <breeze client>`` is a test seam. In
         production it is None and the real ``BreezeConnect`` is imported
@@ -116,12 +137,19 @@ class ICICIBreezeProvider(MarketDataProvider):
 
         ``master_loader() -> list[dict]`` yields normalized instrument-master
         rows (see ``_MASTER_ROW_KEYS``); None uses the default ICICI
-        security-master download."""
+        security-master download.
+
+        ``equity_master_loader() -> {NSE symbol: Breeze stock_code}`` (Phase
+        8) -- e.g. {"RELIANCE": "RELIND", "TCS": "TCS"}; None uses the
+        default ICICI cash-equity security-master download
+        (NSEScripMaster.txt from the same security-master zip)."""
         self._api_key = api_key or ""
         self._api_secret = api_secret or ""
         self._session_token = session_token or ""
         self._client_factory = client_factory
         self._master_loader = master_loader
+        self._equity_master_loader = equity_master_loader
+        self._equity_master_cache: dict[str, str] | None = None
         self._client: Any = None
         self._connected = False
         self._ws_connected = False
@@ -320,6 +348,9 @@ class ICICIBreezeProvider(MarketDataProvider):
         if instrument.is_index:
             stock_code, exch = _INDEX_CODES[instrument.internal_symbol]
             kwargs.update(stock_code=stock_code, exchange_code=exch, product_type="cash")
+        elif instrument.instrument_type == InstrumentType.EQUITY:
+            stock_code = self._resolve_equity_stock_code(instrument.internal_symbol)
+            kwargs.update(stock_code=stock_code, exchange_code="NSE", product_type="cash")
         elif instrument.is_option:
             kwargs.update(
                 stock_code=(instrument.underlying or "").upper(), exchange_code="NFO",
@@ -354,6 +385,25 @@ class ICICIBreezeProvider(MarketDataProvider):
                 volume=_i(it.get("volume")), oi=_i(it.get("open_interest")) if it.get("open_interest") not in (None, "") else _i(it.get("oi")),
             ))
         return out
+
+    # --- equity stock-code resolution (Phase 8) ---------------------
+    def _resolve_equity_stock_code(self, nse_symbol: str) -> str:
+        """NSE trading symbol (e.g. "RELIANCE") -> Breeze stock_code (e.g.
+        "RELIND"). Verified live 2026-09-22 against ICICI's own published
+        cash-equity security master (NSEScripMaster.txt): RELIANCE ->
+        RELIND, TCS -> TCS -- NOT the same value in general, confirming
+        Breeze equity codes cannot be assumed to equal the NSE symbol."""
+        if self._equity_master_cache is None:
+            try:
+                self._equity_master_cache = (self._equity_master_loader or _download_icici_equity_master)()
+            except Exception as exc:  # noqa: BLE001
+                raise ProviderConnectionError(
+                    f"Could not load the ICICI equity security master ({type(exc).__name__})"
+                ) from exc
+        stock_code = self._equity_master_cache.get(nse_symbol.strip().upper())
+        if stock_code is None:
+            raise ProviderDataError(f"No Breeze equity mapping found for NSE symbol {nse_symbol!r}")
+        return stock_code
 
     # --- instrument master (Phase 5) -----------------------------
     def get_option_instruments(self, underlying: str) -> list[Instrument]:
@@ -625,6 +675,45 @@ def _download_icici_security_master() -> list[dict]:  # pragma: no cover - netwo
 # --------------------------------------------------------------------------
 # module-level helpers
 # --------------------------------------------------------------------------
+def _download_icici_equity_master() -> dict[str, str]:  # pragma: no cover - network
+    """Download + unzip ICICI's published security master and return
+    {NSE trading symbol -> Breeze equity stock_code} from the cash-equity
+    segment (NSEScripMaster.txt). Isolated + injectable (equity_master_loader)
+    so the unit suite never touches the network, mirroring
+    _download_icici_security_master's own pattern for options.
+
+    Column layout confirmed live 2026-09-22 by downloading the real file:
+    ``"Token","ShortName","Series",...,"ExchangeCode"`` -- ShortName is the
+    Breeze stock_code; ExchangeCode (the last column) is the real NSE
+    trading symbol. Example real rows: RELIANCE -> RELIND, TCS -> TCS.
+    """
+    import csv
+    import io
+    import urllib.request
+    import zipfile
+
+    req = urllib.request.Request(_ICICI_SECURITY_MASTER_URL, headers={"User-Agent": "cas-market-data/1"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        blob = resp.read()
+
+    out: dict[str, str] = {}
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        name = next((n for n in zf.namelist() if n.upper() == "NSESCRIPMASTER.TXT"), None)
+        if name is None:
+            return out
+        data = zf.read(name).decode("utf-8", errors="replace").splitlines()
+        if not data:
+            return out
+        for row in csv.reader(data):
+            if len(row) < 18 or row[1].strip('"') == "ShortName":
+                continue
+            short_name = row[1].strip('"').strip()
+            exchange_code = row[-1].strip('"').strip()
+            if short_name and exchange_code:
+                out[exchange_code.upper()] = short_name
+    return out
+
+
 def _index_for_underlying(underlying: str):
     from trading.market_data.symbols import index_instrument
 

@@ -49,6 +49,11 @@ trading/data/*.state.json
 trading/data/*.stop_requested
 trading/logs/*.log
 
+# AI Research Engine: TradingAgents cache/results/decision-memory, all
+# redirected here (never its own ~/.tradingagents default) so nothing it
+# writes escapes a single, cleanable, git-ignored location.
+trading/data/ai_research/
+
 # Editor/OS noise
 .DS_Store
 Thumbs.db

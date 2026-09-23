@@ -102,7 +102,9 @@ def test_health_shape(client, viewer_auth, market):
     body = client.get("/api/market/health", headers=viewer_auth).json()
     assert body["feed"] == "RUNNING"
     assert body["timezone"] == "Asia/Kolkata"
-    assert set(body["symbols"]) == {"NIFTY", "BANKNIFTY", "INDIA_VIX", "SENSEX"}
+    # Phase 8 added FINNIFTY to the index registry (real Breeze code
+    # "NIFFIN", verified live against ICICI's own security master).
+    assert set(body["symbols"]) == {"NIFTY", "BANKNIFTY", "FINNIFTY", "INDIA_VIX", "SENSEX"}
     assert body["option_chain"]["atm_strike"] == 25000
     # never leaks a token
     assert "token" not in str(body).lower() or "session_token" not in str(body)

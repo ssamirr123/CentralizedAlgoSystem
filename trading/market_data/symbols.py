@@ -70,13 +70,19 @@ class Instrument:
 
 
 # --- Index registry ---------------------------------------------------------
-# Provider-agnostic. The four indices Stage 19 must collect. Exchange is a
-# fact about the index (SENSEX is BSE); provider codes live in the provider.
-INDEX_SYMBOLS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "INDIA_VIX", "SENSEX")
+# Provider-agnostic. Exchange is a fact about the index (SENSEX is BSE);
+# provider codes live in the provider.
+#
+# Phase 8: FINNIFTY added. Breeze short code "NIFFIN" verified live against
+# ICICI's own published security master (FONSEScripMaster.txt, FUTIDX row,
+# InstrumentName="NIFTY FINANCIAL SERVICES INDEX") -- see
+# providers/icici_breeze.py's _INDEX_CODES docstring for the same citation.
+INDEX_SYMBOLS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "FINNIFTY", "INDIA_VIX", "SENSEX")
 
 INDEX_INSTRUMENTS: dict[str, Instrument] = {
     "NIFTY": Instrument("NIFTY", Exchange.NSE, InstrumentType.INDEX),
     "BANKNIFTY": Instrument("BANKNIFTY", Exchange.NSE, InstrumentType.INDEX),
+    "FINNIFTY": Instrument("FINNIFTY", Exchange.NSE, InstrumentType.INDEX),
     "INDIA_VIX": Instrument("INDIA_VIX", Exchange.NSE, InstrumentType.INDEX),
     "SENSEX": Instrument("SENSEX", Exchange.BSE, InstrumentType.INDEX),
 }
@@ -89,6 +95,10 @@ _INDEX_ALIASES: dict[str, str] = {
     "BANKNIFTY": "BANKNIFTY",
     "NIFTYBANK": "BANKNIFTY",
     "NIFTY_BANK": "BANKNIFTY",
+    "FINNIFTY": "FINNIFTY",
+    "NIFTY_FIN_SERVICE": "FINNIFTY",
+    "NIFTYFINSERVICE": "FINNIFTY",
+    "NIFTY_FINANCIAL_SERVICES": "FINNIFTY",
     "INDIA_VIX": "INDIA_VIX",
     "INDIAVIX": "INDIA_VIX",
     "VIX": "INDIA_VIX",
@@ -106,8 +116,28 @@ def normalize_index_symbol(symbol: str) -> str:
 
 
 def index_instrument(symbol: str) -> Instrument:
-    """Look up one of the four supported index instruments (alias-tolerant)."""
+    """Look up one of the supported index instruments (alias-tolerant)."""
     return INDEX_INSTRUMENTS[normalize_index_symbol(symbol)]
+
+
+# --- Equity ---------------------------------------------------------------
+# Phase 8: equities are resolved GENERICALLY (any syntactically valid NSE
+# symbol), matching Section 27's own "prefer a maintainable instrument
+# source... do not manually duplicate large static lists" instruction --
+# the real ExchangeCode -> Breeze ShortName lookup happens once, inside the
+# provider, via ICICI's own published cash-equity security master
+# (NSEScripMaster.txt), not a hardcoded table here.
+_NSE_EQUITY_SYMBOL_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&-")
+
+
+def equity_instrument(symbol: str) -> Instrument:
+    """A provider-agnostic NSE cash-equity Instrument. `internal_symbol` is
+    the real NSE trading symbol (e.g. "RELIANCE", "TCS") -- NOT a Breeze
+    short code; the provider resolves that internally (rule 20)."""
+    sym = symbol.strip().upper()
+    if not sym or len(sym) > 32 or not set(sym) <= _NSE_EQUITY_SYMBOL_CHARS:
+        raise ValueError(f"{symbol!r} is not a valid NSE equity symbol")
+    return Instrument(sym, Exchange.NSE, InstrumentType.EQUITY)
 
 
 # --- Option symbols -------------------------------------------------------

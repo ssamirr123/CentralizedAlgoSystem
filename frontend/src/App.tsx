@@ -7,6 +7,9 @@ import { ChangePasswordPage } from "@/pages/ChangePasswordPage";
 import { ServerDetailPage } from "@/pages/ServerDetailPage";
 import { AlgoDetailPage } from "@/pages/AlgoDetailPage";
 import { StraddlePulsePage } from "@/pages/StraddlePulsePage";
+import { AiResearchDetailPage } from "@/pages/AiResearchDetailPage";
+import { AiResearchBacktestDetailPage } from "@/pages/AiResearchBacktestDetailPage";
+import { AiOptionsResearchDetailPage } from "@/pages/AiOptionsResearchDetailPage";
 import { NAV_ROUTES } from "@/routes";
 import type { Permission } from "@/lib/config";
 
@@ -73,6 +76,30 @@ export default function App() {
                   element={
                     <PermissionRoute permission="VIEW">
                       <StraddlePulsePage />
+                    </PermissionRoute>
+                  }
+                />
+                <Route
+                  path="ai-research/backtests/:backtestId"
+                  element={
+                    <PermissionRoute permission="VIEW">
+                      <AiResearchBacktestDetailPage />
+                    </PermissionRoute>
+                  }
+                />
+                <Route
+                  path="ai-research/:researchId"
+                  element={
+                    <PermissionRoute permission="VIEW">
+                      <AiResearchDetailPage />
+                    </PermissionRoute>
+                  }
+                />
+                <Route
+                  path="ai-options-research/:researchId"
+                  element={
+                    <PermissionRoute permission="VIEW">
+                      <AiOptionsResearchDetailPage />
                     </PermissionRoute>
                   }
                 />

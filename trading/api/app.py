@@ -25,10 +25,16 @@ from trading.common.logger import configure_logging
 
 configure_logging()
 
+from trading.ai_research.backtest.router import router as ai_research_backtest_router  # noqa: E402
+from trading.ai_research.market.router import router as ai_research_market_router  # noqa: E402
+from trading.ai_research.market_data.router import router as ai_research_market_data_router  # noqa: E402
+from trading.ai_research.router import router as ai_research_router  # noqa: E402
+from trading.api.ai_options_research_routes import router as ai_options_research_router  # noqa: E402
 from trading.api.admin_routes import router as admin_router  # noqa: E402
 from trading.api.auth_routes import router as auth_router  # noqa: E402
 from trading.api.health import router as health_router  # noqa: E402
 from trading.api.market_routes import router as market_router  # noqa: E402
+from trading.api.options_routes import router as options_router  # noqa: E402
 from trading.api.realtime.ws import router as realtime_router  # noqa: E402
 from trading.api.routes import router as control_center_router  # noqa: E402
 from trading.api.straddle_pulse_routes import router as straddle_pulse_router  # noqa: E402
@@ -57,6 +63,28 @@ async def lifespan(_: FastAPI):
         bootstrap_admin()
     except Exception:  # noqa: BLE001 -- never block startup on this
         logger.exception("admin bootstrap failed")
+
+    # Phase 5 (AI Research): any run still QUEUED/RUNNING at startup
+    # belongs to a process that no longer exists -- mark it FAILED
+    # (error_category="INTERRUPTED") rather than silently claim it
+    # completed, or leave it stuck forever. Never blocks API startup.
+    try:
+        from trading.ai_research.service import recover_interrupted_jobs
+
+        recover_interrupted_jobs()
+    except Exception:  # noqa: BLE001
+        logger.exception("ai_research interrupted-job recovery failed")
+
+    # Phase 6 (AI Research Backtesting): same recovery discipline as above,
+    # for backtest jobs -- a stale QUEUED/RUNNING backtest (and any of its
+    # still-RUNNING cells) is marked FAILED honestly; already-COMPLETED
+    # cells are untouched so a later /resume only repeats real work.
+    try:
+        from trading.ai_research.backtest.service import recover_interrupted_backtests
+
+        recover_interrupted_backtests()
+    except Exception:  # noqa: BLE001
+        logger.exception("ai_research backtest interrupted-job recovery failed")
 
     watcher_task = None
     if not _watcher_disabled():
@@ -145,8 +173,24 @@ def create_app() -> FastAPI:
     app.include_router(admin_router, prefix="/api")  # /api/admin/*
     app.include_router(control_center_router, prefix="/api")
     app.include_router(market_router, prefix="/api")  # /api/market/* (Stage 19 market data)
+    app.include_router(options_router, prefix="/api")  # /api/options/* (Phase 9 options intelligence)
     app.include_router(straddle_pulse_router, prefix="/api")  # /api/market/straddle-pulse/*
     app.include_router(health_router, prefix="/api")  # GET /api/health, unauthenticated
+    # /api/ai-research/* -- always registered (route existence has no cost;
+    # every handler checks AI_RESEARCH_ENABLED first and returns
+    # ResearchDisabledOut, not an error, when it's off -- the default).
+    # tradingagents is never imported here or at any module level in this
+    # package, only lazily inside run_research() when actually enabled.
+    # IMPORTANT: backtests/market routers MUST be included BEFORE
+    # ai_research_router -- that router's GET /ai-research/{research_id}
+    # is a catch-all path param that would otherwise match
+    # "/ai-research/backtests" or "/ai-research/markets" first (FastAPI
+    # matches across included routers in registration order).
+    app.include_router(ai_research_backtest_router, prefix="/api")
+    app.include_router(ai_research_market_router, prefix="/api")
+    app.include_router(ai_research_market_data_router, prefix="/api")
+    app.include_router(ai_research_router, prefix="/api")
+    app.include_router(ai_options_research_router, prefix="/api")
     if load_settings().realtime_enabled:
         app.include_router(realtime_router, prefix="/api")  # WS /api/ws (Stage 19)
     return app

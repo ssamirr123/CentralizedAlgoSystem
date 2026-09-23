@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 from sqlalchemy.exc import OperationalError
 
-_KEYS = {"status", "service", "timestamp", "database"}
+# Phase 11 (Section 31): ai_subsystem/market_data_subsystem added --
+# purely informational component status, never affects the 200/503
+# readiness decision (that's the database check alone, unchanged below).
+_KEYS = {"status", "service", "timestamp", "database", "ai_subsystem", "market_data_subsystem"}
 
 
 def test_health_connected(client):

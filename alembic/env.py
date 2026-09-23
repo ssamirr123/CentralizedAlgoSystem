@@ -2,9 +2,12 @@
 Alembic migration environment.
 
 Single source of truth for the schema: trading.database.connection.Base.
-Every model in trading.database.models is imported below so the full
-metadata (all 11 tables) is populated before autogenerate compares it
-against the database.
+Every model in trading.database.models AND trading.ai_research.models is
+imported below so the full metadata is populated before autogenerate
+compares it against the database (both register on the same canonical
+Base -- see trading/ai_research/models.py's module docstring for why AI
+Research's tables live on it too, kept separate from trading tables only
+by naming convention, not a second Base).
 
 The engine and URL come from trading.database.connection -- the same
 engine the application uses (NullPool, SQLite FK pragma via an on-connect
@@ -28,6 +31,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 # Canonical engine + Base, and every model registered on that Base.
 from trading.database.connection import DATABASE_URL, Base, engine  # noqa: E402
 from trading.database import models  # noqa: E402,F401  (registers all tables)
+from trading.ai_research import models as ai_research_models  # noqa: E402,F401
+from trading.ai_research.backtest import models as ai_research_backtest_models  # noqa: E402,F401
+from trading.ai_options_research import models as ai_options_research_models  # noqa: E402,F401
 
 config = context.config
 
