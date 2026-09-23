@@ -11,7 +11,17 @@
 # actual dependency list during Phase 1 validation). The real project
 # (TauricResearch/TradingAgents) is not published to PyPI at all -- its
 # own README installs it via `git clone` + `pip install .`.
-tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@v0.5.0
+#
+# Uses GitHub's tag TARBALL URL (not a `git+https://` URL) deliberately:
+# a `git+https://` install requires the `git` BINARY inside the build
+# environment, which in turn requires installing it via the base image's
+# OS package manager (apt-get) -- an extra, flaky, purely-incidental
+# network dependency during a Docker build (this exact failure mode was
+# hit during the Phase-11-approved image's first production deployment:
+# apt-get couldn't reach deb.debian.org, a transient Docker-build-network
+# issue unrelated to this dependency itself). pip installs a plain https
+# tarball directly, no git required.
+tradingagents @ https://github.com/TauricResearch/TradingAgents/archive/refs/tags/v0.5.0.tar.gz
 
 # TradingAgents' own floor is pandas>=2.3.0 with NO upper bound, which
 # would otherwise let pip resolve pandas 3.x (a major version with real

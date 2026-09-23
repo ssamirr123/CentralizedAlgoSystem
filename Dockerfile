@@ -15,12 +15,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # psycopg2-binary and every other runtime dep ship as wheels, so no
-# system build toolchain is needed. `git` is needed only to install the
-# pinned TradingAgents package below (a `git+https://...@v0.5.0` URL --
-# see requirements-ai-research.txt's own comment on why it is NOT
-# installed from PyPI). Install deps first for layer caching.
-RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
+# system build toolchain is needed. TradingAgents installs from a plain
+# https tarball URL (see requirements-ai-research.txt), so no `git`
+# binary/apt-get step is needed either. Install deps first for layer caching.
 COPY requirements.txt requirements-ai-research.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir -r requirements-ai-research.txt
