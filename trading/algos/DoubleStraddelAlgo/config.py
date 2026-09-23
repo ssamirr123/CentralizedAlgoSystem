@@ -17,7 +17,7 @@ def _env_flag(*names, default="false"):
 # ============================ RUN MODE ============================
 # Set True to run without placing real orders (paper trading).
 # Enable via env var BOT_DRY_RUN=true (BOT_DY_RUN kept as a typo-tolerant alias).
-DRY_RUN = _env_flag("BOT_DRY_RUN", "BOT_DY_RUN", default="true")
+DRY_RUN = _env_flag("BOT_DRY_RUN", "BOT_DY_RUN", default="false")
 
 # ============================ CREDENTIALS ============================
 #Samir
