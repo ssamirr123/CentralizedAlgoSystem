@@ -26,7 +26,18 @@ RUN pip install --no-cache-dir -r requirements.txt \
 RUN useradd --create-home --uid 10001 appuser
 
 COPY --chown=appuser:appuser . .
-RUN chmod +x docker/entrypoint.sh
+RUN chmod +x docker/entrypoint.sh \
+    && chown appuser:appuser /app
+
+# `/app` itself (created by WORKDIR, before `USER appuser`/the chown'd
+# COPY above) was still root-owned even though its contents were
+# chowned -- appuser could read/traverse it but not create a NEW
+# subdirectory in it. This broke at runtime the moment AI Research
+# actually executed: TradingAgents' data-vendor code creates a relative
+# `cache/` directory on first use and got `PermissionError: [Errno 13]
+# Permission denied: 'cache'` (found during the Phase 11 production
+# deployment's own controlled AI Research smoke test). The explicit
+# chown above fixes the directory itself, not just its contents.
 
 USER appuser
 
