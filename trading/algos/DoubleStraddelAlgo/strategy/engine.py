@@ -79,6 +79,7 @@ def run():
                 print('[ENGINE] 15:25 final exit - flatten shorts + hedge, cancel all')
                 straddle.time_exit_straddle(state, 'afternoon')
                 straddle.print_session_pnl(state, 'afternoon')
+                time.sleep(1)
                 hedge.exit_hedge(state)
                 orders.cancel_all_pending()
                 done.add('final')

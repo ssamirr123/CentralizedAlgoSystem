@@ -19,13 +19,20 @@ def _env_flag(*names, default="false"):
     return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-# ============================ BROKER SELECTION ============================
-# Supported brokers: 'SHOONYA' or 'ANGELONE' (defaults to SHOONYA)
-BROKER = os.environ.get("BROKER", "SHOONYA").strip().upper()
+# ============================ CREDENTIALS ============================
+# Never commit real broker credentials -- fill these in directly on the
+# target EC2 instance (not in git). See DoubleStraddelAlgo/config.py for
+# the same convention.
 
 
-def _read_env_file():
+def _angel_creds() -> dict:
+    """AngelOne credentials from the environment (Stage 20). Falls back to a
+    git-ignored trading/.env at the repo root so a strategy box that does not
+    inject them via systemd still works. Real values live there or in AWS
+    Secrets Manager -> env -- NEVER in this tracked file."""
+    import os
     from pathlib import Path as _P
+
     _envf = _P(__file__).resolve().parents[3] / "trading" / ".env"
     if _envf.is_file():
         for _raw in _envf.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -34,12 +41,6 @@ def _read_env_file():
                 _k, _, _v = _raw.partition("=")
                 os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
 
-
-_read_env_file()
-
-
-def _angel_creds() -> dict:
-    """AngelOne credentials from the environment."""
     def _g(*names):
         for _n in names:
             _val = os.environ.get(_n, "").strip()
@@ -55,40 +56,13 @@ def _angel_creds() -> dict:
     }
 
 
-def _shoonya_creds() -> dict:
-    """Shoonya (Finvasia) credentials from the environment."""
-    def _g(*names, default=""):
-        for _n in names:
-            _val = os.environ.get(_n, "").strip()
-            if _val:
-                return _val
-        return default
-
-    user_id = _g("SHOONYA_USER_ID", "SHOONYA_CLIENT_ID", "FINVASIA_USER_ID")
-    return {
-        "user_id": user_id,
-        "password": _g("SHOONYA_PASSWORD", "FINVASIA_PASSWORD"),
-        "totp_secret": _g("SHOONYA_TOTP_SECRET", "SHOONYA_TOKEN", "FINVASIA_TOTP_SECRET"),
-        "vendor_code": _g("SHOONYA_VENDOR_CODE", "FINVASIA_VENDOR_CODE", default=f"{user_id}_U" if user_id else ""),
-        "api_key": _g("SHOONYA_API_KEY", "SHOONYA_API_SECRET", "FINVASIA_API_KEY"),
-        "imei": _g("SHOONYA_IMEI", default="abc1234"),
-    }
-
-
 # ============================ CREDENTIALS ============================
+# Stage 20: sourced from the environment. NEVER hard-code real values here.
 _ANGEL = _angel_creds()
 clientid = _ANGEL["clientid"]
 apikey = _ANGEL["apikey"]
 mpin = _ANGEL["mpin"]
 token = _ANGEL["token"]
-
-_SHOONYA = _shoonya_creds()
-shoonya_user_id = _SHOONYA["user_id"]
-shoonya_password = _SHOONYA["password"]
-shoonya_totp_secret = _SHOONYA["totp_secret"]
-shoonya_vendor_code = _SHOONYA["vendor_code"]
-shoonya_api_key = _SHOONYA["api_key"]
-shoonya_imei = _SHOONYA["imei"]
 
 # --- Telegram log forwarding ---
 telegram_enabled = True
@@ -114,7 +88,6 @@ orderbook = []               # kept as an (empty) list so `for i in orderbook` i
 tlv_data = {}
 ohlc_data = {}
 last_ltp = {}                 # token -> latest traded price (updated on every tick)
-last_volume = {}              # token -> latest traded volume
 last_tick_time = {}           # token -> epoch seconds of the last tick received (stale detection)
 
 # --- ATM lock (strike is fixed once at ATM_LOCK_TIME and reused all day) ---

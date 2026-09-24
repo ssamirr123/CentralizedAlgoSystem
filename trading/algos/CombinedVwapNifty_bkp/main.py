@@ -38,7 +38,6 @@ monitor.start()   # -> status "RUNNING"
 
 # Announce the run mode loudly so it's obvious in the logs whether real
 # orders will be placed.
-print(f'[BROKER] Active broker: {config.BROKER}')
 if config.DRY_RUN:
     print('[RUN MODE] DRY_RUN=True -> PAPER TRADING (no real orders will be placed)')
 else:
@@ -48,8 +47,8 @@ config.objconn = connectapi.makeconnection()
 threading.Thread(target=Websocket.ConnectSocket).start()
 while(True):
     dt = datetime.now()
-    if config.SKIP_ATM_TIME_GATE or (dt.hour==9 and dt.minute==30 and dt.second==00):
+    #Always use minutes as odd number,don't change second   #Attention#
+    if(dt.hour==9 and dt.minute==30 and dt.second==00):
         rest_func.setup_straddle()
         break
     time.sleep(0.1)
-
