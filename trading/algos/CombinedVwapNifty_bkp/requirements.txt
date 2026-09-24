@@ -1,9 +1,6 @@
 # Angel One SmartAPI (provides `SmartApi` package + SmartWebSocketV2)
 smartapi-python
 
-# Shoonya (Finvasia) API
-NorenRestApiPy>=0.0.22
-
 # TOTP generation for login
 pyotp
 

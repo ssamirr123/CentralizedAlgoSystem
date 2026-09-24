@@ -33,41 +33,26 @@ def _retry_call(fn, retries=5, base_delay=2, label=''):
 # --------------------------------------------------------------------------- #
 def get_nifty_atm():
     def _call():
-        if config.BROKER == "SHOONYA":
-            # NIFTY 50 Index token on NSE is 26000
-            quote = config.objconn.get_quotes(exchange='NSE', token='26000')
-            if not quote or quote.get('stat') != 'Ok':
-                raise ValueError(f"Failed to fetch Shoonya NIFTY spot quote: {quote}")
-            nifty_ltp = float(quote['lp'])
-        else:
-            nifty_ltp = config.objconn.ltpData('NSE', 'NIFTY', '99926000')['data']['ltp']
+        nifty_ltp = config.objconn.ltpData('NSE', 'NIFTY', '99926000')['data']['ltp']
         nifty_atm = round(nifty_ltp / 50) * 50
         return nifty_atm
     return _retry_call(_call, retries=5, base_delay=3, label='get_nifty_atm()')
 
 
 def get_option_ohlc(token):
+    date = datetime.today().strftime('%Y-%m-%d')
+    historicparam = {
+        "exchange": "NFO",
+        "symboltoken": str(token),
+        "interval": "ONE_MINUTE",
+        "fromdate": date + " 09:15",
+        "todate": date + " 15:30"
+    }
     def _call():
-        if config.BROKER == "SHOONYA":
-            today_start = datetime.combine(datetime.today(), datetime.min.time()).replace(hour=9, minute=15)
-            start_ts = int(today_start.timestamp())
-            temp = config.objconn.get_time_price_series(exchange='NFO', token=str(token), starttime=start_ts, interval=1)
-            if not temp:
-                raise ValueError(f'Empty candle series from Shoonya for token {token}')
-            return temp
-        else:
-            date = datetime.today().strftime('%Y-%m-%d')
-            historicparam = {
-                "exchange": "NFO",
-                "symboltoken": str(token),
-                "interval": "ONE_MINUTE",
-                "fromdate": date + " 09:15",
-                "todate": date + " 15:30"
-            }
-            temp = pd.DataFrame(config.objconn.getCandleData(historicparam)['data'])
-            if temp.empty:
-                raise ValueError('Empty DataFrame received')
-            return temp.iloc[:-1]
+        temp = pd.DataFrame(config.objconn.getCandleData(historicparam)['data'])
+        if temp.empty:
+            raise ValueError('Empty DataFrame received')
+        return temp.iloc[:-1]
     return _retry_call(_call, retries=5, base_delay=3, label=f'get_option_ohlc({token})')
 
 
@@ -75,13 +60,7 @@ def get_rest_ltp(token):
     """REST fallback LTP, used by manager.py when the WebSocket feed for a
     leg is flagged stale."""
     def _call():
-        if config.BROKER == "SHOONYA":
-            quote = config.objconn.get_quotes(exchange='NFO', token=str(token))
-            if quote and quote.get('stat') == 'Ok' and 'lp' in quote:
-                return float(quote['lp'])
-            raise ValueError(f"Shoonya get_quotes failed for token {token}: {quote}")
-        else:
-            return config.objconn.ltpData('NFO', '', str(token))['data']['ltp']
+        return config.objconn.ltpData('NFO', '', str(token))['data']['ltp']
     return _retry_call(_call, retries=2, base_delay=1, label=f'get_rest_ltp({token})')
 
 
@@ -128,47 +107,27 @@ def place_market_order(symbol, token, qty, ordertype):
         fake_id = f'DRYRUN-{int(time.time()*1000)}'
         print(f'[DRY_RUN] place_market_order SKIPPED (paper) {symbol} {ordertype} qty={qty} -> {fake_id}')
         return fake_id
+    orderparams = {
+        "variety": "NORMAL",
+        "tradingsymbol": str(symbol),
+        "symboltoken": str(token),
+        "transactiontype": ordertype.upper(),
+        "exchange": "NFO",
+        "ordertype": "MARKET",
+        "producttype": "INTRADAY",
+        "duration": "DAY",
+        "price": '0',
+        "squareoff": "0",
+        "stoploss": "0",
+        "quantity": str(qty)
+    }
 
     def _call():
-        if config.BROKER == "SHOONYA":
-            trantype = 'B' if ordertype.upper() == 'BUY' else 'S'
-            res = config.objconn.place_order(
-                buy_or_sell=trantype,
-                product_type='I',
-                exchange='NFO',
-                tradingsymbol=str(symbol),
-                quantity=int(qty),
-                discloseqty=0,
-                price_type='MKT',
-                price=0.0,
-                retention='DAY',
-                remarks='CombinedVwap'
-            )
-            if not res or res.get('stat') != 'Ok':
-                emsg = res.get('emsg', 'Unknown error') if isinstance(res, dict) else str(res)
-                raise ValueError(f"Shoonya place_order failed: {emsg}")
-            order_id = res.get('norenordno')
-        else:
-            orderparams = {
-                "variety": "NORMAL",
-                "tradingsymbol": str(symbol),
-                "symboltoken": str(token),
-                "transactiontype": ordertype.upper(),
-                "exchange": "NFO",
-                "ordertype": "MARKET",
-                "producttype": "INTRADAY",
-                "duration": "DAY",
-                "price": '0',
-                "squareoff": "0",
-                "stoploss": "0",
-                "quantity": str(qty)
-            }
-            order_id = config.objconn.placeOrder(orderparams)
-
+        order_id = config.objconn.placeOrder(orderparams)
         if order_id is None:
             raise ValueError('Market order response missing order id')
-        print(f'Order placed {symbol} ({config.BROKER}) id={order_id}')
-        return str(order_id)
+        print('Order placed', symbol)
+        return order_id
 
     return _retry_call(_call, retries=5, base_delay=1, label=f'place_market_order({symbol},{ordertype})')
 
@@ -178,47 +137,27 @@ def place_limit_order(symbol, token, qty, ordertype, price):
         fake_id = f'DRYRUN-{int(time.time()*1000)}'
         print(f'[DRY_RUN] place_limit_order SKIPPED (paper) {symbol} {ordertype} qty={qty} @ {price} -> {fake_id}')
         return fake_id
+    orderparams = {
+        "variety": "NORMAL",
+        "tradingsymbol": str(symbol),
+        "symboltoken": str(token),
+        "transactiontype": ordertype.upper(),
+        "exchange": "NFO",
+        "ordertype": "LIMIT",
+        "producttype": "INTRADAY",
+        "duration": "DAY",
+        "price": str(round(price, 2)),
+        "squareoff": "0",
+        "stoploss": "0",
+        "quantity": str(qty)
+    }
 
     def _call():
-        if config.BROKER == "SHOONYA":
-            trantype = 'B' if ordertype.upper() == 'BUY' else 'S'
-            res = config.objconn.place_order(
-                buy_or_sell=trantype,
-                product_type='I',
-                exchange='NFO',
-                tradingsymbol=str(symbol),
-                quantity=int(qty),
-                discloseqty=0,
-                price_type='LMT',
-                price=round(float(price), 2),
-                retention='DAY',
-                remarks='CombinedVwap'
-            )
-            if not res or res.get('stat') != 'Ok':
-                emsg = res.get('emsg', 'Unknown error') if isinstance(res, dict) else str(res)
-                raise ValueError(f"Shoonya place_order failed: {emsg}")
-            order_id = res.get('norenordno')
-        else:
-            orderparams = {
-                "variety": "NORMAL",
-                "tradingsymbol": str(symbol),
-                "symboltoken": str(token),
-                "transactiontype": ordertype.upper(),
-                "exchange": "NFO",
-                "ordertype": "LIMIT",
-                "producttype": "INTRADAY",
-                "duration": "DAY",
-                "price": str(round(price, 2)),
-                "squareoff": "0",
-                "stoploss": "0",
-                "quantity": str(qty)
-            }
-            order_id = config.objconn.placeOrder(orderparams)
-
+        order_id = config.objconn.placeOrder(orderparams)
         if order_id is None:
             raise ValueError('Limit order response missing order id')
-        print(f'Limit order placed {symbol} {ordertype} qty={qty} @ {price} ({config.BROKER}) id={order_id}')
-        return str(order_id)
+        print(f'Limit order placed {symbol} {ordertype} qty={qty} @ {price}')
+        return order_id
 
     return _retry_call(_call, retries=3, base_delay=1, label=f'place_limit_order({symbol},{ordertype})')
 
@@ -227,35 +166,21 @@ def modify_limit_order(orderid, symbol, token, qty, price):
     if config.DRY_RUN:
         print(f'[DRY_RUN] modify_limit_order SKIPPED (paper) {symbol} {orderid} -> {price}')
         return orderid
+    orderparams = {
+        "variety": "NORMAL",
+        "orderid": str(orderid),
+        "tradingsymbol": str(symbol),
+        "symboltoken": str(token),
+        "exchange": "NFO",
+        "ordertype": "LIMIT",
+        "producttype": "INTRADAY",
+        "duration": "DAY",
+        "price": str(round(price, 2)),
+        "quantity": str(qty)
+    }
 
     def _call():
-        if config.BROKER == "SHOONYA":
-            res = config.objconn.modify_order(
-                orderno=str(orderid),
-                exchange='NFO',
-                tradingsymbol=str(symbol),
-                newquantity=int(qty),
-                newprice_type='LMT',
-                newprice=round(float(price), 2)
-            )
-            if not res or res.get('stat') != 'Ok':
-                emsg = res.get('emsg', 'Unknown error') if isinstance(res, dict) else str(res)
-                raise ValueError(f"Shoonya modify_order failed: {emsg}")
-            return res.get('norenordno', str(orderid))
-        else:
-            orderparams = {
-                "variety": "NORMAL",
-                "orderid": str(orderid),
-                "tradingsymbol": str(symbol),
-                "symboltoken": str(token),
-                "exchange": "NFO",
-                "ordertype": "LIMIT",
-                "producttype": "INTRADAY",
-                "duration": "DAY",
-                "price": str(round(price, 2)),
-                "quantity": str(qty)
-            }
-            return config.objconn.modifyOrder(orderparams)
+        return config.objconn.modifyOrder(orderparams)
 
     return _retry_call(_call, retries=3, base_delay=1, label=f'modify_limit_order({symbol})')
 
@@ -265,12 +190,8 @@ def cancel_order(orderid):
         print(f'[DRY_RUN] cancel_order SKIPPED (paper) {orderid}')
         return True
     try:
-        if config.BROKER == "SHOONYA":
-            res = config.objconn.cancel_order(orderno=str(orderid))
-            return bool(res and res.get('stat') == 'Ok')
-        else:
-            config.objconn.cancelOrder(str(orderid), "NORMAL")
-            return True
+        config.objconn.cancelOrder(str(orderid), "NORMAL")
+        return True
     except Exception as e:
         print(f'[ERROR] cancel_order({orderid}): {e}')
         return False
@@ -282,41 +203,23 @@ def order_info(orderid, orderbook):
     if not orderbook:
         return None
     for i in orderbook:
-        oid = str(i.get('orderid') or i.get('norenordno') or '')
-        if oid == str(orderid):
-            raw_status = str(i.get('status', '')).lower()
-            if raw_status == 'canceled':
-                raw_status = 'cancelled'
-            avg_price = float(i.get('averageprice', 0) or i.get('avgprc', 0) or 0)
-            side = i.get('transactiontype') or ('BUY' if i.get('trantype') == 'B' else 'SELL')
-            filled_qty = int(i.get('filledshares', 0) or i.get('fillshares', 0) or 0)
+        if i['orderid'] == str(orderid):
             return {
-                'avg_price': avg_price,
-                'side': side,
-                'status': raw_status,
-                'filled_qty': filled_qty,
+                'avg_price': float(i.get('averageprice', 0) or 0),
+                'side': i.get('transactiontype'),
+                'status': str(i.get('status', '')).lower(),
+                'filled_qty': int(i.get('filledshares', 0) or 0),
             }
     return None
 
 
 def get_orderbook():
     def _call():
-        if config.BROKER == "SHOONYA":
-            res = config.objconn.get_order_book()
-            if res is None:
-                raise ValueError('Order book response is None')
-            if isinstance(res, dict) and res.get('stat') != 'Ok':
-                # No orders placed yet today
-                if 'no data' in str(res.get('emsg', '')).lower():
-                    return []
-                raise ValueError(f"Shoonya get_order_book error: {res.get('emsg')}")
-            return res if isinstance(res, list) else []
-        else:
-            response = config.objconn.orderBook()
-            data = response.get('data') if response else None
-            if data is None:
-                raise ValueError('Order book response missing data')
-            return data
+        response = config.objconn.orderBook()
+        data = response.get('data') if response else None
+        if data is None:
+            raise ValueError('Order book response missing data')
+        return data
 
     result = _retry_call(_call, retries=5, base_delay=3, label='get_orderbook()')
     if result is None:
