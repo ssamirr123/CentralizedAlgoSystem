@@ -9,6 +9,7 @@ from trading.market_data.symbols import (
     Exchange,
     InstrumentType,
     INDEX_SYMBOLS,
+    equity_instrument,
     index_instrument,
     make_option_symbol,
     normalize_index_symbol,
@@ -17,8 +18,10 @@ from trading.market_data.symbols import (
 )
 
 
-def test_four_indices_registered():
-    assert INDEX_SYMBOLS == ("NIFTY", "BANKNIFTY", "INDIA_VIX", "SENSEX")
+def test_five_indices_registered():
+    """Phase 8 added FINNIFTY (real Breeze code "NIFFIN", verified live
+    against ICICI's own security master)."""
+    assert INDEX_SYMBOLS == ("NIFTY", "BANKNIFTY", "FINNIFTY", "INDIA_VIX", "SENSEX")
 
 
 @pytest.mark.parametrize(
@@ -83,3 +86,27 @@ def test_option_instrument_populates_contract_fields():
     assert inst.option_type == "CE"
     assert inst.lot_size == 75 and inst.tick_size == 0.05
     assert inst.internal_symbol == "NIFTY|2026-09-03|25100|CE"
+
+
+@pytest.mark.parametrize("alias", ["FINNIFTY", "NIFTY_FIN_SERVICE", "NiftyFinService"])
+def test_finnifty_alias_resolution(alias):
+    assert normalize_index_symbol(alias) == "FINNIFTY"
+    inst = index_instrument(alias)
+    assert inst.internal_symbol == "FINNIFTY"
+    assert inst.exchange is Exchange.NSE
+    assert inst.instrument_type is InstrumentType.INDEX
+
+
+def test_equity_instrument_generic_resolution():
+    """Section 27: any valid NSE symbol resolves, not just a hardcoded list."""
+    inst = equity_instrument("reliance")
+    assert inst.internal_symbol == "RELIANCE"
+    assert inst.exchange is Exchange.NSE
+    assert inst.instrument_type is InstrumentType.EQUITY
+
+
+def test_equity_instrument_rejects_invalid_symbol():
+    with pytest.raises(ValueError):
+        equity_instrument("bad symbol!")
+    with pytest.raises(ValueError):
+        equity_instrument("")

@@ -67,3 +67,9 @@ export function pnlSign(value: number | null | undefined): "pos" | "neg" | "zero
   if (value == null || Number.isNaN(value) || value === 0) return "zero";
   return value > 0 ? "pos" : "neg";
 }
+
+/** Section 15/29: AI Research result currency symbol -- Indian
+ * instruments must never render with "$". */
+export function currencySymbol(currency: string | null | undefined): string {
+  return currency === "INR" ? "₹" : currency === "USD" ? "$" : (currency ?? "");
+}

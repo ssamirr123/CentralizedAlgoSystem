@@ -57,6 +57,17 @@ def _env_bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
+def _env_bool_default_true(name: str) -> bool:
+    """Phase 11 (Section 4): a per-feature flag that fails OPEN -- an
+    existing deployment that has never heard of this env var keeps its
+    current (enabled) behavior; an operator explicitly sets it false to
+    narrow what's on."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.strip().lower() not in ("0", "false", "no")
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- App / runtime -------------------------------------------------
@@ -194,6 +205,47 @@ class Settings:
     # {"api_key","secret_key","session_token"}. When set it takes
     # precedence over the env values above (read lazily via boto3).
     breeze_secret_id: str = field(default_factory=lambda: _env("BREEZE_SECRET_ID"))
+
+    # --- Phase 8: AI Research historical market-data bridge -----------
+    # Bounds a single research/backtest request's on-demand backfill --
+    # never large enough to accidentally trigger a multi-year download
+    # (Section 15/16). A request needing more than this range/call budget
+    # is rejected, never silently truncated.
+    market_data_max_backfill_days: int = field(
+        default_factory=lambda: _env_int("MARKET_DATA_MAX_BACKFILL_DAYS", 30)
+    )
+    market_data_max_provider_calls: int = field(
+        default_factory=lambda: _env_int("MARKET_DATA_MAX_PROVIDER_CALLS", 5)
+    )
+
+    # --- Phase 9: NIFTY Options Intelligence Engine --------------------
+    # Bounded ATM +/- N strike window for chain acquisition/analytics
+    # (Section 9) -- distinct from the live-streaming subscription window
+    # (nifty_option_strike_range above), which governs what the WS feed
+    # continuously subscribes to.
+    options_chain_strike_window: int = field(
+        default_factory=lambda: _env_int("OPTIONS_CHAIN_STRIKE_WINDOW", 5)
+    )
+    # Section 23: never silently hardcoded as a permanent fact -- a
+    # configurable approximation, reported alongside every analytics
+    # response that uses it (Provenance.risk_free_rate).
+    options_risk_free_rate: float = field(
+        default_factory=lambda: _env_float("OPTIONS_RISK_FREE_RATE", 0.065)
+    )
+    # Section 51: short-lived cache for a *current* snapshot only; a
+    # request with an explicit as_of is never served from this cache.
+    options_snapshot_cache_seconds: int = field(
+        default_factory=lambda: _env_int("OPTIONS_SNAPSHOT_CACHE_SECONDS", 5)
+    )
+    # Phase 11 (Section 4): an independent on/off control for the Options
+    # Intelligence API, distinct from AI_RESEARCH_ENABLED/AI_WORKLOADS_ENABLED
+    # (this is deterministic Breeze/DB computation, never an LLM call) and
+    # from MARKET_DATA_ENABLED (which governs the underlying live-streaming
+    # engine this API reads from). Fails OPEN -- unset means "on", matching
+    # this API's existing (Phase 9) unconditional-mount behavior.
+    options_intelligence_enabled: bool = field(
+        default_factory=lambda: _env_bool_default_true("OPTIONS_INTELLIGENCE_ENABLED")
+    )
 
     # --- Stale-heartbeat watcher --------------------------------
     stale_threshold_minutes: float = field(

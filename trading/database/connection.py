@@ -79,5 +79,8 @@ def init_db() -> None:
     if DATABASE_URL.startswith("sqlite"):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
     from trading.database import models  # noqa: F401  (registers tables on Base.metadata)
+    from trading.ai_research import models as ai_research_models  # noqa: F401
+    from trading.ai_research.backtest import models as ai_research_backtest_models  # noqa: F401
+    from trading.ai_options_research import models as ai_options_research_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)

@@ -2,14 +2,17 @@ const STATUS_CLASS: Record<string, string> = {
   RUNNING: "running",
   SUCCESS: "running",
   UPDATED: "running",
+  COMPLETED: "running",
   STOPPED: "stopped",
   PENDING: "stopped",
+  QUEUED: "stopped",
   STARTING: "stopped",
   STOPPING: "stopped",
   RESTARTING: "stopped",
   REBOOTING: "stopped",
   ERROR: "error",
   FAILED: "error",
+  CANCELLED: "stopped",
 };
 
 export function StatusBadge({ status }: { status: string | null | undefined }) {

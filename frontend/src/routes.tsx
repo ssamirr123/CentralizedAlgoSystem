@@ -15,6 +15,7 @@ import { LogsPage } from "@/pages/LogsPage";
 import { RiskPage } from "@/pages/RiskPage";
 import { SystemHealthPage } from "@/pages/SystemHealthPage";
 import { AdminPage } from "@/pages/AdminPage";
+import { AiResearchPage } from "@/pages/AiResearchPage";
 
 export interface NavRoute {
   path: string;
@@ -38,6 +39,7 @@ export const NAV_ROUTES: NavRoute[] = [
   { path: "/commands", label: "Commands", element: CommandsPage, permission: "VIEW" },
   { path: "/logs", label: "Logs", element: LogsPage, permission: "VIEW" },
   { path: "/risk", label: "Risk", element: RiskPage, permission: "VIEW" },
+  { path: "/ai-research", label: "AI Research Engine", element: AiResearchPage, permission: "VIEW" },
   { path: "/system-health", label: "System Health", element: SystemHealthPage, permission: "VIEW" },
   { path: "/admin", label: "Administration", element: AdminPage, permission: "ADMIN" },
 ];

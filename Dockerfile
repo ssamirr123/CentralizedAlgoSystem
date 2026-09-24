@@ -15,15 +15,29 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # psycopg2-binary and every other runtime dep ship as wheels, so no
-# system build toolchain is needed. Install deps first for layer caching.
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# system build toolchain is needed. TradingAgents installs from a plain
+# https tarball URL (see requirements-ai-research.txt), so no `git`
+# binary/apt-get step is needed either. Install deps first for layer caching.
+COPY requirements.txt requirements-ai-research.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements-ai-research.txt
 
 # Non-root runtime user.
 RUN useradd --create-home --uid 10001 appuser
 
 COPY --chown=appuser:appuser . .
-RUN chmod +x docker/entrypoint.sh
+RUN chmod +x docker/entrypoint.sh \
+    && chown appuser:appuser /app
+
+# `/app` itself (created by WORKDIR, before `USER appuser`/the chown'd
+# COPY above) was still root-owned even though its contents were
+# chowned -- appuser could read/traverse it but not create a NEW
+# subdirectory in it. This broke at runtime the moment AI Research
+# actually executed: TradingAgents' data-vendor code creates a relative
+# `cache/` directory on first use and got `PermissionError: [Errno 13]
+# Permission denied: 'cache'` (found during the Phase 11 production
+# deployment's own controlled AI Research smoke test). The explicit
+# chown above fixes the directory itself, not just its contents.
 
 USER appuser
 

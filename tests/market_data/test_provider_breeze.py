@@ -18,7 +18,7 @@ from trading.market_data.providers import (
     create_market_data_provider,
 )
 from trading.market_data.schemas import IndexQuote, OptionQuote
-from trading.market_data.symbols import index_instrument, option_instrument
+from trading.market_data.symbols import equity_instrument, index_instrument, option_instrument
 
 _SECRET = "super-secret-value"
 _SESSION = "TODAYS-SESSION-TOKEN-1234"
@@ -110,7 +110,7 @@ class FakeBreeze:
         self.on_ticks(tick)
 
 
-def _provider(**fake_kwargs):
+def _provider(*, equity_master_loader=None, **fake_kwargs):
     holder = {}
 
     def factory(api_key):
@@ -118,7 +118,8 @@ def _provider(**fake_kwargs):
         return holder["client"]
 
     p = ICICIBreezeProvider(
-        api_key="k", api_secret=_SECRET, session_token=_SESSION, client_factory=factory
+        api_key="k", api_secret=_SECRET, session_token=_SESSION, client_factory=factory,
+        equity_master_loader=equity_master_loader,
     )
     return p, holder
 
@@ -235,6 +236,115 @@ def test_get_historical_candles():
     assert c0.symbol == "NIFTY" and c0.interval == "1minute"
     assert c0.timestamp == datetime(2026, 9, 5, 9, 15, 0, tzinfo=timezone.utc)
     assert (c0.open, c0.high, c0.low, c0.close) == (25050.0, 25060.0, 25040.0, 25055.0)
+
+
+# --- Phase 8: FINNIFTY + equity historical candles ----------------------
+def test_finnifty_index_code_is_real_verified_niffin():
+    """Verified live 2026-09-22 against ICICI's own published security
+    master (FONSEScripMaster.txt FUTIDX row, ShortName="NIFFIN")."""
+    from trading.market_data.providers.icici_breeze import _INDEX_CODES
+
+    assert _INDEX_CODES["FINNIFTY"] == ("NIFFIN", "NSE")
+
+
+def test_get_historical_candles_for_finnifty():
+    p, holder = _provider()
+    p.connect()
+    candles = p.get_historical_candles(
+        index_instrument("FINNIFTY"), "1minute",
+        datetime(2026, 9, 5, 9, 15, tzinfo=timezone.utc),
+        datetime(2026, 9, 5, 9, 20, tzinfo=timezone.utc),
+    )
+    assert len(candles) == 2
+    assert candles[0].symbol == "FINNIFTY"
+
+
+def test_get_historical_candles_for_equity_resolves_via_master():
+    """RELIANCE -> RELIND is the REAL Breeze stock_code, verified live
+    2026-09-22 against ICICI's own published NSEScripMaster.txt -- NOT
+    the same as the NSE symbol, confirming Yahoo-style symbols cannot be
+    assumed to map directly to Breeze (Section 7)."""
+    p, holder = _provider(equity_master_loader=lambda: {"RELIANCE": "RELIND", "TCS": "TCS"})
+    p.connect()
+    candles = p.get_historical_candles(
+        equity_instrument("RELIANCE"), "5minute",
+        datetime(2026, 9, 5, 9, 15, tzinfo=timezone.utc),
+        datetime(2026, 9, 5, 9, 20, tzinfo=timezone.utc),
+    )
+    assert len(candles) == 2
+    assert candles[0].symbol == "RELIANCE"
+
+
+def test_equity_stock_code_differs_from_nse_symbol_for_reliance():
+    """The Breeze API call itself must use "RELIND", not "RELIANCE"."""
+    seen_kwargs = {}
+    p, holder = _provider(equity_master_loader=lambda: {"RELIANCE": "RELIND"})
+    p.connect()
+    real_hist = holder["client"].get_historical_data_v2
+
+    def spy(**kwargs):
+        seen_kwargs.update(kwargs)
+        return real_hist(**kwargs)
+
+    holder["client"].get_historical_data_v2 = spy
+    p.get_historical_candles(
+        equity_instrument("RELIANCE"), "5minute",
+        datetime(2026, 9, 5, 9, 15, tzinfo=timezone.utc),
+        datetime(2026, 9, 5, 9, 20, tzinfo=timezone.utc),
+    )
+    assert seen_kwargs["stock_code"] == "RELIND"
+    assert seen_kwargs["exchange_code"] == "NSE"
+    assert seen_kwargs["product_type"] == "cash"
+
+
+def test_tcs_equity_stock_code_equals_nse_symbol():
+    """TCS's real Breeze code happens to equal its NSE symbol -- confirms
+    the mapping is looked up, not merely assumed to always differ."""
+    seen_kwargs = {}
+    p, holder = _provider(equity_master_loader=lambda: {"TCS": "TCS"})
+    p.connect()
+    real_hist = holder["client"].get_historical_data_v2
+
+    def spy(**kwargs):
+        seen_kwargs.update(kwargs)
+        return real_hist(**kwargs)
+
+    holder["client"].get_historical_data_v2 = spy
+    p.get_historical_candles(
+        equity_instrument("TCS"), "5minute",
+        datetime(2026, 9, 5, 9, 15, tzinfo=timezone.utc),
+        datetime(2026, 9, 5, 9, 20, tzinfo=timezone.utc),
+    )
+    assert seen_kwargs["stock_code"] == "TCS"
+
+
+def test_unknown_equity_symbol_raises_data_error():
+    p, _ = _provider(equity_master_loader=lambda: {"RELIANCE": "RELIND"})
+    p.connect()
+    with pytest.raises(ProviderDataError):
+        p.get_historical_candles(
+            equity_instrument("NOTREAL"), "5minute",
+            datetime(2026, 9, 5, 9, 15, tzinfo=timezone.utc),
+            datetime(2026, 9, 5, 9, 20, tzinfo=timezone.utc),
+        )
+
+
+def test_equity_master_is_cached_across_calls():
+    calls = {"n": 0}
+
+    def loader():
+        calls["n"] += 1
+        return {"RELIANCE": "RELIND"}
+
+    p, _ = _provider(equity_master_loader=loader)
+    p.connect()
+    for _ in range(3):
+        p.get_historical_candles(
+            equity_instrument("RELIANCE"), "5minute",
+            datetime(2026, 9, 5, 9, 15, tzinfo=timezone.utc),
+            datetime(2026, 9, 5, 9, 20, tzinfo=timezone.utc),
+        )
+    assert calls["n"] == 1, "the equity master should be downloaded once, not per-call"
 
 
 # --- streaming -------------------------------------------------------
