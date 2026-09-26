@@ -68,7 +68,7 @@ INDEX_TOKEN  = '99926000'      # NIFTY spot token (NSE)
 INDEX_EXCH   = 'NSE'
 OPT_EXCH     = 'NFO'
 STRIKE_STEP  = 50
-LOT_QTY      = '65'            # 1 lot NIFTY = 65 (current lot size)
+LOT_QTY      = '390'           # 6 lots x 65 (NIFTY lot size = 65)
 
 # ============================ TIMINGS (IST, 24h) ============================
 HEDGE_ENTRY   = (10, 20)
@@ -95,7 +95,7 @@ PENDING_ACTION    = 'MODIFY'   # 'MODIFY' | 'CANCEL' | 'MARKET' once pending tim
 ALLOW_MARKET_EMERGENCY = True  # market orders permitted ONLY in emergency square-off
 
 # ============================ RISK ============================
-DAILY_MAX_LOSS      = 20000  # absolute rupees; if day MTM <= -this -> kill switch
+DAILY_MAX_LOSS      = 30000  # absolute rupees; if day MTM <= -this -> kill switch
 RECONCILE_INTERVAL  = 120      # seconds between position/order reconciliation
 
 # ============================ EXPIRY CALENDAR (configurable) ============================
