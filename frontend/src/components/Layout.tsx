@@ -26,7 +26,12 @@ function ConnIndicator() {
 
 function NavGroup({ route }: { route: NavRoute }) {
   const location = useLocation();
-  const inGroup = location.pathname === route.path || location.pathname.startsWith(`${route.path}/`);
+  const { hasPermission } = useAuth();
+  const children = route.children!.filter((c) => hasPermission(c.permission ?? route.permission));
+  const inGroup =
+    location.pathname === route.path ||
+    location.pathname.startsWith(`${route.path}/`) ||
+    children.some((c) => location.pathname === c.path || location.pathname.startsWith(`${c.path}/`));
   const [open, setOpen] = useState(inGroup);
   // Navigating into the group (e.g. via a link on the page) expands it.
   useEffect(() => {
@@ -51,7 +56,7 @@ function NavGroup({ route }: { route: NavRoute }) {
         </button>
       </div>
       {open &&
-        route.children!.map((c) => (
+        children.map((c) => (
           <NavLink key={c.path} to={c.path} className={({ isActive }) => `nav-child ${isActive ? "active" : ""}`}>
             <span className="dot" />
             {c.label}
