@@ -83,6 +83,10 @@ class Algo(Base):
     script_path: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="STOPPED")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Latest values the strategy itself reported via heartbeat -- each
+    # strategy decides paper vs live on its own. NULL until it reports.
+    trading_mode: Mapped[str | None] = mapped_column(String(10), nullable=True)  # LIVE / PAPER
+    running_lots: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow

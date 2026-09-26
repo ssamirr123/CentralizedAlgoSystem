@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AlgoListEntry, ServerListEntry } from "@/api/types";
 import { ApiError } from "@/api/client";
-import { TRADING_MODE } from "@/lib/config";
 
 export interface AlgoFormValue {
   algo_id: string;
@@ -51,10 +50,6 @@ export function AlgoFormModal({
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className={`mode-banner ${TRADING_MODE}`} style={{ marginBottom: 12 }}>
-          <span className="pulse" />
-          {TRADING_MODE === "live" ? "Live Trading" : "Paper Trading"}
-        </div>
         <h3>{mode === "create" ? "Add Algorithm" : `Edit ${initial?.algo_id}`}</h3>
         <p style={{ color: "var(--text-dim)", fontSize: 12.5, marginTop: 0 }}>
           {mode === "create"
@@ -92,14 +87,6 @@ export function AlgoFormModal({
             ))}
           </select>
           {noServer && <div className="form-error">Pick a server.</div>}
-        </div>
-
-        <div className="field">
-          <label>Trading mode</label>
-          <div className={`mode-banner ${TRADING_MODE}`} style={{ width: "fit-content" }}>
-            <span className="pulse" />
-            {TRADING_MODE === "live" ? "Live" : "Paper"} · locked
-          </div>
         </div>
 
         <div className="field">

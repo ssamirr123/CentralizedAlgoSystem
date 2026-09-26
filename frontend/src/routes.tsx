@@ -23,13 +23,22 @@ export interface NavRoute {
   element: ComponentType;
   /** Permission needed to see the nav entry and open the route. */
   permission: Permission;
+  /** Sub-pages shown under this entry in an expandable sidebar group. Their
+   *  <Route>s are declared in App.tsx, not generated from this list. */
+  children?: { path: string; label: string }[];
 }
 
 export const NAV_ROUTES: NavRoute[] = [
   { path: "/", label: "Dashboard", element: DashboardPage, permission: "VIEW" },
   { path: "/servers", label: "Servers", element: ServersPage, permission: "VIEW" },
   { path: "/algorithms", label: "Algorithms", element: AlgorithmsPage, permission: "VIEW" },
-  { path: "/market", label: "Market", element: MarketPage, permission: "VIEW" },
+  {
+    path: "/market",
+    label: "Market",
+    element: MarketPage,
+    permission: "VIEW",
+    children: [{ path: "/market/straddle-pulse", label: "Straddle Pulse" }],
+  },
   { path: "/strategies", label: "Strategies", element: StrategiesPage, permission: "VIEW" },
   { path: "/algo-status", label: "Algo Status", element: AlgoStatusPage, permission: "VIEW" },
   { path: "/heartbeats", label: "Heartbeats", element: HeartbeatsPage, permission: "VIEW" },

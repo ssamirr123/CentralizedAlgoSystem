@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { TRADING_MODE } from "@/lib/config";
 
 export interface ConfirmDialogProps {
   open: boolean;
@@ -31,10 +30,6 @@ export function ConfirmDialog({
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" onClick={onCancel}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className={`mode-banner ${TRADING_MODE}`} style={{ marginBottom: 12 }}>
-          <span className="pulse" />
-          {TRADING_MODE === "live" ? "Live Trading" : "Paper Trading"}
-        </div>
         <h3>{title}</h3>
         <div style={{ color: "var(--text-dim)", fontSize: 13 }}>{body}</div>
         <div className="actions">

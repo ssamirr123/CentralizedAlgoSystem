@@ -178,7 +178,7 @@ any AI module.
   `BREEZE_API_KEY`/`BREEZE_SECRET_KEY`/`BREEZE_SESSION_TOKEN`/
   `OPENAI_API_KEY`/`GROQ_API_KEY`/`ANTHROPIC_API_KEY`/`CONTROL_API_KEY`/
   `AUTH_SECRET_KEY`: **zero matches**.
-- Frontend source only reads `VITE_TRADING_MODE`, `VITE_API_BASE_URL`,
+- Frontend source only reads `VITE_API_BASE_URL`,
   `VITE_DAY_LOSS_LIMIT`, `VITE_STALE_MINUTES`, `VITE_REALTIME` — display/
   config values, never a credential.
 - Existing automated enforcement already present and passing:

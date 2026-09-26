@@ -78,3 +78,24 @@ def test_heartbeat_full_cycle(client, server, auth, db_session):
     db_session.expire_all()
     assert db_session.query(models.Heartbeat).filter(models.Heartbeat.algo_id == algo.id).count() == 2
     assert db_session.query(models.Algo).filter(models.Algo.name == "example_strategy").one().status == "ERROR"
+
+
+def test_heartbeat_trading_mode_and_lots(client, server, auth):
+    client.post("/api/algos", json={"algo_id": "example_strategy", "server_id": "ec2-1"}, headers=auth)
+    base = {"algo_id": "example_strategy", "server_id": "ec2-1", "status": "RUNNING"}
+
+    def listed():
+        return next(a for a in client.get("/api/algos", headers=auth).json() if a["algo_id"] == "example_strategy")
+
+    assert (listed()["trading_mode"], listed()["running_lots"]) == (None, None)
+
+    r = client.post("/api/heartbeat", json={**base, "trading_mode": "LIVE", "running_lots": 3}, headers=auth)
+    assert r.status_code == 200, r.text
+    assert (listed()["trading_mode"], listed()["running_lots"]) == ("LIVE", 3)
+
+    # omitted fields keep the last reported values
+    client.post("/api/heartbeat", json=base, headers=auth)
+    assert (listed()["trading_mode"], listed()["running_lots"]) == ("LIVE", 3)
+
+    r = client.post("/api/heartbeat", json={**base, "trading_mode": "paperish"}, headers=auth)
+    assert r.status_code == 422

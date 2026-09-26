@@ -82,6 +82,8 @@ export interface AlgoListEntry {
   script_path: string;
   updated_at: string;
   last_heartbeat: string | null;
+  trading_mode?: "LIVE" | "PAPER" | null;
+  running_lots?: number | null;
 }
 
 export interface AlgoStatusResponse {
