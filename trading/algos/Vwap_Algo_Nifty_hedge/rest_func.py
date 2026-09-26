@@ -1,7 +1,7 @@
 from datetime import datetime
 import pandas as pd
 import pandas_ta as ta
-import config,make_data,token_file,time,threading,manager
+import config,make_data,token_file,time,threading,manager,paper
 
 def _retry_call(fn, retries=5, base_delay=2, label=''):
     """
@@ -97,6 +97,8 @@ def make_vwap(dff):
     return dff
 
 def place_market_order(symbol,token,qty,ordertype):
+    if config.DRY_RUN:
+        return paper.market_order(symbol, token, qty, ordertype)
     orderparams = {
         "variety": "NORMAL",
         "tradingsymbol": str(symbol),
@@ -123,6 +125,8 @@ def place_market_order(symbol,token,qty,ordertype):
 
 def place_stoploss_order(symbol,token,qty,stoploss):
     stoploss = round(float(stoploss))
+    if config.DRY_RUN:
+        return paper.stoploss_order(symbol, token, qty, stoploss)
     price = stoploss+2
     orderparams = {
         "variety": "STOPLOSS",
@@ -149,6 +153,8 @@ def place_stoploss_order(symbol,token,qty,stoploss):
 
 def modify_stoploss_order(symbol,token,qty,stoploss,orderid):
     stoploss = round(float(stoploss))
+    if config.DRY_RUN:
+        return paper.modify_stoploss(orderid, stoploss)
     price = stoploss+2
     orderparams = {
         "variety": "STOPLOSS",
@@ -186,6 +192,15 @@ def sltracking(order_id,token):
         print('[WARNING] sltracking: order_id is None – stoploss cannot be tracked')
         return
     while True:
+        if config.DRY_RUN:
+            # No broker order book in paper mode -> watch LTP vs trigger.
+            status = paper.check_stoploss(order_id)
+            if status == 'complete':
+                config.slhit[token] = True
+            if status != 'open':
+                break
+            time.sleep(1)
+            continue
         info = order_info(str(order_id),config.orderbook)
         if info is not None and info[3] == 'complete':
             config.slhit[token] = True
@@ -232,7 +247,8 @@ def get_orderbook():
 
 def saveorderbook():
     while True:
-        config.orderbook = get_orderbook()
+        # No real orders in paper mode -> skip the broker polling.
+        config.orderbook = [] if config.DRY_RUN else get_orderbook()
         time.sleep(1)
 
 def add_make_option():

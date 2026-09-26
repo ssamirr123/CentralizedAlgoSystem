@@ -43,6 +43,32 @@ apikey = _ANGEL["apikey"]
 mpin = _ANGEL["mpin"]
 token = _ANGEL["token"]
 
+
+def _env_flag(*names, default="false"):
+    """Bool from the first of `names` that is set (non-empty), else `default`.
+    Truthy: 1/true/yes/y/on (case-insensitive). Same helper as
+    CombinedVwapNifty/config.py."""
+    import os
+    val = None
+    for n in names:
+        v = os.environ.get(n)
+        if v is not None and str(v).strip() != "":
+            val = v
+            break
+    if val is None:
+        val = default
+    return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+# ============================ RUN MODE ============================
+# True -> paper trading: no order ever reaches the broker; fills and
+# stop-losses are simulated from live prices (see paper.py).
+# Set via env var (process env or trading/.env, loaded by _angel_creds above):
+#   VWAP_HEDGE_DRY_RUN=true   -> this algo only
+#   BOT_DRY_RUN=true          -> shared with the other algos on the box
+# Defaults to LIVE (False) so existing deployments keep trading unchanged.
+DRY_RUN = _env_flag("VWAP_HEDGE_DRY_RUN", "BOT_DRY_RUN", "BOT_DY_RUN", default="false")
+
 # --- Telegram log forwarding ---
 # Create a bot via @BotFather to get the token, and get your chat id
 # (e.g. message the bot then visit https://api.telegram.org/bot<TOKEN>/getUpdates).
