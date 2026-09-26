@@ -31,6 +31,11 @@ from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
+if config.DRY_RUN:
+    print('[RUN MODE] DRY_RUN=True -> PAPER TRADING (no real orders will be placed)')
+else:
+    print('[RUN MODE] DRY_RUN=False -> LIVE TRADING (REAL orders will be placed!)')
+
 # Start the Central Strategy Monitoring heartbeat agent (daemon thread).
 # This is fully best-effort and must never affect the strategy run.
 monitor.start()   # -> status "RUNNING"

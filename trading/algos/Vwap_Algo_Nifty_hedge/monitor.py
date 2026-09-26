@@ -24,6 +24,7 @@ import time
 import atexit
 
 import config
+import paper
 
 # Uses STRATEGY_NAME/SERVER_NAME/API_BASE_URL/CONTROL_API_KEY -- the exact
 # env vars trading_agent.py's START_ALGO injects (see orchestrator.py) --
@@ -93,14 +94,14 @@ def _start_control_center_agent():
 
 
 def _mode_and_lots():
-    """(trading_mode, running_lots) for the dashboard. This algo has no
-    paper-trading switch -- it always places real orders. qty is the
-    exchange quantity; NIFTY lot size is 65."""
+    """(trading_mode, running_lots) for the dashboard. qty is the exchange
+    quantity; NIFTY lot size is 65."""
+    mode = "PAPER" if getattr(config, "DRY_RUN", False) else "LIVE"
     try:
         lots = int(config.qty) // 65
     except Exception:
         lots = None
-    return "LIVE", lots
+    return mode, lots
 
 
 def _report_control_center(status, pnl, trade_count):
@@ -157,6 +158,8 @@ def _fetch_positions():
     """Single broker call for the position book, shared by _compute_pnl_mtm
     and _report_positions below -- calling obj.position() twice per report
     cycle was tripping Angel One's "exceeding access rate" limit."""
+    if getattr(config, "DRY_RUN", False):
+        return paper.positions()   # paper ledger, same row shape as the broker's
     try:
         obj = getattr(config, "objconn", None)
         if not obj or not hasattr(obj, "position"):
@@ -229,6 +232,8 @@ def _report_positions(positions=None):
 
 
 def _compute_trade_count():
+    if getattr(config, "DRY_RUN", False):
+        return paper.trade_count()
     try:
         orderbook = getattr(config, "orderbook", None) or []
         return sum(
