@@ -1,7 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "@/auth/AuthContext";
-import { TradingModeBadge } from "@/components/TradingModeBadge";
 import { ApiError } from "@/api/client";
 
 export function LoginPage() {
@@ -46,7 +45,6 @@ export function LoginPage() {
   return (
     <div className="login-wrap">
       <form className="card login-card" onSubmit={submit}>
-        <TradingModeBadge />
         <h1 style={{ textAlign: "center", marginBottom: 4 }}>Trading Control Center</h1>
         <p style={{ textAlign: "center", color: "var(--text-dim)", marginTop: 0, marginBottom: 20, fontSize: 13 }}>
           Sign in with your account.

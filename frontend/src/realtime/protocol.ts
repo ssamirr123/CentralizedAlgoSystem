@@ -48,6 +48,8 @@ export interface HeartbeatData {
   status: string;
   pnl: number | null;
   timestamp: string | null;
+  trading_mode?: "LIVE" | "PAPER" | null;
+  running_lots?: number | null;
 }
 export interface StrategyStatusData {
   algo_id: string;

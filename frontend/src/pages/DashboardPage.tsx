@@ -61,6 +61,8 @@ export function DashboardPage() {
                 <th>Strategy</th>
                 <th>Server</th>
                 <th>Status</th>
+                <th>Mode</th>
+                <th className="num">Running lots</th>
                 <th className="num">Day P&L</th>
                 <th>Last heartbeat</th>
               </tr>
@@ -68,7 +70,7 @@ export function DashboardPage() {
             <tbody>
               {algoList.length === 0 && (
                 <tr>
-                  <td colSpan={5} style={{ color: "var(--text-dim)" }}>
+                  <td colSpan={7} style={{ color: "var(--text-dim)" }}>
                     None registered. <Link to="/strategies">Strategies</Link>
                   </td>
                 </tr>
@@ -82,6 +84,14 @@ export function DashboardPage() {
                     <td>
                       <StatusBadge status={a.status} />
                     </td>
+                    <td>
+                      {a.trading_mode ? (
+                        <span className={`badge ${a.trading_mode === "LIVE" ? "live" : "paper"}`}>{a.trading_mode}</span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="num">{a.running_lots ?? "—"}</td>
                     <td className={`num ${pnlSign(dayPnl)}`}>{dayPnl == null ? "—" : formatINR(dayPnl)}</td>
                     <td className={isStale(a.last_heartbeat) ? "neg" : ""}>{relativeAge(a.last_heartbeat)}</td>
                   </tr>

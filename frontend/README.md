@@ -20,15 +20,12 @@ Positions · Trades · Commands · Logs · Risk · System Health
 
 ## Paper vs Live
 
-- A build targets one mode via `VITE_TRADING_MODE` (`paper` | `live`).
-  Anything that is not exactly `live` is treated as **paper** (fail safe).
-- The mode is shown **at all times**: a coloured stripe + pill in the top
-  bar, on the login card, and restated inside every command-confirmation
-  dialog.
-- **No live order execution is implemented.** The Commands screen only
+- Each strategy decides for itself whether it trades paper or live, and
+  reports that (plus its running lots) in its heartbeat. The Dashboard's
+  Strategies table shows it per strategy in the **Mode** column.
+- **No order execution is implemented in the UI.** The Commands screen only
   issues process-control actions (start / stop / restart / update) against
-  the backend; it never places or cancels orders. `LIVE_EXECUTION_ENABLED`
-  in `src/lib/config.ts` is hard-wired `false`.
+  the backend; it never places or cancels orders.
 
 ## Auth (Stage 18)
 
@@ -52,7 +49,7 @@ token.
 ```sh
 cd frontend
 npm install
-cp .env.example .env.local     # then edit VITE_API_PROXY_TARGET / VITE_TRADING_MODE
+cp .env.example .env.local     # then edit VITE_API_PROXY_TARGET 
 npm run dev                     # http://localhost:5173
 ```
 

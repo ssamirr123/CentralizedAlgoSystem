@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ServerListEntry } from "@/api/types";
 import { ApiError } from "@/api/client";
-import { TRADING_MODE } from "@/lib/config";
 
 const REGIONS = [
   "ap-south-1",
@@ -69,10 +68,6 @@ export function ServerFormModal({
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className={`mode-banner ${TRADING_MODE}`} style={{ marginBottom: 12 }}>
-          <span className="pulse" />
-          {TRADING_MODE === "live" ? "Live Trading" : "Paper Trading"}
-        </div>
         <h3>{mode === "create" ? "Add Server" : `Edit ${initial?.server_id}`}</h3>
         <p style={{ color: "var(--text-dim)", fontSize: 12.5, marginTop: 0 }}>
           {mode === "create"

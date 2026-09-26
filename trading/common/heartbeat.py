@@ -28,6 +28,8 @@ class ControlCenterMetrics:
     status: str = "RUNNING"
     pnl: float = 0.0
     position: str | None = None
+    trading_mode: str | None = None  # "LIVE" / "PAPER"
+    running_lots: int | None = None
 
 
 class ControlCenterHeartbeatAgent:
@@ -83,11 +85,19 @@ class ControlCenterHeartbeatAgent:
             self._thread.join(timeout=timeout_seconds)
         self._logger.info("Control-center heartbeat agent stopped for %s on %s", self.algo_name, self.server_name)
 
-    def update_metrics(self, status: str, pnl: float, position: str | None = None) -> None:
+    def update_metrics(
+        self, status: str, pnl: float, position: str | None = None,
+        trading_mode: str | None = None, running_lots: int | None = None,
+    ) -> None:
+        """trading_mode / running_lots are sticky: None keeps the last value."""
         with self._metrics_lock:
             self._metrics.status = status
             self._metrics.pnl = pnl
             self._metrics.position = position
+            if trading_mode is not None:
+                self._metrics.trading_mode = trading_mode.upper()
+            if running_lots is not None:
+                self._metrics.running_lots = int(running_lots)
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
@@ -100,7 +110,10 @@ class ControlCenterHeartbeatAgent:
 
     def _build_payload(self) -> dict[str, Any]:
         with self._metrics_lock:
-            metrics = ControlCenterMetrics(self._metrics.status, self._metrics.pnl, self._metrics.position)
+            metrics = ControlCenterMetrics(
+                self._metrics.status, self._metrics.pnl, self._metrics.position,
+                self._metrics.trading_mode, self._metrics.running_lots,
+            )
 
         try:
             cpu = self._process.cpu_percent()
@@ -118,6 +131,8 @@ class ControlCenterHeartbeatAgent:
             "pnl": metrics.pnl,
             "position": metrics.position,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trading_mode": metrics.trading_mode,
+            "running_lots": metrics.running_lots,
         }
 
     def _send_with_retry(self, payload: dict[str, Any]) -> bool:

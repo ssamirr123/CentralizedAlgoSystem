@@ -95,12 +95,24 @@ def _start_control_center_agent():
         _cc_agent = None
 
 
+def _mode_and_lots():
+    """(trading_mode, running_lots) for the dashboard. LOT_QTY is the per-leg
+    exchange quantity; NIFTY lot size is 65."""
+    mode = "PAPER" if getattr(config, "DRY_RUN", False) else "LIVE"
+    try:
+        lots = int(config.LOT_QTY) // 65
+    except Exception:
+        lots = None
+    return mode, lots
+
+
 def _report_control_center(status, pnl, trade_count):
     global _last_cc_pnl_report_monotonic
     if _cc_agent is None:
         return
     try:
-        _cc_agent.update_metrics(status=status, pnl=pnl)
+        mode, lots = _mode_and_lots()
+        _cc_agent.update_metrics(status=status, pnl=pnl, trading_mode=mode, running_lots=lots)
         now = time.monotonic()
         if report_daily_pnl is not None and now - _last_cc_pnl_report_monotonic >= _CC_PNL_REPORT_INTERVAL_SECONDS:
             report_daily_pnl(_CC_API_BASE_URL, _CC_API_KEY, _CC_ALGO_NAME, _CC_SERVER_NAME, pnl=pnl, trade_count=trade_count)

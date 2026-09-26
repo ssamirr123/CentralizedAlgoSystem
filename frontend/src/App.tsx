@@ -10,7 +10,7 @@ import { StraddlePulsePage } from "@/pages/StraddlePulsePage";
 import { AiResearchDetailPage } from "@/pages/AiResearchDetailPage";
 import { AiResearchBacktestDetailPage } from "@/pages/AiResearchBacktestDetailPage";
 import { AiOptionsResearchDetailPage } from "@/pages/AiOptionsResearchDetailPage";
-import { NAV_ROUTES } from "@/routes";
+import { ROUTABLE } from "@/routes";
 import type { Permission } from "@/lib/config";
 
 function FullScreen({ children }: { children: ReactNode }) {
@@ -103,7 +103,7 @@ export default function App() {
                     </PermissionRoute>
                   }
                 />
-                {NAV_ROUTES.map(({ path, element: El, permission }) => (
+                {ROUTABLE.map(({ path, element: El, permission }) => (
                   <Route
                     key={path}
                     path={path === "/" ? "/" : path.slice(1)}

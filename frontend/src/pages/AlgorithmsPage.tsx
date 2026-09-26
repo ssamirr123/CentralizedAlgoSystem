@@ -17,7 +17,6 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { AlgoFormModal, type AlgoFormValue } from "@/components/AlgoFormModal";
 import { useAuth } from "@/auth/AuthContext";
 import { useCommandRunner } from "@/lib/useCommandRunner";
-import { TRADING_MODE } from "@/lib/config";
 import { formatINR, relativeAge, isStale, istDateToday, pnlSign } from "@/lib/format";
 
 type ActState = { algo: AlgoListEntry; action: Exclude<AlgoAction, "update"> };
@@ -97,8 +96,8 @@ export function AlgorithmsPage() {
         }
       />
 
-      <div className={`inline-note ${TRADING_MODE === "live" ? "warn" : ""}`} style={{ marginBottom: 14 }}>
-        <strong>{TRADING_MODE.toUpperCase()} build.</strong> Start / Stop / Restart affect the strategy{" "}
+      <div className="inline-note" style={{ marginBottom: 14 }}>
+        Start / Stop / Restart affect the strategy{" "}
         <em>process</em> only. This UI never places orders. Stop uses the backend SAFE_STOP path.
       </div>
 
@@ -163,8 +162,6 @@ export function AlgorithmsPage() {
                     <dl className="ec-meta">
                       <dt>Server</dt>
                       <dd className="mono">{a.server_id}</dd>
-                      <dt>Mode</dt>
-                      <dd style={{ textTransform: "uppercase" }}>{TRADING_MODE} · locked</dd>
                       <dt>Enabled</dt>
                       <dd>{a.enabled ? "yes" : "no"}</dd>
                       <dt>Script</dt>

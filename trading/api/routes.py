@@ -630,6 +630,7 @@ def register_algo(
         algo_id=algo.name, server_id=server.name, status=algo.status,
         enabled=algo.enabled, script_path=algo.script_path, updated_at=algo.updated_at,
         last_heartbeat=None,
+        trading_mode=algo.trading_mode, running_lots=algo.running_lots,
     )
 
     sync_success = None
@@ -692,6 +693,7 @@ def patch_algo(
         algo_id=algo.name, server_id=server.name, status=algo.status,
         enabled=algo.enabled, script_path=algo.script_path, updated_at=algo.updated_at,
         last_heartbeat=last_heartbeat,
+        trading_mode=algo.trading_mode, running_lots=algo.running_lots,
     )
 
 
@@ -782,6 +784,7 @@ def list_algos(
             algo_id=algo.name, server_id=algo.server.name, status=algo.status,
             enabled=algo.enabled, script_path=algo.script_path, updated_at=algo.updated_at,
             last_heartbeat=last_heartbeat,
+            trading_mode=algo.trading_mode, running_lots=algo.running_lots,
         )
         for algo, last_heartbeat in rows
     ]
@@ -826,12 +829,17 @@ def post_heartbeat(
         cpu=body.cpu, memory=body.memory, pnl=body.pnl, position=body.position,
     ))
     algo.status = body.status
+    if body.trading_mode is not None:
+        algo.trading_mode = body.trading_mode
+    if body.running_lots is not None:
+        algo.running_lots = body.running_lots
     server.last_heartbeat = ts
     db.commit()
 
     rt.heartbeat(
         body.algo_id, body.server_id, status=body.status, cpu=body.cpu, memory=body.memory,
         pnl=body.pnl, position=body.position, timestamp=ts.isoformat(),
+        trading_mode=algo.trading_mode, running_lots=algo.running_lots,
     )
 
     if previous_status != body.status:

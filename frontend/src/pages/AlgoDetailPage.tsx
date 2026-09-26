@@ -4,7 +4,6 @@ import { useAlgos, usePnlHistory, usePositions, useTrades, useLogs } from "@/api
 import { PageHeader } from "@/components/PageHeader";
 import { QueryBoundary } from "@/components/States";
 import { StatusBadge } from "@/components/StatusBadge";
-import { TRADING_MODE } from "@/lib/config";
 import { formatIST, formatINR, relativeAge, pnlSign } from "@/lib/format";
 
 export function AlgoDetailPage() {
@@ -49,8 +48,6 @@ export function AlgoDetailPage() {
                     <dd>{entry.algo_id}</dd>
                     <dt>Server</dt>
                     <dd className="mono">{entry.server_id}</dd>
-                    <dt>Mode</dt>
-                    <dd style={{ textTransform: "uppercase" }}>{TRADING_MODE} · locked</dd>
                     <dt>Status</dt>
                     <dd>
                       <StatusBadge status={entry.status} />

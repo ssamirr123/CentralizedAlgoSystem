@@ -2,7 +2,7 @@ import { useAlgos, usePnlToday } from "@/api/hooks";
 import { PageHeader } from "@/components/PageHeader";
 import { QueryBoundary } from "@/components/States";
 import { StatusBadge } from "@/components/StatusBadge";
-import { DAY_LOSS_LIMIT, STALE_MINUTES, TRADING_MODE } from "@/lib/config";
+import { DAY_LOSS_LIMIT, STALE_MINUTES } from "@/lib/config";
 import { formatINR, isStale, pnlSign, relativeAge } from "@/lib/format";
 
 function istToday(): string {
@@ -20,12 +20,7 @@ export function RiskPage() {
         description="Derived risk view — day-loss breaches, error states and stale heartbeats. Display-only; no enforcement here."
       />
 
-      <div className="grid cols-3" style={{ marginBottom: 16 }}>
-        <div className="card stat">
-          <span className="label">Trading mode</span>
-          <span className={`value ${TRADING_MODE === "live" ? "neg" : "pos"}`}>{TRADING_MODE.toUpperCase()}</span>
-          <span className="sub">this build</span>
-        </div>
+      <div className="grid cols-2" style={{ marginBottom: 16 }}>
         <div className="card stat">
           <span className="label">Day-loss limit</span>
           <span className="value">{formatINR(DAY_LOSS_LIMIT)}</span>

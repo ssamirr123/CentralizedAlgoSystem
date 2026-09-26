@@ -7,7 +7,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { AlgoPicker, type AlgoRef } from "@/components/AlgoPicker";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StatusBadge } from "@/components/StatusBadge";
-import { IS_LIVE, LIVE_EXECUTION_ENABLED, TRADING_MODE, type Permission } from "@/lib/config";
+import { type Permission } from "@/lib/config";
 import { formatIST } from "@/lib/format";
 import { useAuth } from "@/auth/AuthContext";
 
@@ -121,19 +121,9 @@ export function CommandsPage() {
         description="Process control for a registered strategy (POST /api/algo/{start,stop,restart,update})."
       />
 
-      <div className={`inline-note ${IS_LIVE ? "warn" : ""}`} style={{ marginBottom: 14 }}>
-        {IS_LIVE ? (
-          <>
-            <strong>LIVE build.</strong> These are process-control commands only. Live order execution is{" "}
-            <strong>not implemented</strong> in this UI ({String(LIVE_EXECUTION_ENABLED)}). The strategy itself decides
-            what orders to place based on the server's <code>TRADING_MODE</code>.
-          </>
-        ) : (
-          <>
-            <strong>PAPER build.</strong> Start/stop/restart/update only affect the strategy <em>process</em>. No orders
-            are placed by this UI.
-          </>
-        )}
+      <div className="inline-note" style={{ marginBottom: 14 }}>
+        Start/stop/restart/update only affect the strategy <em>process</em>. No orders are placed by this UI. Each
+        strategy decides for itself whether it trades paper or live.
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
@@ -215,7 +205,7 @@ export function CommandsPage() {
               Target: <code>{ref?.algoId}</code> on <code>{ref?.serverId}</code>.
             </p>
             <p>
-              This sends a <strong>{TRADING_MODE.toUpperCase()}</strong> process-control command. It does not place or
+              This sends a process-control command. It does not place or
               cancel any orders.
             </p>
           </>
