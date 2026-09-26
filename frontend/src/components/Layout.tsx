@@ -3,7 +3,6 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { NAV_ROUTES } from "@/routes";
 import { useAuth } from "@/auth/AuthContext";
 import { useHealth } from "@/api/hooks";
-import { TradingModeBadge, TradingModeStripe } from "./TradingModeBadge";
 import { RealtimeIndicator } from "./RealtimeIndicator";
 import { AlertsBell } from "./AlertsBell";
 import { MarketTicker } from "./MarketTicker";
@@ -64,10 +63,8 @@ export function Layout({ children }: { children: ReactNode }) {
       </aside>
 
       <div className="main">
-        <TradingModeStripe />
         <header className="topbar">
           <strong style={{ fontSize: 15 }}>{active?.label ?? "Trading Control Center"}</strong>
-          <TradingModeBadge />
           <MarketTicker />
           <div className="spacer" />
           <RealtimeIndicator />

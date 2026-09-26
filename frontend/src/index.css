@@ -228,6 +228,8 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; font-
 .badge.error   { color: var(--neg); border-color: var(--neg); }
 .badge.unknown { color: var(--text-faint); }
 .badge.stale   { color: var(--warn); border-color: var(--warn); }
+.badge.live    { color: var(--live); border-color: var(--live); }
+.badge.paper   { color: var(--paper); border-color: var(--paper); }
 
 /* ---- states ------------------------------------------- */
 .state { padding: 40px 20px; text-align: center; color: var(--text-dim); }

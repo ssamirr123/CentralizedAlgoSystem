@@ -24,11 +24,12 @@ def _emit(event_type: str, data: dict[str, Any]) -> None:
 
 def heartbeat(algo_id: str, server_id: str, *, status: str, cpu: float | None = None,
               memory: float | None = None, pnl: float | None = None,
-              position: str | None = None, timestamp: str | None = None) -> None:
+              position: str | None = None, timestamp: str | None = None,
+              trading_mode: str | None = None, running_lots: int | None = None) -> None:
     _emit(events.HEARTBEAT, {
         "algo_id": algo_id, "server_id": server_id, "status": status,
         "cpu": cpu, "memory": memory, "pnl": pnl, "position": position,
-        "timestamp": timestamp,
+        "timestamp": timestamp, "trading_mode": trading_mode, "running_lots": running_lots,
     })
 
 

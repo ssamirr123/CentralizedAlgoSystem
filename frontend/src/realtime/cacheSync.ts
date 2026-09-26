@@ -26,6 +26,8 @@ export function applyEventToCache(qc: QueryClient, ev: MonitoringEvent): void {
       patchAlgo(qc, d.algo_id, d.server_id, {
         status: d.status,
         last_heartbeat: d.timestamp ?? new Date().toISOString(),
+        ...(d.trading_mode ? { trading_mode: d.trading_mode } : {}),
+        ...(d.running_lots != null ? { running_lots: d.running_lots } : {}),
       });
       break;
     }

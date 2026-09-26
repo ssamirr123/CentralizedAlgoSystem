@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AlgoActionRequest(BaseModel):
@@ -105,6 +105,8 @@ class AlgoListEntry(BaseModel):
     script_path: str
     updated_at: datetime
     last_heartbeat: datetime | None = None
+    trading_mode: str | None = None  # LIVE / PAPER, as last reported by the strategy
+    running_lots: int | None = None
 
 
 class AlgoIn(BaseModel):
@@ -149,6 +151,8 @@ class HeartbeatIn(BaseModel):
     pnl: float | None = None
     position: str | None = None
     timestamp: datetime | None = None  # server sets to now if omitted
+    trading_mode: Literal["LIVE", "PAPER"] | None = None  # omitted -> keep last reported value
+    running_lots: int | None = Field(default=None, ge=0)
 
 
 class HeartbeatAck(BaseModel):
