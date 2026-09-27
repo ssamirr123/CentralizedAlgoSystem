@@ -2,10 +2,12 @@
 Entry point: python trading/algos/ETF_Momentum/main.py
 
 Long-running process (Start/Stop from the Control Center like any other
-algo). Most of the month it only refreshes marks and sends heartbeats; on
-the first trading day of each month, after the close, it rebalances the
-paper portfolio into the top-6 ETFs by momentum -- the same rules as the
-backtest ETF_Momentum_Test_1.py.
+algo; the EventBridge schedule starts it 09:00 and stops it 15:27 IST on
+weekdays). Most of the month it only refreshes marks and sends heartbeats.
+Once the first trading day of a month has closed, it rebalances the paper
+portfolio into the top-6 ETFs by momentum at that day's close -- the same
+rules and prices as the backtest ETF_Momentum_Test_1.py. On the 09:00-15:27
+schedule that happens the next morning; on a 24/7 box, the same evening.
 
 PAPER ONLY: no broker is connected and no real order is ever placed.
 Fills are simulated at the rebalance day's close and kept in
@@ -60,7 +62,6 @@ class EtfMomentumRunner:
         self.portfolio = Portfolio.load_or_new(strat.state_file, strat.initial_capital)
         self._next_rebalance_check = datetime.min.replace(tzinfo=IST)
         self._next_price_refresh = datetime.min.replace(tzinfo=IST)
-        self._attempts = (None, 0)          # (date, rebalance attempts that day)
 
     # ── reporting helpers (never raise; dashboard failures never block trading) ──
     @property
@@ -106,67 +107,80 @@ class EtfMomentumRunner:
 
     # ── rebalance ────────────────────────────────────────────────────────────
     def _rebalance_due(self, now: datetime) -> bool:
-        today = now.date()
-        if now.weekday() >= 5 or now.time() < self._strat.rebalance_time:
-            return False
+        """Cheap pre-check (no download): is a rebalance possibly outstanding?"""
         if now < self._next_rebalance_check:
             return False
+        today = now.date()
         last = self.portfolio.last_rebalance
         if last is not None and date.fromisoformat(last).replace(day=1) == today.replace(day=1):
             return False                     # already rebalanced this month
-        if last is None and not self._strat.start_now and today.day > 7:
+        if last is None and not self._strat.start_now and today.day > 10:
             return False                     # fresh start: wait for next month's first trading day
         return True
 
-    def _schedule_next_check(self, now: datetime, tomorrow: bool) -> None:
-        if tomorrow:
-            self._next_rebalance_check = _at(now.date() + timedelta(days=1), self._strat.rebalance_time)
-        else:
+    def _schedule_next_check(self, now: datetime, retry: bool = False) -> None:
+        """Retry soon on a data failure; otherwise look again once another
+        session's close can have become final (today's close, else tomorrow)."""
+        if retry:
             self._next_rebalance_check = now + timedelta(minutes=self._strat.rebalance_retry_minutes)
+        elif now.time() < self._strat.close_final_time:
+            self._next_rebalance_check = _at(now.date(), self._strat.close_final_time)
+        else:
+            self._next_rebalance_check = _at(now.date() + timedelta(days=1), self._strat.first_check_time)
+
+    def completed_closes(self, closes: pd.DataFrame, now: datetime) -> pd.DataFrame:
+        """Drop today's still-forming bar before the close is final."""
+        if (not closes.empty and closes.index[-1] == pd.Timestamp(now.date())
+                and now.time() < self._strat.close_final_time):
+            return closes.iloc[:-1]
+        return closes
 
     def _try_rebalance(self, now: datetime) -> None:
-        from trading.algos.ETF_Momentum.market_data import fetch_closes
+        from trading.algos.ETF_Momentum import market_data
 
         today = now.date()
-        day, n = self._attempts
-        self._attempts = (today, (n + 1) if day == today else 1)
-
         symbols = [s for s, _ in UNIVERSE]
-        closes, missing = fetch_closes(symbols, today - timedelta(days=self._strat.history_calendar_days), today)
-        if closes.empty or pd.Timestamp(today) not in closes.index:
-            give_up = self._attempts[1] >= self._strat.rebalance_max_attempts_per_day
-            log_event(self._logger, logging.INFO, "NO_CLOSE_FOR_TODAY",
-                      attempt=self._attempts[1], giving_up_for_today=give_up)
-            self._schedule_next_check(now, tomorrow=give_up)
+        closes, missing = market_data.fetch_closes(
+            symbols, today - timedelta(days=self._strat.history_calendar_days), today)
+        closes = self.completed_closes(closes, now)
+        if closes.empty:
+            log_event(self._logger, logging.WARNING, "WARNING", message="No price data from yfinance; retrying")
+            self._schedule_next_check(now, retry=True)
             return
 
+        # The latest completed session is the signal day: decisions and paper
+        # fills use its close, exactly as the backtest does, even when this
+        # runs the next morning.
+        signal_day = closes.index[-1].date()
         p = self.portfolio
-        if is_first_trading_day_of_month(closes.index, today):
+        last = p.last_rebalance
+        if last is not None and date.fromisoformat(last).replace(day=1) == signal_day.replace(day=1):
+            self._schedule_next_check(now)   # this month's first session hasn't closed yet
+            return
+        if is_first_trading_day_of_month(closes.index, signal_day):
             kind = "SCHEDULED"
-        elif p.last_rebalance is not None:
+        elif last is not None:
             kind = "CATCH_UP"
             log_event(self._logger, logging.WARNING, "WARNING",
-                      message="First trading day of the month was missed; rebalancing late at today's close",
-                      last_rebalance=p.last_rebalance)
+                      message="First trading day of the month was missed; rebalancing late",
+                      signal_day=signal_day.isoformat(), last_rebalance=last)
         elif self._strat.start_now:
             kind = "START_NOW"
         else:
-            log_event(self._logger, logging.INFO, "WAITING_FOR_FIRST_TRADING_DAY")
-            self._schedule_next_check(now, tomorrow=True)
+            log_event(self._logger, logging.INFO, "WAITING_FOR_FIRST_TRADING_DAY",
+                      signal_day=signal_day.isoformat())
+            self._schedule_next_check(now)
             return
 
         if missing:
             log_event(self._logger, logging.INFO, "SYMBOLS_WITHOUT_DATA", symbols=missing)
 
-        result = rebalance(p, closes, today)
-        prev_row = closes.iloc[-2] if len(closes) > 1 else closes.iloc[-1]
-        for sym, h in p.holdings.items():
-            h.prev_close = h.entry_price if h.entry_date == today.isoformat() else float(prev_row.get(sym, h.last_price))
+        result = rebalance(p, closes, signal_day)
         p.save(self._strat.state_file)
-        self._schedule_next_check(now, tomorrow=True)
+        self._schedule_next_check(now)
 
         for o in result.orders:
-            order_id = f"PAPER-{today:%Y%m%d}-{o.side}-{o.symbol}"
+            order_id = f"PAPER-{signal_day:%Y%m%d}-{o.side}-{o.symbol}"
             if o.side == "SELL":
                 event = "SL" if o.reason == "SL" else "EXIT"
                 log_event(self._logger, logging.INFO, event, symbol=o.symbol, qty=o.qty, price=o.price,
@@ -177,7 +191,7 @@ class EtfMomentumRunner:
                           score=round(o.score or 0.0, 2), mode="PAPER")
             self._report(report_trade, symbol=o.symbol, side=o.side, quantity=o.qty, price=o.price,
                          order_id=order_id)
-        log_event(self._logger, logging.INFO, "REBALANCE_DONE", kind=kind, as_of=today.isoformat(),
+        log_event(self._logger, logging.INFO, "REBALANCE_DONE", kind=kind, signal_day=signal_day.isoformat(),
                   top=result.top, skipped_below_dma=result.skipped_below_dma,
                   orders=len(result.orders), interest=round(result.interest, 2),
                   value=round(result.value_after, 2), cash=round(p.cash, 2))
@@ -191,10 +205,10 @@ class EtfMomentumRunner:
 
         p = self.portfolio
         if p.holdings:
-            from trading.algos.ETF_Momentum.market_data import fetch_closes
+            from trading.algos.ETF_Momentum import market_data
 
             today = now.date()
-            closes, _ = fetch_closes(sorted(p.holdings), today - timedelta(days=10), today)
+            closes, _ = market_data.fetch_closes(sorted(p.holdings), today - timedelta(days=10), today)
             for sym, h in p.holdings.items():
                 if closes.empty or sym not in closes:
                     continue
@@ -227,7 +241,7 @@ def main() -> int:
     logger = get_logger(component=ALGO_NAME, server=server_name, algo=ALGO_NAME)
 
     log_event(logger, logging.INFO, "ALGO_STARTED", pid=get_pid(), mode=strat.mode,
-              rebalance_time=strat.rebalance_time.isoformat(), state_file=str(strat.state_file))
+              close_final_time=strat.close_final_time.isoformat(), state_file=str(strat.state_file))
     if strat.mode != "paper":
         log_event(logger, logging.ERROR, "ERROR",
                   message=f"ETF_MOMENTUM_MODE={strat.mode!r} is not supported; only 'paper' is implemented")

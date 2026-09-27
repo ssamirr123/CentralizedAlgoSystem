@@ -150,15 +150,18 @@ def _runner(tmp_path, **overrides) -> EtfMomentumRunner:
     return EtfMomentumRunner(TradingConfig(), cfg, "test", logging.getLogger("t"), None)
 
 
-def _ist(y, m, d, hh=16, mm=5) -> datetime:
+def _ist(y, m, d, hh=10, mm=0) -> datetime:
     return datetime(y, m, d, hh, mm, tzinfo=IST)
 
 
-def test_rebalance_not_due_before_close_or_on_weekend(tmp_path):
-    r = _runner(tmp_path)
-    assert not r._rebalance_due(_ist(2026, 9, 1, 15, 0))     # before 16:00
-    assert not r._rebalance_due(_ist(2026, 8, 1))            # Saturday
-    assert r._rebalance_due(_ist(2026, 9, 1))
+@pytest.fixture
+def feed(monkeypatch):
+    """Serve synthetic closes ending on a given date instead of yfinance."""
+    from trading.algos.ETF_Momentum import market_data
+
+    state = {}
+    monkeypatch.setattr(market_data, "fetch_closes", lambda symbols, start, end: (state["closes"], []))
+    return state
 
 
 def test_fresh_start_waits_for_next_month(tmp_path):
@@ -171,4 +174,47 @@ def test_not_due_again_in_same_month(tmp_path):
     r.portfolio.last_rebalance = "2026-09-01"
     assert not r._rebalance_due(_ist(2026, 9, 2))
     assert r._rebalance_due(_ist(2026, 10, 1))
-    assert r._rebalance_due(_ist(2026, 10, 15))              # active + missed -> catch up
+
+
+def test_next_morning_rebalances_at_first_sessions_close(tmp_path, feed):
+    """09:00-15:27 schedule: the algo is down at the close of Oct 1, so it
+    rebalances on Oct 2's morning using Oct 1's close -- same as the backtest."""
+    feed["closes"] = _closes(end="2026-10-01")
+    r = _runner(tmp_path)
+    r.on_tick(_ist(2026, 10, 2, 9, 5))
+    assert r.portfolio.last_rebalance == "2026-10-01"
+    assert len(r.portfolio.holdings) == N_HOLD
+    for h in r.portfolio.holdings.values():
+        assert h.entry_date == "2026-10-01"
+        assert h.entry_price == pytest.approx(feed["closes"][h.symbol].iloc[-1])
+    assert r._next_rebalance_check == _ist(2026, 10, 2, 16, 0)
+    assert not r._rebalance_due(_ist(2026, 10, 5))
+
+
+def test_todays_bar_ignored_before_close(tmp_path, feed):
+    """Oct 1 at 14:00: today's bar is still forming, so the signal day is
+    Sep 30 -- not a first trading day, nothing happens yet."""
+    feed["closes"] = _closes(end="2026-10-01")
+    r = _runner(tmp_path)
+    r.on_tick(_ist(2026, 10, 1, 14, 0))
+    assert r.portfolio.last_rebalance is None
+    assert not r.portfolio.holdings
+    assert r._next_rebalance_check == _ist(2026, 10, 1, 16, 0)
+    r.on_tick(_ist(2026, 10, 1, 16, 5))              # 24/7 box: same evening
+    assert r.portfolio.last_rebalance == "2026-10-01"
+
+
+def test_active_portfolio_waits_for_new_month_close(tmp_path, feed):
+    feed["closes"] = _closes(end="2026-10-01")
+    r = _runner(tmp_path)
+    r.portfolio.last_rebalance = "2026-09-01"
+    r.on_tick(_ist(2026, 10, 1, 9, 5))               # signal day Sep 30: already done
+    assert r.portfolio.last_rebalance == "2026-09-01"
+
+
+def test_missed_first_session_catches_up_at_latest_close(tmp_path, feed):
+    feed["closes"] = _closes(end="2026-10-07")
+    r = _runner(tmp_path)
+    r.portfolio.last_rebalance = "2026-09-01"
+    r.on_tick(_ist(2026, 10, 8, 9, 5))
+    assert r.portfolio.last_rebalance == "2026-10-07"
