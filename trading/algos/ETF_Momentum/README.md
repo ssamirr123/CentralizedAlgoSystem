@@ -27,11 +27,17 @@ backtest.
 
 - Runs continuously; heartbeat every 10 s, marks/positions/day P&L
   refreshed every 15 min in market hours (yfinance daily bars).
-- Rebalance check at `ETF_MOMENTUM_REBALANCE_TIME` IST (default 16:00) on
-  weekdays. It rebalances only when today's close exists in the data and
-  today is the month's first session — holidays are handled by the data.
-- Missed the first trading day (process down)? It rebalances late at the
-  next close and ships a WARNING to the Logs page.
+- The rebalance always uses the **first trading day's close** (the
+  backtest's price). Today's bar only counts as a close after
+  `ETF_MOMENTUM_CLOSE_FINAL_TIME` IST (default 16:00).
+  - On the EventBridge schedule (algos run 09:00–15:27 IST) the algo is
+    down at the close, so it rebalances the **next morning** with the
+    first trading day's close. Trades are dated that day.
+  - On a box running 24/7 it rebalances the same evening after 16:00.
+  - Holidays are handled by the data: the first session in the month's
+    price data is the first trading day.
+- Missed it entirely (algo not running the day after either)? It
+  rebalances late at the latest close and ships a WARNING to the Logs page.
 - A fresh ledger waits for the next month's first trading day unless
   `ETF_MOMENTUM_START_NOW=true`.
 
@@ -49,8 +55,8 @@ backtest.
 |---|---|---|
 | `ETF_MOMENTUM_MODE` | `paper` | only `paper` is supported |
 | `ETF_MOMENTUM_CAPITAL` | `1000000` | starting capital (₹) for a new ledger |
-| `ETF_MOMENTUM_REBALANCE_TIME` | `16:00` | IST time the daily rebalance check starts |
-| `ETF_MOMENTUM_START_NOW` | `false` | new ledger rebalances at the next close instead of next month |
+| `ETF_MOMENTUM_CLOSE_FINAL_TIME` | `16:00` | IST time after which today's bar is treated as the final close |
+| `ETF_MOMENTUM_START_NOW` | `false` | new ledger rebalances at the latest close instead of waiting for next month |
 
 `STRATEGY_NAME` / `SERVER_NAME` / `API_BASE_URL` / `CONTROL_API_KEY` are
 injected by `START_ALGO` as for every algo.

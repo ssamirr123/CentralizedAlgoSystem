@@ -63,10 +63,15 @@ class EtfMomentumConfig:
     initial_capital: float = field(
         default_factory=lambda: float(os.environ.get("ETF_MOMENTUM_CAPITAL", "1000000"))
     )
-    # IST. After the 15:30 close so the day's close is final in the data feed.
-    rebalance_time: dtime = field(
-        default_factory=lambda: _parse_hhmm(os.environ.get("ETF_MOMENTUM_REBALANCE_TIME", "16:00"))
+    # IST. Today's daily bar only counts as a final close after this time;
+    # before it, the latest completed session is the previous one. The
+    # rebalance always uses the first trading day's close, so it runs
+    # either that evening (box up 24/7) or the next morning (the 09:00-15:27
+    # EventBridge schedule stops algos before the close).
+    close_final_time: dtime = field(
+        default_factory=lambda: _parse_hhmm(os.environ.get("ETF_MOMENTUM_CLOSE_FINAL_TIME", "16:00"))
     )
+    first_check_time: dtime = dtime(9, 5)
     # true -> a fresh portfolio rebalances on the next trading day instead of
     # waiting for the first trading day of next month.
     start_now: bool = field(
@@ -77,7 +82,6 @@ class EtfMomentumConfig:
     loop_interval_seconds: float = 30.0
     price_refresh_minutes: int = 15
     rebalance_retry_minutes: int = 15
-    rebalance_max_attempts_per_day: int = 8
     state_file: Path = field(default_factory=lambda: DATA_DIR / f"{ALGO_NAME}.portfolio.json")
 
 
