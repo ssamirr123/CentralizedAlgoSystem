@@ -47,6 +47,8 @@ __pycache__/
 trading/data/*.pid
 trading/data/*.state.json
 trading/data/*.stop_requested
+trading/data/*.portfolio.json
+trading/data/*.portfolio.json.tmp
 trading/logs/*.log
 
 # AI Research Engine: TradingAgents cache/results/decision-memory, all
