@@ -1,0 +1,7 @@
+requests>=2.32.0
+psutil>=6.0.0
+pandas>=2.2.2
+numpy
+yfinance>=0.2.54
+# IANA tz database for zoneinfo("Asia/Kolkata") on Windows hosts
+tzdata

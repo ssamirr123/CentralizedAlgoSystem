@@ -37,6 +37,8 @@ def test_no_literal_credential_assignments(path: Path):
 def test_strategy_config_reads_angel_creds_from_env(path: Path):
     if path.parent.name == "example_strategy":
         pytest.skip("template uses trading.common.config, not AngelOne")
+    if path.parent.name == "ETF_Momentum":
+        pytest.skip("paper-only, no broker credentials")
     src = path.read_text(encoding="utf-8")
     assert "_angel_creds()" in src
     assert "ANGELONE_API_KEY" in src and "ANGELONE_TOTP_SECRET" in src
