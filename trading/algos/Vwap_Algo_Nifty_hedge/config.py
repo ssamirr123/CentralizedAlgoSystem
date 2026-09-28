@@ -66,8 +66,8 @@ def _env_flag(*names, default="false"):
 # Set via env var (process env or trading/.env, loaded by _angel_creds above):
 #   VWAP_HEDGE_DRY_RUN=true   -> this algo only
 #   BOT_DRY_RUN=true          -> shared with the other algos on the box
-# Defaults to LIVE (False) so existing deployments keep trading unchanged.
-DRY_RUN = _env_flag("VWAP_HEDGE_DRY_RUN", "BOT_DRY_RUN", "BOT_DY_RUN", default="false")
+# Defaults to PAPER (True): set VWAP_HEDGE_DRY_RUN=false to place REAL orders.
+DRY_RUN = _env_flag("VWAP_HEDGE_DRY_RUN", "BOT_DRY_RUN", "BOT_DY_RUN", default="true")
 
 # --- Telegram log forwarding ---
 # Create a bot via @BotFather to get the token, and get your chat id
