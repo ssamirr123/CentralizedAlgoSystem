@@ -32,7 +32,7 @@ def makeconnection_shoonya():
     from NorenRestApiPy.NorenApi import NorenApi
     for attempt in range(0, 3):
         try:
-            api = NorenApi(host='https://api.shoonya.com/NorenWSTP/', websocket='wss://api.shoonya.com/NorenWSTP/')
+            api = NorenApi(host='https://api.shoonya.com/NorenWClientAPI/', websocket='wss://api.shoonya.com/NorenWSTP/')
             user = config.shoonya_user_id
             pwd = config.shoonya_password
             token = config.shoonya_totp_secret
