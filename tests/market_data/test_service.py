@@ -228,3 +228,75 @@ def test_reconnect_rebuilds_provider_from_current_credentials(db_session, monkey
     assert old_prov.disconnects == 1  # the stale one was torn down
     assert built_with and built_with[0]["session_token"] == "t"  # FakeSession's current creds
     asyncio.run(svc.stop_flow())
+
+
+class SlowFailProvider(FakeProvider):
+    """connect() blocks (like Breeze's login + security-master download) and fails."""
+    def __init__(self, block_seconds=0.3):
+        super().__init__()
+        self.block_seconds = block_seconds
+        self.connect_calls = 0
+
+    def connect(self):
+        import time as _t
+        self.connect_calls += 1
+        _t.sleep(self.block_seconds)
+        raise RuntimeError("breeze down")
+
+
+def test_reconnect_does_not_block_event_loop(db_session, monkeypatch):
+    """A slow, failing Breeze connect must run off the event loop, so other
+    requests (algo heartbeats) keep being served during reconnect."""
+    import time as _t
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep())
+    prov = SlowFailProvider(block_seconds=0.3)
+    svc = _svc(provider=prov)
+    svc._accepting = True
+
+    async def main():
+        task = asyncio.create_task(svc._reconnect())
+        gaps, last = [], _t.monotonic()
+        while not task.done():
+            await _real_sleep(0.01)
+            now = _t.monotonic(); gaps.append(now - last); last = now
+        await task
+        return max(gaps)
+
+    worst_gap = asyncio.run(main())
+    assert prov.connect_calls == 5
+    assert worst_gap < 0.2, f"event loop was blocked for {worst_gap:.2f}s"
+
+
+def test_staleness_check_never_overlaps_reconnects_and_cools_down(db_session, monkeypatch):
+    import trading.market_data.service as service_mod
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep())
+    prov = SlowFailProvider(block_seconds=0.05)
+    svc = _svc(provider=prov)
+    svc._accepting = True
+    svc.cache._last_tick_at = NOW.replace(hour=0)         # very stale (clock is NOW)
+
+    async def main():
+        for _ in range(20):                               # 20 flush ticks while stale
+            svc._check_staleness()
+            await _real_sleep(0.01)
+        await svc._reconnect_task
+        first = prov.connect_calls
+        for _ in range(5):                                # still stale, but cooling down
+            svc._check_staleness()
+            await _real_sleep(0.01)
+        return first
+
+    first = asyncio.run(main())
+    assert first == 5, f"expected one reconnect loop (5 attempts), got {first} connects"
+    assert prov.connect_calls == 5, "a new loop started during the cool-down"
+    assert svc._reconnect_not_before > 0
+    assert service_mod._RECONNECT_COOLDOWN_SECONDS == 300
+
+
+_real_sleep = asyncio.sleep
+
+
+def _fast_sleep():
+    async def fast(delay, *a, **k):
+        return await _real_sleep(0)
+    return fast

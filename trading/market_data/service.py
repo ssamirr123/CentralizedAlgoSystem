@@ -51,6 +51,9 @@ _INDEX_SUBSCRIBE = ("NIFTY", "BANKNIFTY", "INDIA_VIX", "SENSEX")
 # index with no listed option chain, so keep it explicit and separate
 # from _INDEX_SUBSCRIBE (which is spot ticks only).
 _OPTION_UNDERLYINGS = STRADDLE_PULSE_UNDERLYINGS
+# After a reconnect loop exhausts its attempts, wait this long before the
+# staleness check may start another one (Breeze down / session expired).
+_RECONNECT_COOLDOWN_SECONDS = 300
 
 
 class MarketDataService:
@@ -87,6 +90,10 @@ class MarketDataService:
         self._option_universe: dict[str, set[str]] = {u: set() for u in _OPTION_UNDERLYINGS}
         self._last_publish: dict[str, float] = {}
         self._reconnects = 0
+        # One reconnect loop at a time, and a cool-down after one gives up --
+        # otherwise every flush tick of a stale feed spawned another loop.
+        self._reconnect_task: asyncio.Task | None = None
+        self._reconnect_not_before = 0.0          # time.monotonic() deadline
         self.straddle_pulse = StraddlePulseEngine(
             master=self.master, cache=self.cache, session_factory=self._session_factory,
             settings=self.settings,
@@ -317,7 +324,9 @@ class MarketDataService:
             self._publish_status(FeedState.STALE)
             logger.warning("market_data.stale last_tick_age=%.0fs", age)
         if age > 3 * self.settings.market_data_stale_seconds:
-            asyncio.create_task(self._reconnect())
+            running = self._reconnect_task is not None and not self._reconnect_task.done()
+            if not running and time.monotonic() >= self._reconnect_not_before:
+                self._reconnect_task = asyncio.create_task(self._reconnect())
 
     async def _reconnect(self) -> None:
         if not self._accepting or self._provider is None:
@@ -330,10 +339,10 @@ class MarketDataService:
                 pass
             await asyncio.sleep(delay)
             try:
-                self._provider.connect()
-                index_insts = [INDEX_INSTRUMENTS[s_] for s_ in _INDEX_SUBSCRIBE]
-                self._provider.subscribe(index_insts, self._on_tick, resolver=self._resolve_tick)
-                self._resubscribe_option_universe()
+                # Breeze connect (login + security-master download) and
+                # subscribe are blocking network calls: run them off the event
+                # loop so the API keeps serving heartbeats meanwhile.
+                await asyncio.to_thread(self._reconnect_blocking)
                 self._reconnects += 1
                 FEED_STATUS.update(reconnect_count=self._reconnects, feed_state=FeedState.RUNNING)
                 logger.info("breeze.reconnected attempt=%d", attempt)
@@ -342,6 +351,14 @@ class MarketDataService:
                 logger.warning("breeze.reconnect_failed attempt=%d err=%s", attempt, type(exc).__name__)
                 delay = min(delay * 2, 30.0)
         FEED_STATUS.update(feed_state=FeedState.ERROR, last_error="reconnect attempts exhausted")
+        self._reconnect_not_before = time.monotonic() + _RECONNECT_COOLDOWN_SECONDS
+        logger.warning("breeze.reconnect_exhausted next_try_in=%ds", _RECONNECT_COOLDOWN_SECONDS)
+
+    def _reconnect_blocking(self) -> None:
+        self._provider.connect()
+        index_insts = [INDEX_INSTRUMENTS[s_] for s_ in _INDEX_SUBSCRIBE]
+        self._provider.subscribe(index_insts, self._on_tick, resolver=self._resolve_tick)
+        self._resubscribe_option_universe()
 
     # --- option universe -------------------------------------
     def _persist_contracts(self) -> None:
