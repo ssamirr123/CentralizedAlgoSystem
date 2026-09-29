@@ -68,7 +68,7 @@ INDEX_TOKEN  = '99926000'      # NIFTY spot token (NSE)
 INDEX_EXCH   = 'NSE'
 OPT_EXCH     = 'NFO'
 STRIKE_STEP  = 50
-LOT_QTY      = '390'           # 6 lots x 65 (NIFTY lot size = 65)
+LOT_QTY      = '65'           # 6 lots x 65 (NIFTY lot size = 65)
 
 # ============================ TIMINGS (IST, 24h) ============================
 HEDGE_ENTRY   = (10, 20)
@@ -80,6 +80,12 @@ FINAL_EXIT    = (15, 25)
 # ============================ SL / TARGET (points) ============================
 SL_POINTS     = 25
 TARGET_POINTS = 50
+
+# Resting broker stop-loss for each short leg, placed right after entry
+# (STOPLOSS_LIMIT BUY, trigger = entry + SL_POINTS) so the leg stays protected
+# even if this process dies. Cancelled before any other exit of that leg.
+PLACE_BROKER_SL  = True
+SL_LIMIT_BUFFER  = 2.0         # limit price = trigger + this (rupees), same as Vwap_Algo_Nifty_hedge
 
 # ============================ HEDGE DISTANCE (points) ============================
 HEDGE_GAP_EXPIRY     = 500

@@ -135,9 +135,14 @@ def _trademanager(strike):
             if(df['Datetime'][count]=='15:25:00'):
                 if(isintrade):
                     time.sleep(random.randint(1,9)/10)
-                    print(str(strike)+' Trade Booked '+str('    '))
-                    rest_func.place_market_order(symbol,token,config.qty,'BUY')
-                    monitor.report('RUNNING')   # trade executed -> push metrics
+                    # Cancel the resting SL first so it can't fire after the buy-back.
+                    sl_status = rest_func.cancel_stoploss_order(sl_orderid) if sl_orderid else None
+                    if sl_status == 'complete':
+                        print(str(strike)+' Stoploss already executed - no booking needed '+str('    '))
+                    else:
+                        print(str(strike)+' Trade Booked '+str('    '))
+                        rest_func.place_market_order(symbol,token,config.qty,'BUY')
+                        monitor.report('RUNNING')   # trade executed -> push metrics
                     isintrade = False
 
                 time.sleep(random.randint(1, 9) / 10)

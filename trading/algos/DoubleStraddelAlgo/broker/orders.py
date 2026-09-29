@@ -192,17 +192,66 @@ def modify_limit(orderid, symbol, token, qty, side, attempt=1):
     return _retry(_call, f'modify_limit({symbol})')
 
 
-def cancel(orderid):
+def cancel(orderid, variety="NORMAL"):
+    """variety must match the order's own (NORMAL / STOPLOSS) or AngelOne
+    rejects the cancel."""
     if getattr(config, 'DRY_RUN', False):
         print(f'[DRY RUN] CANCEL id={orderid}')
         return True
 
     def _call(_):
-        r = config.objconn.cancelOrder(str(orderid), "NORMAL")
-        print(f'[ORDER] CANCEL id={orderid}')
+        r = config.objconn.cancelOrder(str(orderid), variety)
+        print(f'[ORDER] CANCEL id={orderid} variety={variety}')
         return r or True
 
     return _retry(_call, f'cancel({orderid})')
+
+
+def place_stoploss(symbol, token, qty, trigger):
+    """Resting STOPLOSS_LIMIT BUY protecting a short leg. Deliberately NOT
+    handed to _manage_pending (that would re-price it into a plain LIMIT)."""
+    trigger = _round_tick(trigger)
+    price = _round_tick(trigger + config.SL_LIMIT_BUFFER)
+    if getattr(config, 'DRY_RUN', False):
+        oid = f'DRYRUN-SL-{int(time.time() * 1000)}'
+        print(f'[DRY RUN] STOPLOSS BUY {symbol} qty={qty} trigger={trigger} price={price} id={oid}')
+        return oid
+
+    def _call(_):
+        params = {
+            "variety": "STOPLOSS",
+            "tradingsymbol": str(symbol),
+            "symboltoken": str(token),
+            "transactiontype": "BUY",
+            "exchange": config.OPT_EXCH,
+            "ordertype": "STOPLOSS_LIMIT",
+            "producttype": "INTRADAY",
+            "duration": "DAY",
+            "price": str(price),
+            "triggerprice": str(trigger),
+            "quantity": str(qty),
+        }
+        oid = config.objconn.placeOrder(params)
+        if oid is None:
+            raise ValueError('no order id returned (possibly rejected)')
+        print(f'[ORDER] STOPLOSS BUY {symbol} qty={qty} trigger={trigger} price={price} id={oid}')
+        return oid
+
+    return _retry(_call, f'place_stoploss({symbol})')
+
+
+def fresh_status(orderid):
+    """(status, average_price) of an order from a freshly fetched order book;
+    ('', None) if not found (always so in DRY_RUN)."""
+    refresh_orderbook(force=True)
+    o = order_status(orderid)
+    if not o:
+        return '', None
+    try:
+        avg = float(o.get('averageprice') or 0) or None
+    except Exception:
+        avg = None
+    return str(o.get('status', '')).lower(), avg
 
 
 def order_status(orderid):
@@ -316,7 +365,7 @@ def cancel_all_pending():
     """Cancel every open/pending order (deliverable: cancel all pending orders)."""
     for o in refresh_orderbook():
         if str(o.get('status', '')).lower() in ('open', 'pending', 'trigger pending', 'modified'):
-            cancel(o.get('orderid'))
+            cancel(o.get('orderid'), o.get('variety') or 'NORMAL')
 
 
 def cancel_pending_for_tokens(tokens):
@@ -330,6 +379,6 @@ def cancel_pending_for_tokens(tokens):
     for o in refresh_orderbook():
         if str(o.get('symboltoken')) in wanted and \
                 str(o.get('status', '')).lower() in ('open', 'pending', 'trigger pending', 'modified'):
-            cancel(o.get('orderid'))
+            cancel(o.get('orderid'), o.get('variety') or 'NORMAL')
 
 

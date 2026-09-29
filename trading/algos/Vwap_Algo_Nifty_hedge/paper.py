@@ -99,6 +99,15 @@ def modify_stoploss(order_id, trigger):
     return order_id
 
 
+def cancel_stoploss(order_id):
+    with _lock:
+        sl = _sl_orders.get(str(order_id))
+        if sl and sl['status'] == 'open':
+            sl['status'] = 'cancelled'
+    print(f'[DRY_RUN] stoploss {order_id} cancelled')
+    return order_id
+
+
 def check_stoploss(order_id):
     """Return 'complete' once LTP has reached the trigger (fills it),
     'cancelled' if it was cancelled, else 'open'."""

@@ -179,6 +179,22 @@ def modify_stoploss_order(symbol,token,qty,stoploss,orderid):
 
     return _retry_call(_call, retries=5, base_delay=1, label=f'modify_stoploss_order({symbol})')
 
+def cancel_stoploss_order(orderid):
+    """Cancel a resting STOPLOSS order. Returns its status afterwards from a
+    fresh order book ('complete' = it had already filled), or None."""
+    if config.DRY_RUN:
+        paper.cancel_stoploss(orderid)
+        return 'cancelled'
+
+    def _call():
+        config.objconn.cancelOrder(str(orderid), 'STOPLOSS')
+        print('Stoploss Order cancelled', orderid)
+        return True
+
+    _retry_call(_call, retries=5, base_delay=1, label=f'cancel_stoploss_order({orderid})')
+    info = order_info(str(orderid), get_orderbook())
+    return info[3] if info else None
+
 def order_info(orderid,orderbook):
     if not orderbook:                       # None or empty -> nothing to look up yet
         return None
@@ -205,6 +221,8 @@ def sltracking(order_id,token):
         if info is not None and info[3] == 'complete':
             config.slhit[token] = True
             break
+        if info is not None and info[3] in ('cancelled', 'rejected'):
+            break                           # SL gone (cancelled at exit / rejected) -> stop tracking
         time.sleep(1)
 
 def get_hedge_strike(symbol):
