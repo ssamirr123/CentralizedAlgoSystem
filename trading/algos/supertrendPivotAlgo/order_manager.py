@@ -4,6 +4,8 @@ Place and exit option orders, track current open position, and enforce risk
 controls such as max trades per day and single-position rule.
 """
 
+import time
+
 import config
 from logger import get_logger
 
@@ -92,6 +94,28 @@ class OrderManager:
             log.error("LTP fetch failed for %s: %s", contract["symbol"], exc)
             return 0.0
 
+    # Delays (seconds) between LTP attempts when recording a fill price.
+    _FILL_PRICE_RETRY_DELAYS = (1, 2, 3, 4)
+
+    def _fill_price(self, contract):
+        """LTP to record as the fill price. Retries through short broker/API
+        blips so a single timeout doesn't book the trade at 0.00 (which made
+        all later P&L for the day meaningless). Returns 0.0 only if every
+        attempt failed -- logged loudly. Only the *recorded* price is
+        affected; whether/when to trade is decided before this is called."""
+        ltp = self._get_ltp(contract)
+        for delay in self._FILL_PRICE_RETRY_DELAYS:
+            if ltp:
+                return ltp
+            log.warning("LTP unavailable for %s - retrying in %ss", contract["symbol"], delay)
+            time.sleep(delay)
+            ltp = self._get_ltp(contract)
+        if not ltp:
+            log.error("FILL PRICE UNKNOWN for %s after %d attempts - recorded as 0.00; "
+                      "P&L for this trade will be wrong", contract["symbol"],
+                      len(self._FILL_PRICE_RETRY_DELAYS) + 1)
+        return ltp
+
     def _place_order(self, contract, transaction_type):
         qty = config.QUANTITY_LOTS * contract.get("lotsize", self.cfg["lot_size"])
         params = {
@@ -107,14 +131,14 @@ class OrderManager:
         }
 
         if config.DRY_RUN:
-            ltp = self._get_ltp(contract)
+            ltp = self._fill_price(contract)
             log.info("[DRY_RUN] %s %s qty=%s @ ~%.2f",
                      transaction_type, contract["symbol"], qty, ltp)
             return {"order_id": "DRYRUN", "price": ltp, "qty": qty}
 
         try:
             order_id = self.smart.placeOrder(params)
-            ltp = self._get_ltp(contract)
+            ltp = self._fill_price(contract)
             log.info("Order placed: %s %s qty=%s id=%s",
                      transaction_type, contract["symbol"], qty, order_id)
             return {"order_id": order_id, "price": ltp, "qty": qty}
