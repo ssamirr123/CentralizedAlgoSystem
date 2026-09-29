@@ -118,3 +118,52 @@ def test_update_algo_reports_self_heal_in_result(monkeypatch, repo_pair, tmp_pat
     assert "warning" in result
     assert "trading/algos/fake_algo/main.py" in result["warning"] or \
         "trading\\algos\\fake_algo\\main.py" in result["warning"]
+
+
+def _update_env(monkeypatch, clone):
+    monkeypatch.setattr(trading_agent, "PROJECT_ROOT", clone)
+    monkeypatch.setattr(trading_agent, "ALGOS_DIR", clone / "trading" / "algos")
+    monkeypatch.setattr(trading_agent, "read_pid_file", lambda algo_name: None)
+    states = []
+    monkeypatch.setattr(trading_agent, "_write_state", lambda *a, **kw: states.append((a, kw)))
+    return states
+
+
+def test_update_brings_in_a_brand_new_algo(monkeypatch, repo_pair):
+    """First UPDATE of a new algo: its main.py only exists on origin, so the
+    pull must happen before the existence check (real incident: 'No algo
+    named ...' for supertrendPivotAlgo on its first update)."""
+    seed, clone = repo_pair
+    _add_and_push(seed, "trading/algos/new_algo/main.py", "print('new')\n")
+    assert not (clone / "trading" / "algos" / "new_algo" / "main.py").exists()
+    states = _update_env(monkeypatch, clone)
+
+    result = trading_agent.update_algo("new_algo")
+
+    assert result["updated"] is True, result
+    assert (clone / "trading" / "algos" / "new_algo" / "main.py").read_text() == "print('new')\n"
+    assert states, "state should be recorded for a successful update"
+
+
+def test_update_unknown_algo_still_pulls_but_reports_missing(monkeypatch, repo_pair):
+    seed, clone = repo_pair
+    _add_and_push(seed, "other.txt", "x\n")
+    states = _update_env(monkeypatch, clone)
+
+    result = trading_agent.update_algo("typo_algo")
+
+    assert result["updated"] is False
+    assert "No algo named 'typo_algo'" in result["message"] and result["message"].startswith("pulled ")
+    assert (clone / "other.txt").exists()          # the pull itself did happen
+    assert not states                              # no state file for a non-existent algo
+
+
+@pytest.mark.parametrize("bad", ["", "..", "../etc", "a/b", "a" + chr(92) + "b"])
+def test_update_rejects_path_like_names_before_pulling(monkeypatch, repo_pair, bad):
+    seed, clone = repo_pair
+    _add_and_push(seed, "other.txt", "x\n")
+    _update_env(monkeypatch, clone)
+
+    with pytest.raises(trading_agent.AlgoNotFoundError):
+        trading_agent.update_algo(bad)
+    assert not (clone / "other.txt").exists()      # nothing pulled

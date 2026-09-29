@@ -424,7 +424,12 @@ def _pull_ff_only_with_conflict_recovery() -> dict:
 
 
 def update_algo(algo_name: str) -> dict:
-    _algo_main_path(algo_name)
+    # No existence check before the pull: a brand-new algo only arrives on
+    # this box BY pulling, so requiring its main.py first made the first
+    # UPDATE of every new algo fail. Checked after the pull instead. The name
+    # is still validated up front since it is used in file paths below.
+    if not algo_name or algo_name in (".", "..") or any(c in algo_name for c in "/\\"):
+        raise AlgoNotFoundError(f"Invalid algo name '{algo_name}'.")
 
     pid = read_pid_file(algo_name)
     if pid is not None and is_process_running(pid):
@@ -449,6 +454,17 @@ def update_algo(algo_name: str) -> dict:
             "algo": algo_name,
             "updated": False,
             "message": f"git update failed: {exc.stderr.strip() if exc.stderr else exc}",
+        }
+
+    try:
+        _algo_main_path(algo_name)
+    except AlgoNotFoundError as exc:
+        return {
+            "algo": algo_name,
+            "updated": False,
+            "previous_version": previous_version,
+            "new_version": new_version,
+            "message": f"pulled {new_version[:7]} but {exc}",
         }
 
     _write_state(algo_name, last_command="UPDATE", last_update_at=_now_iso(), version=new_version)
