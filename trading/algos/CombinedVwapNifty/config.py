@@ -21,7 +21,7 @@ def _env_flag(*names, default="false"):
 
 # ============================ BROKER SELECTION ============================
 # Supported brokers: 'SHOONYA' or 'ANGELONE' (defaults to SHOONYA)
-BROKER = os.environ.get("BROKER", "SHOONYA").strip().upper()
+BROKER = os.environ.get("BROKER", "ANGELONE").strip().upper()
 
 
 def _read_env_file():
