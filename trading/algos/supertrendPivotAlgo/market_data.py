@@ -167,6 +167,13 @@ class MarketData:
         live_df = pd.DataFrame(live)
         live_df["datetime"] = pd.to_datetime(live_df["datetime"])
 
+        # Defense in depth: if more than one live candle ever shares a timestamp
+        # (e.g. a real bar followed by a degenerate single-tick replay built
+        # from a late tick), keep the FIRST — the real bar built from the full
+        # set of ticks within the bucket. CandleAggregator now rejects such
+        # late ticks, so this dedupe is a safety net.
+        live_df = live_df.drop_duplicates(subset="datetime", keep="first")
+
         combined = pd.concat([rest_df, live_df], ignore_index=True)
         # Live rows come last, so keep="last" lets them override REST bars.
         combined = combined.drop_duplicates(
