@@ -76,6 +76,56 @@ def test_normal_bucket_rollover_still_works():
     assert completed[0]["close"] == 101.0
 
 
+def test_merge_live_candles_drops_pre_open_bars():
+    """Pre-open live candles (before MARKET_OPEN = 09:15) must be dropped
+    before merging into the Supertrend input. On 2026-10-01 the live stream
+    emitted 09:00/09:05/09:10 bars; the 09:00 bar spanned 223 points and
+    polluted Wilder ATR for the first ~15 bars of the session, which caused
+    a spurious RED->GREEN flip at 10:00 that Angel's chart did not show."""
+    from unittest.mock import MagicMock
+    import importlib
+    md_mod = importlib.import_module("market_data")
+
+    rest_df = pd.DataFrame(
+        [
+            {"datetime": pd.Timestamp("2026-09-30 15:25:00"),
+             "open": 22700.0, "high": 22705.0, "low": 22690.0,
+             "close": 22695.0, "volume": 0},
+        ]
+    )
+    pre_open_and_session = [
+        # Pre-open bar with the pathological 223-point range from 2026-10-01.
+        {"datetime": pd.Timestamp("2026-10-01 09:00:00"),
+         "open": 22265.50, "high": 22465.70, "low": 22242.50,
+         "close": 22452.45, "volume": 0},
+        {"datetime": pd.Timestamp("2026-10-01 09:05:00"),
+         "open": 22452.90, "high": 22547.15, "low": 22446.50,
+         "close": 22543.70, "volume": 0},
+        {"datetime": pd.Timestamp("2026-10-01 09:10:00"),
+         "open": 22543.70, "high": 22543.70, "low": 22543.70,
+         "close": 22543.70, "volume": 0},
+        # First real session bar — must survive.
+        {"datetime": pd.Timestamp("2026-10-01 09:15:00"),
+         "open": 22554.50, "high": 22589.35, "low": 22523.55,
+         "close": 22556.20, "volume": 0},
+    ]
+
+    stream = MagicMock()
+    stream.get_live_candles.return_value = pre_open_and_session
+
+    md = md_mod.MarketData.__new__(md_mod.MarketData)
+    md._stream = stream
+    merged = md._merge_live_candles(rest_df)
+
+    session_times = merged[merged["datetime"] >= pd.Timestamp("2026-10-01")]
+    assert len(session_times) == 1
+    assert session_times.iloc[0]["datetime"] == pd.Timestamp("2026-10-01 09:15:00")
+    assert session_times.iloc[0]["high"] == 22589.35
+    assert not (merged["datetime"] == pd.Timestamp("2026-10-01 09:00:00")).any()
+    assert not (merged["datetime"] == pd.Timestamp("2026-10-01 09:05:00")).any()
+    assert not (merged["datetime"] == pd.Timestamp("2026-10-01 09:10:00")).any()
+
+
 def test_merge_live_candles_dedupe_keeps_first():
     """market_data._merge_live_candles must drop a duplicate degenerate
     live row at the same timestamp (belt-and-braces for the aggregator
