@@ -43,6 +43,15 @@ _CC_SERVER_NAME = os.environ.get("SERVER_NAME")
 _CC_API_BASE_URL = os.environ.get("API_BASE_URL")
 _CC_API_KEY = os.environ.get("CONTROL_API_KEY")
 _CC_PNL_REPORT_INTERVAL_SECONDS = 60
+# Control-center API caps heartbeats at 60/60s. The agent's own default of
+# 10s is well inside that cap for a single strategy but overflows it when
+# several strategies on the same server all heartbeat at once (observed as
+# repeated HTTP 429s on 2026-10-01). 30s keeps each strategy comfortably
+# under the cap even with multiple algos on the same server; override via
+# the env var when the server is dedicated to a single strategy.
+_CC_HEARTBEAT_INTERVAL_SECONDS = int(
+    os.environ.get("CONTROL_HEARTBEAT_INTERVAL_SECONDS", "30")
+)
 
 _cc_agent = None
 _last_cc_pnl_report_monotonic = 0.0
@@ -86,6 +95,7 @@ def _start_control_center_agent():
             server_name=_CC_SERVER_NAME,
             api_base_url=_CC_API_BASE_URL,
             api_key=_CC_API_KEY,
+            interval_seconds=_CC_HEARTBEAT_INTERVAL_SECONDS,
         )
         _cc_agent.start()
     except Exception as e:
