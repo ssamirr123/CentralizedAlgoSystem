@@ -72,6 +72,12 @@ class CandleAggregator:
         self._completed = []          # list of finished candle dicts
         self._current = None          # the forming candle dict
         self._last_volume = None      # cumulative volume from feed (if any)
+        # Timestamp of the most recently finalized bucket. Used to reject late
+        # ticks that would otherwise resurrect a closed bar (WebSocket latency
+        # can deliver ticks whose exchange_timestamp still falls inside the
+        # just-closed bucket, which previously produced a second degenerate
+        # H=L=O=C bar at the same timestamp).
+        self._last_finalized_bucket = None
 
     def add_tick(self, price, timestamp=None, cumulative_volume=None):
         """
@@ -94,6 +100,16 @@ class CandleAggregator:
         bucket = _floor_to_bucket(ts, self.interval)
 
         with self._lock:
+            # Reject late ticks for an already-finalized bucket. Without this,
+            # a tick arriving after finalize_due() cleared _current would spawn
+            # a fresh single-tick bar at the old bucket, producing a duplicate
+            # degenerate H=L=O=C candle at the same timestamp.
+            if (
+                self._last_finalized_bucket is not None
+                and bucket <= self._last_finalized_bucket
+            ):
+                return
+
             if self._current is None:
                 self._current = self._new_candle(bucket, price)
             elif bucket > self._current["datetime"]:
@@ -137,6 +153,7 @@ class CandleAggregator:
         if c is None:
             return
         self._completed.append(c)
+        self._last_finalized_bucket = c["datetime"]
         log.info(
             "Live candle closed %s O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
             c["datetime"], c["open"], c["high"], c["low"], c["close"], c["volume"],

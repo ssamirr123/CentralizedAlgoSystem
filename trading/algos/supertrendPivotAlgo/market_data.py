@@ -167,6 +167,25 @@ class MarketData:
         live_df = pd.DataFrame(live)
         live_df["datetime"] = pd.to_datetime(live_df["datetime"])
 
+        # Drop pre-open bars (e.g. 09:00/09:05/09:10). The live tick stream
+        # aggregates pre-open auction ticks into candles that Angel One's chart
+        # does NOT include; feeding them into Supertrend's Wilder ATR pollutes
+        # the bands for the first ~15 bars of the session (the pre-open bar can
+        # span 200+ points vs the usual ~40-point 5-min range) and causes
+        # spurious direction flips later in the day.
+        market_open = pd.Timestamp(config.MARKET_OPEN).time()
+        live_df = live_df[live_df["datetime"].dt.time >= market_open]
+
+        if live_df.empty:
+            return rest_df
+
+        # Defense in depth: if more than one live candle ever shares a timestamp
+        # (e.g. a real bar followed by a degenerate single-tick replay built
+        # from a late tick), keep the FIRST — the real bar built from the full
+        # set of ticks within the bucket. CandleAggregator now rejects such
+        # late ticks, so this dedupe is a safety net.
+        live_df = live_df.drop_duplicates(subset="datetime", keep="first")
+
         combined = pd.concat([rest_df, live_df], ignore_index=True)
         # Live rows come last, so keep="last" lets them override REST bars.
         combined = combined.drop_duplicates(
