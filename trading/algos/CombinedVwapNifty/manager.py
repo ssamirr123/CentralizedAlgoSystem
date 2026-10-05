@@ -81,14 +81,34 @@ def _trademanager():
             cp = df['CP'][count]
             cv = df['CV'][count]
 
-            if signal_state == 'WAIT_ARM' and cp > cv:
+            # Re-entry mode: once any leg has been exited today, further
+            # entries fire on CV>CP alone (no prior ARM required). The FIRST
+            # entry of the day still goes through the full WAIT_ARM ->
+            # (CP>CV) -> ARMED -> (CV>CP) -> TRIGGER cycle.
+            # handle_trigger is already idempotent for legs that are open or
+            # still in REENTRY_COOLDOWN_SECONDS, so firing it on every CV>CP
+            # candle while a leg is flat is safe -- it either re-enters or
+            # no-ops.
+            any_leg_exited_today = any(
+                config.last_exit_time.get(t, 0) > 0 for t in (ce_token, pe_token)
+            )
+            needs_reentry = any(
+                not config.in_position.get(t) for t in (ce_token, pe_token)
+            )
+
+            if any_leg_exited_today and needs_reentry and cv > cp:
+                print(f'[SIGNAL] {ts} RE-ENTRY TRIGGERED  (CV {cv} > CP {cp})')
+                handle_trigger(ts, ce_symbol, ce_token, pe_symbol, pe_token, qty)
+                # Leave signal_state alone: re-entry mode no longer gates on it.
+
+            elif signal_state == 'WAIT_ARM' and cp > cv:
                 signal_state = 'ARMED'
                 print(f'[SIGNAL] {ts} ARMED  (CP {cp} > CV {cv})')
 
             elif signal_state == 'ARMED' and cv > cp:
                 print(f'[SIGNAL] {ts} TRIGGERED  (CV {cv} > CP {cp})')
                 handle_trigger(ts, ce_symbol, ce_token, pe_symbol, pe_token, qty)
-                signal_state = 'WAIT_ARM'   # require a fresh arm->trigger before any further entry
+                signal_state = 'WAIT_ARM'   # kept for the first-entry path; re-entries ignore it
 
             firstflagentry = False
             time.sleep(1)   # don't re-evaluate the same second twice
