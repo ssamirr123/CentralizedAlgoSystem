@@ -3,6 +3,14 @@ import pandas as pd
 from datetime import datetime
 
 
+# Rule 1/2 skip-logging debounce: when a threshold is tripped but no open leg
+# is actually losing, we hold instead of exiting a winner (see
+# check_combined_risk). To avoid logging that hold on every single tick while
+# the condition persists, we remember which ladder index last logged the skip
+# and only re-log when it changes.
+_skip_log_state = {'index': None}
+
+
 def trademanager():
     try:
         _trademanager()
@@ -26,6 +34,7 @@ def _trademanager():
         config.reentry_count[token] = 0
     config.combined_risk_level_index = 0
     config.day_stopped = False
+    _skip_log_state['index'] = None
 
     # 'WAIT_ARM' -> (CP>CV) -> 'ARMED' -> (CV>CP) -> fires entries, resets to 'WAIT_ARM'
     signal_state = 'WAIT_ARM'
@@ -228,14 +237,23 @@ def _combined_loss(ce_token, pe_token, qty):
 def _bigger_loser(ce_symbol, ce_token, pe_symbol, pe_token, qty):
     """Whichever OPEN leg's premium has risen more since its own entry
     (Rules 1/2: "if CE premium is increasing more -> CE is losing more").
-    Comparison is still valid unfloored: a leg currently in profit simply
-    sorts last (most negative), so it's never picked as the "bigger loser"
-    unless both open legs are actually in profit."""
+
+    Returns (None, None) if no open leg is actually losing. This matters when
+    one leg has already been exited by an earlier rule and the other has since
+    moved into profit: the earlier docstring claim that a profitable leg is
+    "never picked unless both are in profit" only held while both were still
+    open and sorting picked the less-negative one. With a single surviving
+    profitable leg, it was being picked as the "bigger loser" and squared off
+    even though it wasn't losing -- so Rule 2 ended up closing a winner. We
+    now require strictly positive loss (loss convention: >0 means losing) on
+    the chosen leg; if nothing qualifies, Rules 1/2 skip and the ladder waits
+    for Rule 3's full-exit to handle a true blowout."""
     candidates = [
         (_leg_unrealized_pnl_as_loss(ce_token, qty), ce_symbol, ce_token),
         (_leg_unrealized_pnl_as_loss(pe_token, qty), pe_symbol, pe_token),
     ]
     candidates = [c for c in candidates if config.in_position.get(c[2])]
+    candidates = [c for c in candidates if c[0] > 0]   # only legs actually losing
     if not candidates:
         return None, None
     candidates.sort(key=lambda c: c[0], reverse=True)
@@ -298,7 +316,20 @@ def check_combined_risk(ce_symbol, ce_token, pe_symbol, pe_token, qty):
     # Rule 1 / Rule 2: exit only the bigger loser, other leg keeps running.
     loser_symbol, loser_token = _bigger_loser(ce_symbol, ce_token, pe_symbol, pe_token, qty)
     if loser_token is None:
+        # Threshold tripped, but no open leg is actually losing (e.g. one leg
+        # was already exited by an earlier rule and the survivor is in
+        # profit). Don't square off a winner -- HOLD and wait for the exited
+        # leg to re-enter (CV>CP re-entry path). We DO NOT advance the
+        # ladder: when PE re-enters and starts losing again while combined
+        # loss is still >= this level's threshold, THIS rule should still
+        # fire on PE. Rule 3 still remains the top-of-ladder blowout cut.
+        # Log once per skip-streak so we don't spam the log every tick.
+        if _skip_log_state.get('index') != level_index:
+            print(f'[RISK] Rule {level_index + 1}: combined loss {combined_loss:.2f} >= {threshold:.2f} '
+                  f'but no open leg is losing - holding, waiting for re-entry ({detail})')
+            _skip_log_state['index'] = level_index
         return
+    _skip_log_state['index'] = None   # a real loser is back -> reset skip-streak so next skip re-logs
     print(f'[RISK] Rule {level_index + 1}: combined loss {combined_loss:.2f} >= {threshold:.2f} '
           f'- exiting losing leg {loser_symbol} only ({detail})')
     exit_leg(loser_symbol, loser_token, qty, reason=f'SL_LEVEL_{level_index + 1}')
