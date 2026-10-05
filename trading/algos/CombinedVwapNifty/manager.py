@@ -3,6 +3,14 @@ import pandas as pd
 from datetime import datetime
 
 
+# Rule 1/2 skip-logging debounce: when a threshold is tripped but no open leg
+# is actually losing, we hold instead of exiting a winner (see
+# check_combined_risk). To avoid logging that hold on every single tick while
+# the condition persists, we remember which ladder index last logged the skip
+# and only re-log when it changes.
+_skip_log_state = {'index': None}
+
+
 def trademanager():
     try:
         _trademanager()
@@ -26,6 +34,7 @@ def _trademanager():
         config.reentry_count[token] = 0
     config.combined_risk_level_index = 0
     config.day_stopped = False
+    _skip_log_state['index'] = None
 
     # 'WAIT_ARM' -> (CP>CV) -> 'ARMED' -> (CV>CP) -> fires entries, resets to 'WAIT_ARM'
     signal_state = 'WAIT_ARM'
@@ -289,13 +298,18 @@ def check_combined_risk(ce_symbol, ce_token, pe_symbol, pe_token, qty):
     if loser_token is None:
         # Threshold tripped, but no open leg is actually losing (e.g. one leg
         # was already exited by an earlier rule and the survivor is in
-        # profit). Don't square off a winner -- hold, let Rule 3 handle a
-        # true blowout. Advance the ladder index anyway so we don't re-log
-        # this on every tick.
-        print(f'[RISK] Rule {level_index + 1}: combined loss {combined_loss:.2f} >= {threshold:.2f} '
-              f'but no open leg is losing - skipping leg exit ({detail})')
-        config.combined_risk_level_index += 1
+        # profit). Don't square off a winner -- HOLD and wait for the exited
+        # leg to re-enter (CV>CP re-entry path). We DO NOT advance the
+        # ladder: when PE re-enters and starts losing again while combined
+        # loss is still >= this level's threshold, THIS rule should still
+        # fire on PE. Rule 3 still remains the top-of-ladder blowout cut.
+        # Log once per skip-streak so we don't spam the log every tick.
+        if _skip_log_state.get('index') != level_index:
+            print(f'[RISK] Rule {level_index + 1}: combined loss {combined_loss:.2f} >= {threshold:.2f} '
+                  f'but no open leg is losing - holding, waiting for re-entry ({detail})')
+            _skip_log_state['index'] = level_index
         return
+    _skip_log_state['index'] = None   # a real loser is back -> reset skip-streak so next skip re-logs
     print(f'[RISK] Rule {level_index + 1}: combined loss {combined_loss:.2f} >= {threshold:.2f} '
           f'- exiting losing leg {loser_symbol} only ({detail})')
     exit_leg(loser_symbol, loser_token, qty, reason=f'SL_LEVEL_{level_index + 1}')
