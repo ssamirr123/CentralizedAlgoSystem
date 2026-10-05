@@ -194,14 +194,25 @@ def modify_limit(orderid, symbol, token, qty, side, attempt=1):
 
 def cancel(orderid, variety="NORMAL"):
     """variety must match the order's own (NORMAL / STOPLOSS) or AngelOne
-    rejects the cancel."""
+    rejects the cancel.
+
+    AngelOne's cancelOrder endpoint only accepts {NORMAL, STOPLOSS, ROBO} --
+    passing 'AMO' (how the order book reports an After-Market Order) returns
+    'Invalid Order Variety' and the order is NOT cancelled. We silently map
+    AMO -> NORMAL here so the sweep at 14:14 / 15:25 actually clears those
+    orders instead of leaving them queued for the next trading day's 9:15
+    open match.
+    """
+    v = str(variety or 'NORMAL').upper()
+    if v == 'AMO':
+        v = 'NORMAL'
     if getattr(config, 'DRY_RUN', False):
         print(f'[DRY RUN] CANCEL id={orderid}')
         return True
 
     def _call(_):
-        r = config.objconn.cancelOrder(str(orderid), variety)
-        print(f'[ORDER] CANCEL id={orderid} variety={variety}')
+        r = config.objconn.cancelOrder(str(orderid), v)
+        print(f'[ORDER] CANCEL id={orderid} variety={v}')
         return r or True
 
     return _retry(_call, f'cancel({orderid})')

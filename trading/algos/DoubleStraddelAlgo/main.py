@@ -26,7 +26,29 @@ import connectapi
 import token_file
 import websocket_feed as wf
 import monitor
+from datetime import date
 from strategy.engine import run
+
+
+def _is_trading_day(today=None):
+    today = today or date.today()
+    # Sat=5, Sun=6
+    if today.weekday() >= 5:
+        return False, f'weekend ({today.strftime("%A")})'
+    if today.isoformat() in set(getattr(config, 'HOLIDAYS', []) or []):
+        return False, f'NSE holiday ({today.isoformat()})'
+    return True, ''
+
+
+_ok, _reason = _is_trading_day()
+if not _ok:
+    # On a holiday / weekend Angel still accepts orders but silently converts
+    # them to AMO (After-Market Orders) that execute at the NEXT trading day's
+    # 9:15 open auction. The algo then can't cancel them because the
+    # cancelOrder endpoint rejects variety='AMO'. The whole run is a no-op at
+    # best and a liability at worst -- bail out before touching the broker.
+    print(f'[STARTUP] Not a trading day - {_reason}. Exiting without starting engine.')
+    sys.exit(0)
 
 # Best-effort heartbeat agent (never affects trading).
 monitor.start()
