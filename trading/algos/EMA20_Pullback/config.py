@@ -1,13 +1,11 @@
 """
 Central configuration for EMA20_Pullback.
 
-Mirrors the supertrendPivotAlgo layout: strategy rules are module-level
-constants, operational knobs come from env vars, and the dashboard-
-related vars (SERVER_NAME / API_BASE_URL / CONTROL_API_KEY / STRATEGY_NAME)
-are read here so `monitor.py` can decide whether to attach.
+Angel One SmartAPI credentials + index metadata + strategy rules +
+dashboard integration flags, keyed off env vars with a trading/.env
+fallback. Mirrors supertrendPivotAlgo so one operator runbook covers both.
 
-IMPORTANT: Never commit real credentials. Prefer env vars or the
-git-ignored `trading/.env`.
+IMPORTANT: Never commit real credentials.
 """
 from __future__ import annotations
 
@@ -30,8 +28,7 @@ _read_env_file()
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
-    value = os.getenv(name, default)
-    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+    return str(os.getenv(name, default)).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def _parse_hhmm(raw: str) -> dtime:
@@ -43,20 +40,67 @@ def today() -> date:
     return date.today()
 
 
+# ─── Angel One SmartAPI credentials ──────────────────────────────────────────
+def _angel_creds() -> dict:
+    def _g(*names):
+        for n in names:
+            v = os.environ.get(n, "").strip()
+            if v:
+                return v
+        return ""
+
+    return {
+        "clientid": _g("ANGELONE_CLIENT_ID"),
+        "apikey":   _g("ANGELONE_API_KEY"),
+        "mpin":     _g("ANGELONE_MPIN", "ANGELONE_PASSWORD"),
+        "token":    _g("ANGELONE_TOTP_SECRET"),
+    }
+
+
+_ANGEL = _angel_creds()
+clientid = _ANGEL["clientid"]
+apikey = _ANGEL["apikey"]
+mpin = _ANGEL["mpin"]
+token = _ANGEL["token"]
+
 # ─── Algo identity ───────────────────────────────────────────────────────────
 ALGO_NAME = "EMA20_Pullback"
 STRATEGY_NAME = os.getenv("STRATEGY_NAME", ALGO_NAME)
 
-# ─── Instrument / market settings ────────────────────────────────────────────
+# ─── Instrument / index metadata ─────────────────────────────────────────────
 INDEX = os.getenv("EMA20_PULLBACK_INDEX", "NIFTY")
-STRIKE_STEP = 50
-LOT_SIZE = int(os.getenv("EMA20_PULLBACK_LOT_SIZE", "75"))
-QUANTITY_LOTS = int(os.getenv("EMA20_PULLBACK_LOTS", "5"))
+
+INDEX_CONFIG = {
+    "NIFTY": {
+        "name": "NIFTY",
+        "spot_symbol": "NIFTY",
+        "spot_token": "99926000",
+        "exchange": "NFO",
+        "spot_exchange": "NSE",
+        "feed_exchange_type": 1,
+        "strike_step": 50,
+        "lot_size": int(os.getenv("EMA20_PULLBACK_LOT_SIZE", "75")),
+    },
+}
+
+
+def get_index_config() -> dict:
+    if INDEX not in INDEX_CONFIG:
+        raise ValueError(f"Unsupported INDEX '{INDEX}'. Use one of {list(INDEX_CONFIG)}")
+    return INDEX_CONFIG[INDEX]
+
+
+CANDLE_INTERVAL = os.getenv("EMA20_PULLBACK_CANDLE_INTERVAL", "ONE_MINUTE")
+
+REST_CANDLE_CACHE_SECONDS = int(os.getenv("EMA20_PULLBACK_REST_CACHE_SECONDS", "45"))
+CANDLE_FETCH_MAX_RETRIES = int(os.getenv("EMA20_PULLBACK_CANDLE_RETRIES", "4"))
+CANDLE_FETCH_BACKOFF_SECONDS = float(os.getenv("EMA20_PULLBACK_CANDLE_BACKOFF_SECONDS", "2"))
 
 # ─── Strategy rules (fixed; must match the backtest) ─────────────────────────
+STRIKE_STEP = 50
 STRIKE_OFFSET_ITM = -1
 SL_PCT = 0.30
-TARGET1_PCT = 0.40                       # EMA20 trend trades have more follow-through
+TARGET1_PCT = 0.40
 EMA_TRAIL_PERIOD = 10
 EMA_FAST = 20
 EMA_SLOW = 50
@@ -70,8 +114,10 @@ SCAN_FROM = _parse_hhmm(os.getenv("EMA20_PULLBACK_SCAN_FROM", "09:45"))
 SCAN_TO = _parse_hhmm(os.getenv("EMA20_PULLBACK_SCAN_TO", "13:30"))
 HARD_EXIT_TIME = _parse_hhmm(os.getenv("EMA20_PULLBACK_HARD_EXIT", "14:30"))
 
-# ─── Capital + costs ─────────────────────────────────────────────────────────
+# ─── Capital + sizing + costs ────────────────────────────────────────────────
 INITIAL_CAPITAL = float(os.getenv("EMA20_PULLBACK_CAPITAL", "200000"))
+LOT_SIZE = int(os.getenv("EMA20_PULLBACK_LOT_SIZE", "75"))
+QUANTITY_LOTS = int(os.getenv("EMA20_PULLBACK_LOTS", "5"))
 BROKERAGE_PER_LEG = float(os.getenv("EMA20_PULLBACK_BROKERAGE", "30"))
 COST_TURNOVER_PCT = float(os.getenv("EMA20_PULLBACK_COST_PCT", "0.0007"))
 
@@ -87,7 +133,7 @@ LOG_DIR = os.getenv("EMA20_PULLBACK_LOG_DIR",
                      os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs"))
 LOG_LEVEL = os.getenv("EMA20_PULLBACK_LOG_LEVEL", "INFO")
 
-# ─── Dashboard integration (exported by the Start command) ───────────────────
+# ─── Dashboard integration ───────────────────────────────────────────────────
 MONITOR_ENABLED = _env_flag("MONITOR_ENABLED", "true")
 SERVER_NAME = os.getenv("SERVER_NAME", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "")

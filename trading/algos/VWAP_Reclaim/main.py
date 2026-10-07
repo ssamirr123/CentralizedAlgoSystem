@@ -1,10 +1,8 @@
 """
 main.py
-Entry point: wires up portfolio, market data, strategy, scheduler and
-dashboard monitor, then runs the paper bot.
-
-PAPER ONLY. No real broker order is placed. Fills are simulated at the
-option LTP returned by the OptionQuoteService at trigger / exit time.
+Entry point: Angel One login → market data → strategy → scheduler →
+dashboard monitor. Paper only — Angel LTP is used as the fill price;
+no real order is placed.
 """
 from __future__ import annotations
 
@@ -12,8 +10,6 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-# Repo root on sys.path so trading.common (PID file, stop flag, dashboard
-# heartbeat) is importable, same convention the other algos use.
 _project_root = Path(__file__).resolve().parents[3]
 if str(_project_root) not in sys.path:
     sys.path.append(str(_project_root))
@@ -23,20 +19,18 @@ from trading.common.utils import (  # noqa: E402
     GracefulShutdown, clear_stop_flag, remove_pid_file, write_pid_file,
 )
 
-# The dashboard's Start command only marks the strategy RUNNING once this
-# process writes its own PID file; do it before anything slow.
+# Mark RUNNING for the dashboard before any slow work.
 write_pid_file(config.ALGO_NAME)
 clear_stop_flag(config.ALGO_NAME)
 
-from trading.algos.VWAP_Reclaim.logger import get_logger        # noqa: E402
-from trading.algos.VWAP_Reclaim.market_data import (            # noqa: E402
-    OptionQuoteService, fetch_spot_minutes, load_expiry_calendar,
-    next_weekly_expiry, thursday_of_week,
-)
+from trading.algos.VWAP_Reclaim.logger import get_logger          # noqa: E402
+from trading.algos.VWAP_Reclaim.login import login                # noqa: E402
+from trading.algos.VWAP_Reclaim.market_data import MarketData     # noqa: E402
 from trading.algos.VWAP_Reclaim.monitor import ControlCenterMonitor  # noqa: E402
+from trading.algos.VWAP_Reclaim.option_chain import OptionChain   # noqa: E402
 from trading.algos.VWAP_Reclaim.portfolio import OpenLeg, Portfolio   # noqa: E402
-from trading.algos.VWAP_Reclaim.scheduler import Scheduler            # noqa: E402
-from trading.algos.VWAP_Reclaim.strategy import (                     # noqa: E402
+from trading.algos.VWAP_Reclaim.scheduler import Scheduler        # noqa: E402
+from trading.algos.VWAP_Reclaim.strategy import (                 # noqa: E402
     ExitDecision, SignalDecision, detect, evaluate_exit, is_tradable_day,
 )
 
@@ -44,24 +38,22 @@ log = get_logger()
 
 
 class VwapReclaimBot:
-    """Owns the tick: refresh spot, mark MTM, exit, enter."""
+    """Owns the tick: refresh spot, mark MTM, evaluate exits, scan entries."""
 
-    def __init__(self, portfolio: Portfolio, option_svc: OptionQuoteService,
-                 expiries: list[date], monitor: ControlCenterMonitor | None) -> None:
+    def __init__(self, portfolio: Portfolio, market_data: MarketData,
+                 monitor: ControlCenterMonitor | None) -> None:
         self.portfolio = portfolio
-        self._option_svc = option_svc
-        self._expiries = expiries
+        self._md = market_data
         self._monitor = monitor
         self._last_heartbeat = datetime.min
 
-    # ── tick ────────────────────────────────────────────────────────────────
     def tick(self, now: datetime) -> None:
-        if not (now.weekday() < 5 and _parse_in_window(now)):
+        if not (now.weekday() < 5 and _in_window(now)):
             self._maybe_heartbeat(now, None)
             return
 
         today = now.date()
-        spot = fetch_spot_minutes(today)
+        spot = self._md.fetch_spot_minutes(today)
         if spot.empty:
             self._maybe_heartbeat(now, None)
             return
@@ -74,7 +66,7 @@ class VwapReclaimBot:
             self.portfolio.halt_this_week()
             log.warning("WEEKLY_HALT weekly_dd_pct=%.2f%%", wdd * 100)
 
-        # Exits.
+        # Exits (SL / Target1 book / Trail / TimeStop).
         if self.portfolio.open_leg is not None and mark is not None:
             leg = self.portfolio.open_leg
             if not leg.booked_half and mark >= leg.target1_price:
@@ -86,11 +78,11 @@ class VwapReclaimBot:
                 self._close(decision, now)
             mark = self._mark_leg()
 
-        # Entry eligibility.
+        # Entry gates.
         if (now.time() >= config.HARD_EXIT_TIME
                 or self.portfolio.open_leg is not None
                 or self.portfolio.is_halted()
-                or not is_tradable_day(today, self._expiries, config.SKIP_EXPIRY_DAY)
+                or not is_tradable_day(today, [self._md.next_weekly_expiry()], config.SKIP_EXPIRY_DAY)
                 or self.portfolio.losses_today >= config.MAX_LOSSES_PER_DAY):
             self._maybe_heartbeat(now, mark)
             return
@@ -101,18 +93,17 @@ class VwapReclaimBot:
 
         self._maybe_heartbeat(now, self._mark_leg())
 
-    # ── helpers ─────────────────────────────────────────────────────────────
     def _mark_leg(self) -> float | None:
         leg = self.portfolio.open_leg
         if leg is None:
             return None
-        return self._option_svc.ltp(date.fromisoformat(leg.expiry), leg.strike, leg.direction)
+        return self._md.option_ltp(leg.strike, leg.direction, date.fromisoformat(leg.expiry))
 
     def _open(self, proposal: SignalDecision, today: date, now: datetime) -> None:
-        expiry = next_weekly_expiry(today, self._expiries) or thursday_of_week(today)
+        expiry = self._md.next_weekly_expiry()
         if (expiry - today).days > 7:
             return
-        ltp = self._option_svc.ltp(expiry, proposal.strike, proposal.direction)
+        ltp = self._md.option_ltp(proposal.strike, proposal.direction, expiry)
         if ltp is None or ltp <= 1 or ltp > 2000:
             log.warning("ENTRY_SKIPPED_NO_QUOTE direction=%s strike=%d",
                         proposal.direction, proposal.strike)
@@ -156,12 +147,11 @@ class VwapReclaimBot:
         self._monitor.update_metrics(mark)
 
 
-def _parse_in_window(now: datetime) -> bool:
-    """Return True if `now` falls in the configured market window."""
+def _in_window(now: datetime) -> bool:
     oh, om = map(int, config.MARKET_OPEN.split(":"))
     ch, cm = map(int, config.MARKET_CLOSE.split(":"))
-    t = now.time()
-    return (t.hour, t.minute) >= (oh, om) and (t.hour, t.minute) <= (ch, cm)
+    t = (now.time().hour, now.time().minute)
+    return (oh, om) <= t <= (ch, cm)
 
 
 def main() -> None:
@@ -174,21 +164,21 @@ def main() -> None:
              config.HARD_EXIT_TIME.strftime("%H:%M"), config.MAX_LOSSES_PER_DAY)
     log.info("=" * 60)
 
+    smart = login()
+    option_chain = OptionChain()
+    market_data = MarketData(smart, option_chain)
+
     portfolio = Portfolio.load_or_new(config.STATE_FILE, config.INITIAL_CAPITAL)
     log.info("Portfolio loaded | cash=%.2f | open_leg=%s | closed=%d",
              portfolio.cash,
              f"{portfolio.open_leg.direction}@{portfolio.open_leg.strike}" if portfolio.open_leg else None,
              len(portfolio.closed_trades))
 
-    option_svc = OptionQuoteService()
-    expiries = load_expiry_calendar()
-
     shutdown = GracefulShutdown(algo_name=config.ALGO_NAME)
     monitor = ControlCenterMonitor(portfolio)
-    monitor_up = monitor.start()
-    agent = monitor if monitor_up else None
+    agent = monitor if monitor.start() else None
 
-    bot = VwapReclaimBot(portfolio, option_svc, expiries, agent)
+    bot = VwapReclaimBot(portfolio, market_data, agent)
 
     if agent is not None:
         try:
