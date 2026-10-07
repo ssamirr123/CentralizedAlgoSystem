@@ -11,10 +11,7 @@ from typing import Optional
 
 import pandas as pd
 
-from trading.algos.EMA20_Pullback.config import (
-    EMA_FAST, EMA_SLOW, EMA_TRAIL_PERIOD, HARD_EXIT_TIME, SCAN_FROM, SCAN_TO,
-    STRIKE_OFFSET_ITM, STRIKE_STEP,
-)
+from trading.algos.EMA20_Pullback import config
 
 
 @dataclass(frozen=True)
@@ -33,7 +30,8 @@ class ExitDecision:
 
 
 def _round_strike(spot_price: float, direction: str,
-                  offset: int = STRIKE_OFFSET_ITM, step: int = STRIKE_STEP) -> int:
+                  offset: int = config.STRIKE_OFFSET_ITM,
+                  step: int = config.STRIKE_STEP) -> int:
     atm = round(spot_price / step) * step
     if direction == "CE":
         return atm + offset * step
@@ -49,17 +47,17 @@ def _resample_5min(spot_minutes: pd.DataFrame) -> pd.DataFrame:
 
 
 def detect(spot_minutes: pd.DataFrame, now: datetime) -> Optional[SignalDecision]:
-    """EMA20 Pullback: EMA20>EMA50 trend regime, prior bar low touches
-    EMA20, current bar closes above prior high → CE. Mirror → PE."""
+    """EMA20 Pullback: EMA20>EMA50 trend; prior bar low touches EMA20 and
+    current bar closes above prior high → CE. Mirror → PE."""
     if spot_minutes.empty:
         return None
     bars5 = _resample_5min(spot_minutes)
-    if len(bars5) < EMA_SLOW:
+    if len(bars5) < config.EMA_SLOW:
         return None
     bars5 = bars5.copy()
-    bars5["ema_fast"] = bars5["Close"].ewm(span=EMA_FAST, adjust=False).mean()
-    bars5["ema_slow"] = bars5["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
-    scan = bars5.between_time(SCAN_FROM, SCAN_TO)
+    bars5["ema_fast"] = bars5["Close"].ewm(span=config.EMA_FAST, adjust=False).mean()
+    bars5["ema_slow"] = bars5["Close"].ewm(span=config.EMA_SLOW, adjust=False).mean()
+    scan = bars5.between_time(config.SCAN_FROM, config.SCAN_TO)
     if len(scan) < 2:
         return None
 
@@ -69,13 +67,10 @@ def detect(spot_minutes: pd.DataFrame, now: datetime) -> Optional[SignalDecision
             break
         prev = scan.iloc[i - 1]
         cur = scan.iloc[i]
-        # Uptrend regime: EMA20 > EMA50; prior-bar low touches EMA20 (within 0.1%);
-        # current bar closes above prior high → long CE.
         if cur["ema_fast"] > cur["ema_slow"] and prev["Low"] <= prev["ema_fast"] * 1.001 \
                 and cur["Close"] > prev["High"]:
             spot_px = float(cur["Close"])
             return SignalDecision("CE", _round_strike(spot_px, "CE"), spot_px, ts.to_pydatetime())
-        # Mirror for downtrend → long PE.
         if cur["ema_fast"] < cur["ema_slow"] and prev["High"] >= prev["ema_fast"] * 0.999 \
                 and cur["Close"] < prev["Low"]:
             spot_px = float(cur["Close"])
@@ -83,15 +78,16 @@ def detect(spot_minutes: pd.DataFrame, now: datetime) -> Optional[SignalDecision
     return None
 
 
-def evaluate_exit(leg, option_ltp: float, spot_minutes: pd.DataFrame, now: datetime) -> Optional[ExitDecision]:
-    if now.time() >= HARD_EXIT_TIME:
+def evaluate_exit(leg, option_ltp: float, spot_minutes: pd.DataFrame,
+                  now: datetime) -> Optional[ExitDecision]:
+    if now.time() >= config.HARD_EXIT_TIME:
         return ExitDecision("TimeStop", option_ltp, now)
     if option_ltp <= leg.sl_price:
         return ExitDecision("SL", leg.sl_price, now)
     if leg.booked_half and not spot_minutes.empty:
         bars5 = _resample_5min(spot_minutes)
-        if len(bars5) >= EMA_TRAIL_PERIOD:
-            ema = bars5["Close"].ewm(span=EMA_TRAIL_PERIOD, adjust=False).mean()
+        if len(bars5) >= config.EMA_TRAIL_PERIOD:
+            ema = bars5["Close"].ewm(span=config.EMA_TRAIL_PERIOD, adjust=False).mean()
             last_close = float(bars5["Close"].iloc[-1])
             last_ema = float(ema.iloc[-1])
             if leg.direction == "CE" and last_close < last_ema:

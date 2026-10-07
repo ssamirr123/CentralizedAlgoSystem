@@ -2,7 +2,6 @@
 Pure signal + exit logic for VWAP_Reclaim.
 
 No I/O. The runner feeds in minute-level NIFTY spot and current timestamp.
-Returns SignalDecision (entry) or ExitDecision (exit).
 """
 from __future__ import annotations
 
@@ -12,10 +11,7 @@ from typing import Optional
 
 import pandas as pd
 
-from trading.algos.VWAP_Reclaim.config import (
-    EMA_TRAIL_PERIOD, HARD_EXIT_TIME, SCAN_FROM, SCAN_TO,
-    STRIKE_OFFSET_ITM, STRIKE_STEP,
-)
+from trading.algos.VWAP_Reclaim import config
 
 
 @dataclass(frozen=True)
@@ -34,7 +30,8 @@ class ExitDecision:
 
 
 def _round_strike(spot_price: float, direction: str,
-                  offset: int = STRIKE_OFFSET_ITM, step: int = STRIKE_STEP) -> int:
+                  offset: int = config.STRIKE_OFFSET_ITM,
+                  step: int = config.STRIKE_STEP) -> int:
     atm = round(spot_price / step) * step
     if direction == "CE":
         return atm + offset * step
@@ -60,7 +57,7 @@ def detect(spot_minutes: pd.DataFrame, now: datetime) -> Optional[SignalDecision
     if spot_minutes.empty:
         return None
     bars5 = _resample_5min(spot_minutes)
-    scan = bars5.between_time(SCAN_FROM, SCAN_TO)
+    scan = bars5.between_time(config.SCAN_FROM, config.SCAN_TO)
     if scan.empty:
         return None
     vwap_min = _vwap(spot_minutes)
@@ -86,15 +83,16 @@ def detect(spot_minutes: pd.DataFrame, now: datetime) -> Optional[SignalDecision
     return None
 
 
-def evaluate_exit(leg, option_ltp: float, spot_minutes: pd.DataFrame, now: datetime) -> Optional[ExitDecision]:
-    if now.time() >= HARD_EXIT_TIME:
+def evaluate_exit(leg, option_ltp: float, spot_minutes: pd.DataFrame,
+                  now: datetime) -> Optional[ExitDecision]:
+    if now.time() >= config.HARD_EXIT_TIME:
         return ExitDecision("TimeStop", option_ltp, now)
     if option_ltp <= leg.sl_price:
         return ExitDecision("SL", leg.sl_price, now)
     if leg.booked_half and not spot_minutes.empty:
         bars5 = _resample_5min(spot_minutes)
-        if len(bars5) >= EMA_TRAIL_PERIOD:
-            ema = bars5["Close"].ewm(span=EMA_TRAIL_PERIOD, adjust=False).mean()
+        if len(bars5) >= config.EMA_TRAIL_PERIOD:
+            ema = bars5["Close"].ewm(span=config.EMA_TRAIL_PERIOD, adjust=False).mean()
             last_close = float(bars5["Close"].iloc[-1])
             last_ema = float(ema.iloc[-1])
             if leg.direction == "CE" and last_close < last_ema:
