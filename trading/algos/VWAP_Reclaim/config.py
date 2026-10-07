@@ -42,29 +42,28 @@ def today() -> date:
     return date.today()
 
 
-# ─── Angel One SmartAPI credentials ──────────────────────────────────────────
-# Same env var names the other Angel-based algos on this host use.
-def _angel_creds() -> dict:
-    def _g(*names):
-        for n in names:
-            v = os.environ.get(n, "").strip()
-            if v:
-                return v
-        return ""
-
-    return {
-        "clientid": _g("ANGELONE_CLIENT_ID"),
-        "apikey":   _g("ANGELONE_API_KEY"),
-        "mpin":     _g("ANGELONE_MPIN", "ANGELONE_PASSWORD"),
-        "token":    _g("ANGELONE_TOTP_SECRET"),
-    }
+# ─── Broker selection ────────────────────────────────────────────────────────
+# ANGELONE (default) or DHAN. Overridable at the algo level.
+BROKER = os.getenv("VWAP_RECLAIM_BROKER", os.getenv("BROKER", "ANGELONE")).strip().upper()
 
 
-_ANGEL = _angel_creds()
-clientid = _ANGEL["clientid"]
-apikey = _ANGEL["apikey"]
-mpin = _ANGEL["mpin"]
-token = _ANGEL["token"]
+def _creds(*names) -> str:
+    for n in names:
+        v = os.environ.get(n, "").strip()
+        if v:
+            return v
+    return ""
+
+
+# AngelOne SmartAPI credentials (same env var names the other Angel algos use).
+clientid = _creds("ANGELONE_CLIENT_ID")
+apikey = _creds("ANGELONE_API_KEY")
+mpin = _creds("ANGELONE_MPIN", "ANGELONE_PASSWORD")
+token = _creds("ANGELONE_TOTP_SECRET")
+
+# Dhan credentials (long-lived access token, no TOTP).
+dhan_client_id = _creds("DHAN_CLIENT_ID")
+dhan_access_token = _creds("DHAN_ACCESS_TOKEN")
 
 # ─── Algo identity ───────────────────────────────────────────────────────────
 ALGO_NAME = "VWAP_Reclaim"
@@ -77,10 +76,16 @@ INDEX_CONFIG = {
     "NIFTY": {
         "name": "NIFTY",
         "spot_symbol": "NIFTY",
-        "spot_token": "99926000",      # NSE index token
-        "exchange": "NFO",             # options exchange
+        # AngelOne tokens / exchanges
+        "spot_token": "99926000",
+        "exchange": "NFO",
         "spot_exchange": "NSE",
         "feed_exchange_type": 1,       # SmartWebSocketV2 exchangeType: 1 = nse_cm
+        # Dhan equivalents (NIFTY 50 spot: security_id 13 on IDX_I / INDEX)
+        "dhan_spot_security_id": int(os.getenv("DHAN_NIFTY_SPOT_SECURITY_ID", "13")),
+        "dhan_spot_exchange_segment": os.getenv("DHAN_NIFTY_SPOT_EXCHANGE_SEGMENT", "IDX_I"),
+        "dhan_spot_instrument_type": os.getenv("DHAN_NIFTY_SPOT_INSTRUMENT_TYPE", "INDEX"),
+        # Common
         "strike_step": 50,
         "lot_size": int(os.getenv("VWAP_RECLAIM_LOT_SIZE", "75")),
     },

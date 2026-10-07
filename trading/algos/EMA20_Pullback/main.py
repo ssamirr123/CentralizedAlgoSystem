@@ -159,9 +159,10 @@ def main() -> None:
              config.HARD_EXIT_TIME.strftime("%H:%M"), config.MAX_LOSSES_PER_DAY)
     log.info("=" * 60)
 
-    smart = login()
-    option_chain = OptionChain()
-    market_data = MarketData(smart, option_chain)
+    broker = login()
+    option_chain = OptionChain(broker)
+    market_data = MarketData(broker, option_chain)
+    log.info("Broker ready: %s", broker.kind)
 
     portfolio = Portfolio.load_or_new(config.STATE_FILE, config.INITIAL_CAPITAL)
     log.info("Portfolio loaded | cash=%.2f | open_leg=%s | closed=%d",
