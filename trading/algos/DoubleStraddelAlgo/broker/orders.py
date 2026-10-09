@@ -199,7 +199,7 @@ def cancel(orderid, variety="NORMAL"):
     AngelOne's cancelOrder endpoint only accepts {NORMAL, STOPLOSS, ROBO} --
     passing 'AMO' (how the order book reports an After-Market Order) returns
     'Invalid Order Variety' and the order is NOT cancelled. We silently map
-    AMO -> NORMAL here so the sweep at 14:14 / 15:25 actually clears those
+    AMO -> NORMAL here so the sweep at 14:14 / 15:18 actually clears those
     orders instead of leaving them queued for the next trading day's 9:15
     open match.
     """

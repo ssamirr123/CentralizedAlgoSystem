@@ -67,6 +67,6 @@ while config.objconn is None:
 threading.Thread(target=wf.connect, daemon=True).start()
 time.sleep(3)   # give the socket a moment to open
 
-# Blocks until the trading day ends (15:25) or an emergency square-off.
+# Blocks until the trading day ends (15:18) or an emergency square-off.
 run()
 

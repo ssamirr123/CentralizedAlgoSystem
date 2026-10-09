@@ -75,7 +75,7 @@ HEDGE_ENTRY   = (10, 20)
 MORNING_ENTRY = (10, 25)
 MORNING_EXIT  = (14, 14)
 AFT_ENTRY     = (14, 16)
-FINAL_EXIT    = (15, 25)
+FINAL_EXIT    = (15, 18)
 
 # ============================ SL / TARGET (points) ============================
 SL_POINTS     = 25

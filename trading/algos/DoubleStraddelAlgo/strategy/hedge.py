@@ -4,7 +4,7 @@ Hedge entry / exit logic (deliverable 10).
 - Hedge is bought FIRST (10:15) as LIMIT orders, far-OTM CE + PE.
 - Distance is 500 pts on expiry day, else 1000 pts.
 - Hedge stays active all day; it is NOT touched at the 14:14 morning exit.
-- Hedge exits only at 15:25 (final) or during emergency square-off (market).
+- Hedge exits only at 15:18 (final) or during emergency square-off (market).
 """
 import config
 import token_file

@@ -12,7 +12,7 @@ hedges bought first.
 | 10:25 | SELL ATM CE + PE (LIMIT). Per leg: SL = entry+25, Target = entry-50. |
 | 14:14 | Square off morning shorts + cancel morning pending orders. **Hedge stays active.** |
 | 14:16 | SELL fresh ATM CE + PE (LIMIT). Same SL/target. |
-| 15:25 | Square off all shorts + hedge, cancel all pending, stop. |
+| 15:18 | Square off all shorts + hedge, cancel all pending, stop. |
 
 Any time: if day MTM <= `-DAILY_MAX_LOSS` -> emergency square-off (market) + stop.
 
