@@ -6,7 +6,7 @@ Runs a 1-second loop that fires each timed action exactly once:
     10:25 morning straddle entry
     14:14 morning time exit (hedge stays active)
     14:16 afternoon straddle entry
-    15:25 final exit (square off shorts + hedge, cancel all, stop)
+    15:18 final exit (square off shorts + hedge, cancel all, stop)
 The risk guard runs in parallel and can trip an emergency square-off any time.
 """
 import config
@@ -76,7 +76,7 @@ def run():
                 monitor.report('RUNNING')
 
             if _hit(now, config.FINAL_EXIT) and 'final' not in done:
-                print('[ENGINE] 15:25 final exit - flatten shorts + hedge, cancel all')
+                print('[ENGINE] 15:18 final exit - flatten shorts + hedge, cancel all')
                 straddle.time_exit_straddle(state, 'afternoon')
                 straddle.print_session_pnl(state, 'afternoon')
                 time.sleep(1)

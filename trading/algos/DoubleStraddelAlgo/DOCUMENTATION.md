@@ -35,7 +35,7 @@
 | Data feed | SmartWebSocketV2 (live LTP), REST fallback |
 | Strategy type | Intraday short straddle (delta-neutral premium selling) with protective hedge |
 | Sessions per day | 2 (morning + afternoon) |
-| Runtime | Single Python process; blocks until 15:25 IST or emergency stop |
+| Runtime | Single Python process; blocks until 15:18 IST or emergency stop |
 
 The whole system communicates via `print()`, which `log_setup` mirrors to a dated
 log file (and optionally Telegram).
@@ -52,7 +52,7 @@ Times are IST (24h), defined in `config.py`.
 | **10:25** | **SELL morning straddle**: ATM CE + ATM PE (LIMIT). Per leg: **SL = entry + 25**, **Target = entry − 50**. |
 | **14:14** | Square off morning shorts + cancel morning pending orders. **Hedge stays active.** |
 | **14:16** | **SELL afternoon straddle**: fresh ATM CE + PE (LIMIT). Same SL/Target. |
-| **15:25** | Square off all shorts + hedge, cancel all pending, write report, **stop**. |
+| **15:18** | Square off all shorts + hedge, cancel all pending, write report, **stop**. |
 | **Any time** | If day MTM ≤ `−DAILY_MAX_LOSS` → **emergency square-off** (market orders) + stop. |
 
 **Key design points**
@@ -115,7 +115,7 @@ strategy_agent/agent.py  Central monitoring heartbeat client
                 +---------v-----------------------------------v--+
                 |                strategy/engine                 |
                 |  10:15 hedge  10:25 morn  14:14 exit  14:16 aft |
-                |  15:25 final                                    |
+                |  15:18 final                                    |
                 +----+----------------+-----------------+---------+
                      |                |                 |
                strategy/hedge   strategy/straddle   broker/orders
@@ -136,7 +136,7 @@ strategy_agent/agent.py  Central monitoring heartbeat client
 3. `token_file.download_token()` — download NFO scrip master, filter NIFTY `OPTIDX` rows → save `nifty_token.csv`.
 4. `connectapi.makeconnection()` — TOTP login. `main` **retries every 5 s** until a valid session exists (never runs with `objconn = None`).
 5. Start `websocket_feed.connect()` on a **daemon thread** (auto-reconnecting), sleep 3 s for the socket to open.
-6. Call `engine.run()` — **blocks until 15:25 or emergency stop**.
+6. Call `engine.run()` — **blocks until 15:18 or emergency stop**.
 
 ### Phase 2 — Engine init (`strategy/engine.py → run()`)
 1. `state = load()` — recover `state.json` (or fresh skeleton).
@@ -151,7 +151,7 @@ strategy_agent/agent.py  Central monitoring heartbeat client
 | 10:25 | `straddle.enter_straddle('morning')` | Compute ATM, SELL LIMIT CE+PE, `wait_ltp` for entry prices, spawn per-leg monitor threads |
 | 14:14 | `straddle.time_exit_straddle('morning')` | BUY back open morning legs (Time Exit), cancel *morning-only* pending orders. Hedge untouched |
 | 14:16 | `straddle.enter_straddle('afternoon')` | Same as morning entry with a fresh ATM |
-| 15:25 | final block | Exit afternoon shorts + `exit_hedge` + `cancel_all_pending` + `write_report`, then **break** |
+| 15:18 | final block | Exit afternoon shorts + `exit_hedge` + `cancel_all_pending` + `write_report`, then **break** |
 
 ### Phase 4 — Per-leg monitor (`_monitor_leg`, one thread per leg)
 - Establishes a real `entry` price (via `wait_ltp` on recovery).
@@ -275,7 +275,7 @@ All settings live in `config.py`.
   **partial fills**, and applies `PENDING_ACTION` (`MODIFY` / `CANCEL` / `MARKET`) to
   the unfilled remainder only.
 - **`refresh_orderbook` / `refresh_positions`** — cached reconciliation with retries.
-- **`cancel_all_pending`** — cancels every open/pending order (used at 15:25).
+- **`cancel_all_pending`** — cancels every open/pending order (used at 15:18).
 - **`cancel_pending_for_tokens`** — cancels only specific tokens' pending orders
   (used at 14:14 so the **hedge is never touched**).
 
@@ -310,7 +310,7 @@ so SL/target are never computed against a bogus `0`.
   client that POSTs `{mtm, pnl, trade_count, status}` to a central server every 30 s.
   Fully wrapped in try/except so it can never affect trading. **Disabled** by default
   (`monitoring_enabled = False`).
-- **Report (`report/csv_report.py`)** — at 15:25 (and on exit) writes
+- **Report (`report/csv_report.py`)** — at 15:18 (and on exit) writes
   `trades_<date>.csv` with columns: `date, leg_type, session, symbol, strike,
   option_type, side, qty, entry_price, exit_price, exit_reason, pnl_points,
   pnl_amount`, plus an estimated total P&L and the broker day MTM in the log.
