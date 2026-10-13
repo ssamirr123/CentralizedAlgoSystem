@@ -66,7 +66,7 @@ INDEX_CONFIG = {
         "spot_exchange": "NSE",
         "feed_exchange_type": 1,       # SmartWebSocketV2 exchangeType: 1 = nse_cm
         "strike_step": 50,             # strike spacing
-        "lot_size": 65,                # update to current NSE lot size
+        "lot_size": 390,                # update to current NSE lot size
     },
     "BANKNIFTY": {
         "name": "BANKNIFTY",
