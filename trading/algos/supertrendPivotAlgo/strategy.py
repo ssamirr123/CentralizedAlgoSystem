@@ -5,6 +5,8 @@ Entry and exit decision logic combining pivots + supertrend signals.
 Entry:
     close > R1 and supertrend == GREEN and no open position -> Sell ATM PUT
     close < S1 and supertrend == RED   and no open position -> Sell ATM CALL
+Hedge: a far-OTM long of the same type (1000 pts away, 500 on expiry day)
+    is bought before the short and sold after it is bought back.
 Exit:
     PE open and supertrend RED   -> buy back put
     CE open and supertrend GREEN -> buy back call
@@ -27,6 +29,13 @@ class Strategy:
         self.md = market_data
         self.oc = option_chain
         self.om = order_manager
+
+    def _hedge_for(self, contract):
+        """Hedge contract for a short entry (1000 pts, 500 on expiry day).
+        Raises if it can't be resolved so we never end up with a naked short."""
+        if not config.HEDGE_ENABLED:
+            return None
+        return self.oc.get_hedge_contract(contract)
 
     def evaluate(self):
         """
@@ -85,10 +94,10 @@ class Strategy:
         if close > r1 and st_dir == "GREEN":
             log.info("R1 breakout + Supertrend GREEN -> Sell ATM PUT")
             contract = self.oc.get_atm_contract(spot, "PE")
-            self.om.sell_option(contract)
+            self.om.sell_option(contract, self._hedge_for(contract))
         elif close < s1 and st_dir == "RED":
             log.info("S1 breakdown + Supertrend RED -> Sell ATM CALL")
             contract = self.oc.get_atm_contract(spot, "CE")
-            self.om.sell_option(contract)
+            self.om.sell_option(contract, self._hedge_for(contract))
         else:
             log.info("No entry signal on this candle.")

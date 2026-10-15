@@ -66,7 +66,7 @@ INDEX_CONFIG = {
         "spot_exchange": "NSE",
         "feed_exchange_type": 1,       # SmartWebSocketV2 exchangeType: 1 = nse_cm
         "strike_step": 50,             # strike spacing
-        "lot_size": 390,                # update to current NSE lot size
+        "lot_size": 65,                # update to current NSE lot size
     },
     "BANKNIFTY": {
         "name": "BANKNIFTY",
@@ -121,10 +121,16 @@ SUPERTREND_MULTIPLIER = 3
 PRODUCT_TYPE = os.getenv("BOT_PRODUCT_TYPE", "INTRADAY")  # SmartAPI: INTRADAY / CARRYFORWARD
 ORDER_VARIETY = "NORMAL"
 ORDER_TYPE = "MARKET"
-QUANTITY_LOTS = int(os.getenv("BOT_QUANTITY_LOTS", "1"))
+QUANTITY_LOTS = int(os.getenv("BOT_QUANTITY_LOTS", "8"))
 
 # Risk controls
 MAX_TRADES_PER_DAY = int(os.getenv("BOT_MAX_TRADES_PER_DAY", "3"))
+# Hedge: buy a far-OTM option of the same type before every short entry
+# (CE hedge above, PE hedge below). Distance in index points from the sold strike.
+HEDGE_ENABLED = os.getenv("BOT_HEDGE_ENABLED", "true").strip().lower() in ("1", "true", "yes", "y", "on")
+HEDGE_POINTS = int(os.getenv("BOT_HEDGE_POINTS", "1000"))                      # normal days
+HEDGE_POINTS_EXPIRY_DAY = int(os.getenv("BOT_HEDGE_POINTS_EXPIRY_DAY", "500"))  # expiry day
+
 # Allow only one open option position at a time.
 ALLOW_SIMULTANEOUS_POSITIONS = False
 
