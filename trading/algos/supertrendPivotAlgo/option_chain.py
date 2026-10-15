@@ -71,21 +71,12 @@ class OptionChain:
             raise RuntimeError("No future expiries found in instrument master")
         return min(expiries)
 
-    def get_atm_contract(self, spot, option_type):
-        """
-        Find the ATM option contract.
+    def is_expiry_day(self):
+        """True when the nearest weekly expiry is today."""
+        return self._nearest_expiry(self._matching_options()) == datetime.now().date()
 
-        Parameters
-        ----------
-        spot : float        -> current index spot price
-        option_type : str   -> "CE" or "PE"
-
-        Returns
-        -------
-        dict with: symbol, token, strike, expiry, lotsize
-        """
+    def _find_contract(self, strike, option_type):
         option_type = option_type.upper()
-        atm_strike = self.round_to_atm(spot)
         options = self._matching_options()
         target_expiry = self._nearest_expiry(options)
         expiry_str = target_expiry.strftime("%d%b%Y").upper()
@@ -97,26 +88,51 @@ class OptionChain:
             if ins.get("expiry", "").upper() != expiry_str:
                 continue
             try:
-                strike = float(ins["strike"]) / 100.0
+                ins_strike = float(ins["strike"]) / 100.0
             except (KeyError, ValueError):
                 continue
-            if int(strike) == atm_strike:
-                contract = {
+            if int(ins_strike) == strike:
+                return {
                     "symbol": ins["symbol"],
                     "token": ins["token"],
-                    "strike": atm_strike,
+                    "strike": strike,
                     "expiry": expiry_str,
                     "lotsize": int(ins.get("lotsize", self.cfg["lot_size"])),
                     "option_type": option_type,
                 }
-                log.info(
-                    "ATM %s resolved: %s (strike=%s, expiry=%s)",
-                    option_type, contract["symbol"], atm_strike, expiry_str,
-                )
-                return contract
 
         raise RuntimeError(
-            f"Could not find ATM {option_type} for strike {atm_strike} "
-            f"expiry {expiry_str}"
+            f"Could not find {option_type} for strike {strike} expiry {expiry_str}"
         )
 
+    def get_atm_contract(self, spot, option_type):
+        """
+        Find the ATM option contract.
+
+        Returns
+        -------
+        dict with: symbol, token, strike, expiry, lotsize, option_type
+        """
+        atm_strike = self.round_to_atm(spot)
+        contract = self._find_contract(atm_strike, option_type)
+        log.info(
+            "ATM %s resolved: %s (strike=%s, expiry=%s)",
+            contract["option_type"], contract["symbol"], atm_strike, contract["expiry"],
+        )
+        return contract
+
+    def get_hedge_contract(self, sold_contract):
+        """
+        Far-OTM long hedge for a short option: same type and expiry, placed
+        HEDGE_POINTS_EXPIRY_DAY (500) points away on expiry day, otherwise
+        HEDGE_POINTS (1000). Sold PE -> lower strike; sold CE -> higher strike.
+        """
+        points = (config.HEDGE_POINTS_EXPIRY_DAY if self.is_expiry_day()
+                  else config.HEDGE_POINTS)
+        sign = -1 if sold_contract["option_type"] == "PE" else 1
+        strike = sold_contract["strike"] + sign * points
+        contract = self._find_contract(strike, sold_contract["option_type"])
+        log.info("Hedge %s resolved: %s (strike=%s, %d pts from %s)",
+                 contract["option_type"], contract["symbol"], strike, points,
+                 sold_contract["strike"])
+        return contract

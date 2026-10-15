@@ -25,13 +25,24 @@ class Position:
         self.entry_price = entry_price
         self.exit_price = None
         self.side = side
+        # Long hedge leg (far-OTM, same type) bought alongside the short.
+        self.hedge_contract = None
+        self.hedge_entry_price = None
+        self.hedge_exit_price = None
+        self.hedge_qty = 0
 
     def pnl(self):
         """Realized P&L for a short option (sell high, buy low)."""
         if self.exit_price is None:
             return 0.0
         # Sold at entry_price, bought back at exit_price.
-        return (self.entry_price - self.exit_price) * self.qty
+        return (self.entry_price - self.exit_price) * self.qty + self.hedge_pnl()
+
+    def hedge_pnl(self):
+        """Realized P&L of the long hedge leg (buy low, sell high)."""
+        if self.hedge_contract is None or self.hedge_exit_price is None:
+            return 0.0
+        return (self.hedge_exit_price - self.hedge_entry_price) * self.hedge_qty
 
 
 class OrderManager:
@@ -59,6 +70,10 @@ class OrderManager:
             if ltp:
                 # Short option: profit when the buy-back price drops below entry.
                 unrealized = (pos.entry_price - ltp) * pos.qty
+            if pos.hedge_contract is not None:
+                hltp = self._get_ltp(pos.hedge_contract)
+                if hltp:
+                    unrealized += (hltp - pos.hedge_entry_price) * pos.hedge_qty
         return self.realized_pnl + unrealized
 
     def report_metrics(self, status="RUNNING"):
@@ -147,15 +162,28 @@ class OrderManager:
             raise
 
     # ------------------------------------------------------------------ entry
-    def sell_option(self, contract):
-        """Open a short option position (sell to open)."""
+    def sell_option(self, contract, hedge_contract=None):
+        """Open a short option position (sell to open).
+
+        If hedge_contract is given, the long hedge is bought FIRST (so the
+        short is never naked) and the short is only sold once it is filled.
+        """
         ok, reason = self.can_open_new_position()
         if not ok:
             log.warning("Entry blocked: %s", reason)
             return None
 
+        hedge = None
+        if hedge_contract is not None:
+            hedge = self._place_order(hedge_contract, "BUY")
+            log.info("HEDGE  Bought %s @ %.2f", hedge_contract["symbol"], hedge["price"])
+
         result = self._place_order(contract, "SELL")
         pos = Position(contract, result["price"], result["qty"], side="SELL")
+        if hedge is not None:
+            pos.hedge_contract = hedge_contract
+            pos.hedge_entry_price = hedge["price"]
+            pos.hedge_qty = hedge["qty"]
         self.current_position = pos
         self.trades_today += 1
         log.info(
@@ -177,8 +205,14 @@ class OrderManager:
             return None
 
         pos = self.current_position
+        # Close the short first, then release the hedge.
         result = self._place_order(pos.contract, "BUY")
         pos.exit_price = result["price"]
+        if pos.hedge_contract is not None:
+            hres = self._place_order(pos.hedge_contract, "SELL")
+            pos.hedge_exit_price = hres["price"]
+            log.info("HEDGE  Sold %s @ %.2f  (hedge P&L=%.2f)",
+                     pos.hedge_contract["symbol"], pos.hedge_exit_price, pos.hedge_pnl())
         pnl = pos.pnl()
         self.realized_pnl += pnl
 
