@@ -32,6 +32,7 @@ from strategy import Strategy
 from scheduler import BotScheduler
 from tick_stream import LiveCandleStream
 from monitor import ControlCenterMonitor
+from market_guard import is_trading_day, now_ist
 
 log = get_logger()
 
@@ -66,6 +67,11 @@ def main():
              config.MAX_TRADES_PER_DAY, config.PRODUCT_TYPE,
              config.QUANTITY_LOTS)
     log.info("=" * 60)
+
+    if not is_trading_day(now_ist().date()):
+        log.warning("Today is not an NSE trading day. Exiting without trading.")
+        remove_pid_file(config.ALGO_NAME)
+        return
 
     smart = login()
 
