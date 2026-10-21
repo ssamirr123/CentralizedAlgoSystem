@@ -22,6 +22,16 @@ if str(_project_root) not in sys.path:
 from trading.common.utils import write_pid_file  # noqa: E402
 write_pid_file("Vwap_Algo_Nifty_hedge")
 
+# Holiday/weekend guard: brokers queue orders placed on a closed day as AMO
+# and fire them at the next open. Never start trading on a non-trading day.
+from trading.common.market_calendar import non_trading_reason  # noqa: E402
+_closed = non_trading_reason()
+if _closed:
+    print(f'[STARTUP] Not a trading day - {_closed}. Exiting without trading.')
+    from trading.common.utils import remove_pid_file  # noqa: E402
+    remove_pid_file("Vwap_Algo_Nifty_hedge")
+    sys.exit(0)
+
 # Local modules imported AFTER _project_root is on sys.path -- monitor.py
 # does `from trading.common.heartbeat import ...` at import time, and if
 # that fails (repo root not yet on the path) it silently disables the

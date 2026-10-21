@@ -14,6 +14,7 @@ from datetime import datetime, time as dtime
 from typing import Callable
 
 from trading.algos.VWAP_Reclaim import config
+from trading.common.market_calendar import is_trading_day
 from trading.algos.VWAP_Reclaim.logger import get_logger
 
 log = get_logger()
@@ -34,7 +35,7 @@ class Scheduler:
         self._market_close = _parse_hhmm(config.MARKET_CLOSE)
 
     def _in_window(self, now: datetime) -> bool:
-        return now.weekday() < 5 and self._market_open <= now.time() <= self._market_close
+        return is_trading_day(now.date()) and self._market_open <= now.time() <= self._market_close
 
     def run(self) -> None:
         log.info("Scheduler started | window %s-%s | tick=%ss",
