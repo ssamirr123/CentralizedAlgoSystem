@@ -77,7 +77,6 @@ def main():
 
     market_data = MarketData(smart)
     option_chain = OptionChain()
-    option_chain.preload()
     order_manager = OrderManager(smart)
     strategy = Strategy(market_data, option_chain, order_manager)
 
@@ -89,6 +88,11 @@ def main():
             market_data.attach_stream(stream)
         else:
             log.warning("Live stream unavailable; falling back to REST candles.")
+
+    # Warm the instrument master now (right after startup) so the first entry
+    # signal never waits on, or fails from, a slow download. Done after the
+    # stream starts so a slow download can't delay tick collection.
+    option_chain.preload()
 
     # Dashboard Stop writes a stop-flag file; SIGTERM/Ctrl+C also set it.
     shutdown = GracefulShutdown(algo_name=config.ALGO_NAME)
