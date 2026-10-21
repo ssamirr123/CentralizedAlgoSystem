@@ -5,6 +5,9 @@ expiry using Angel One's public instrument master.
 """
 
 import json
+import os
+import tempfile
+import time
 from datetime import datetime
 
 import requests
@@ -25,15 +28,65 @@ class OptionChain:
         self.cfg = config.get_index_config()
         self._instruments = None
 
+    # The master is ~tens of MB and the host is slow at times: cache it on disk
+    # per day, retry, and let main.py preload it at startup so an entry is
+    # never delayed (or lost) by a download at signal time.
+    _DOWNLOAD_ATTEMPTS = 4
+    _READ_TIMEOUT = 120
+
+    def _cache_path(self):
+        return os.path.join(
+            tempfile.gettempdir(),
+            f"angel_scrip_master_{datetime.now().strftime('%Y%m%d')}.json",
+        )
+
     def _load_instruments(self):
         if self._instruments is not None:
             return self._instruments
-        log.info("Downloading instrument master...")
-        resp = requests.get(INSTRUMENT_URL, timeout=30)
-        resp.raise_for_status()
-        self._instruments = resp.json()
+
+        path = self._cache_path()
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    self._instruments = json.load(fh)
+                log.info("Instrument master loaded from cache: %d rows",
+                         len(self._instruments))
+                return self._instruments
+            except (OSError, ValueError) as exc:
+                log.warning("Instrument cache unreadable (%s); re-downloading.", exc)
+
+        last_exc = None
+        for attempt in range(1, self._DOWNLOAD_ATTEMPTS + 1):
+            log.info("Downloading instrument master (attempt %d/%d)...",
+                     attempt, self._DOWNLOAD_ATTEMPTS)
+            try:
+                resp = requests.get(INSTRUMENT_URL, timeout=(10, self._READ_TIMEOUT))
+                resp.raise_for_status()
+                self._instruments = resp.json()
+                break
+            except (requests.RequestException, ValueError) as exc:
+                last_exc = exc
+                log.warning("Instrument master download failed: %s", exc)
+                time.sleep(2 * attempt)
+        else:
+            raise last_exc
+
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._instruments, fh)
+            os.replace(tmp, path)
+        except OSError as exc:
+            log.warning("Could not cache instrument master: %s", exc)
         log.info("Instrument master loaded: %d rows", len(self._instruments))
         return self._instruments
+
+    def preload(self):
+        """Best-effort warm-up at startup; failures are retried at entry time."""
+        try:
+            self._load_instruments()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Instrument master preload failed: %s", exc)
 
     def round_to_atm(self, spot):
         """Round the spot price to the nearest valid strike."""

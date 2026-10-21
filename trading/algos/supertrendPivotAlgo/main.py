@@ -77,6 +77,7 @@ def main():
 
     market_data = MarketData(smart)
     option_chain = OptionChain()
+    option_chain.preload()
     order_manager = OrderManager(smart)
     strategy = Strategy(market_data, option_chain, order_manager)
 
