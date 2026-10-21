@@ -8,6 +8,7 @@ import time
 
 import config
 from logger import get_logger
+from market_guard import market_is_open
 
 log = get_logger()
 
@@ -150,6 +151,13 @@ class OrderManager:
             log.info("[DRY_RUN] %s %s qty=%s @ ~%.2f",
                      transaction_type, contract["symbol"], qty, ltp)
             return {"order_id": "DRYRUN", "price": ltp, "qty": qty}
+
+        if not market_is_open():
+            # Outside market hours the broker queues orders as AMO and fires
+            # them at the next open. Never allow that.
+            msg = f"Market closed - refusing to place {transaction_type} {contract['symbol']}"
+            log.error(msg)
+            raise RuntimeError(msg)
 
         try:
             order_id = self.smart.placeOrder(params)

@@ -14,6 +14,7 @@ Exit:
 """
 
 import config
+from market_guard import now_ist
 from logger import get_logger
 from indicators import (
     daily_pivots,
@@ -66,6 +67,12 @@ class Strategy:
             "Candle %s  close=%.2f  R1=%.2f  S1=%.2f  Supertrend=%s",
             last["datetime"], close, r1, s1, st_dir,
         )
+
+        # Stale-data guard: never act on a candle from a previous session.
+        if last["datetime"].date() != now_ist().date():
+            log.warning("Latest candle %s is not from today - skipping evaluation.",
+                        last["datetime"])
+            return
 
         pos = self.om.current_position
 
