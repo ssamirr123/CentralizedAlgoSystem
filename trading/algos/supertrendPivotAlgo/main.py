@@ -89,6 +89,11 @@ def main():
         else:
             log.warning("Live stream unavailable; falling back to REST candles.")
 
+    # Warm the instrument master now (right after startup) so the first entry
+    # signal never waits on, or fails from, a slow download. Done after the
+    # stream starts so a slow download can't delay tick collection.
+    option_chain.preload()
+
     # Dashboard Stop writes a stop-flag file; SIGTERM/Ctrl+C also set it.
     shutdown = GracefulShutdown(algo_name=config.ALGO_NAME)
     scheduler = BotScheduler(strategy, order_manager, shutdown=shutdown)
