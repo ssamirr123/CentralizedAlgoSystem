@@ -5,7 +5,18 @@ import config
 
 def download_token():
     """Download the NFO scrip master for the index and cache the option chain to CSV."""
-    df = pd.read_json('https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json')
+    try:
+        from trading.common.scrip_master import load_scrip_master
+        df = pd.DataFrame(load_scrip_master())
+    except Exception as exc:  # noqa: BLE001 - never crash startup on a CDN blip
+        # Fall back to the previous nifty_token.csv if it still lists a
+        # current/future expiry; otherwise there is nothing safe to trade on.
+        try:
+            nearest_expiry_date()
+        except Exception:  # noqa: BLE001
+            raise RuntimeError(f'scrip master download failed and no usable cache: {exc}') from exc
+        print(f'[TOKEN] scrip master download failed ({exc}); reusing existing nifty_token.csv')
+        return
     df = df.loc[(df.exch_seg == 'NFO') & (df.name == config.INDEX_NAME) & (df.instrumenttype == 'OPTIDX')]
     df = df.drop(['strike', 'lotsize', 'instrumenttype', 'exch_seg', 'tick_size', 'name'], axis=1)
     df.to_csv('nifty_token.csv', index=False)

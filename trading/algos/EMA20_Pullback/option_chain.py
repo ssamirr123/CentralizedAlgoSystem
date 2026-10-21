@@ -14,6 +14,7 @@ import requests
 
 from trading.algos.EMA20_Pullback import config
 from trading.algos.EMA20_Pullback.logger import get_logger
+from trading.common.scrip_master import load_scrip_master
 from trading.algos.EMA20_Pullback.login import BrokerAdapter
 
 log = get_logger()
@@ -36,9 +37,7 @@ class OptionChain:
         if self._angel_instruments is not None:
             return self._angel_instruments
         log.info("Downloading AngelOne instrument master...")
-        resp = requests.get(ANGEL_INSTRUMENT_URL, timeout=30)
-        resp.raise_for_status()
-        self._angel_instruments = resp.json()
+        self._angel_instruments = load_scrip_master()
         log.info("AngelOne master loaded: %d rows", len(self._angel_instruments))
         return self._angel_instruments
 
