@@ -16,10 +16,13 @@ import config
 
 
 def _is_holiday(d):
-    """True if d is a weekend or listed in config.HOLIDAYS."""
+    """True if d is a weekend, listed in config.HOLIDAYS or an NSE holiday."""
     if d.weekday() >= 5:                       # Sat/Sun
         return True
-    return d.strftime('%Y-%m-%d') in getattr(config, 'HOLIDAYS', [])
+    if d.strftime('%Y-%m-%d') in getattr(config, 'HOLIDAYS', []):
+        return True
+    from trading.common.market_calendar import is_trading_day
+    return not is_trading_day(d)
 
 
 def _actual_expiry_for_week(d):

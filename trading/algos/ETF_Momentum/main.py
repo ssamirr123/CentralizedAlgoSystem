@@ -33,6 +33,7 @@ from trading.algos.ETF_Momentum.config import (
     ALGO_NAME, UNIVERSE, EtfMomentumConfig, load_strategy_config,
 )
 from trading.algos.ETF_Momentum.portfolio import Portfolio
+from trading.common.market_calendar import is_trading_day
 from trading.algos.ETF_Momentum.strategy import is_first_trading_day_of_month, rebalance
 from trading.common.config import TradingConfig, load_config
 from trading.common.heartbeat import ControlCenterHeartbeatAgent
@@ -199,7 +200,7 @@ class EtfMomentumRunner:
 
     # ── marks between rebalances ─────────────────────────────────────────────
     def _refresh_prices(self, now: datetime) -> None:
-        in_window = now.weekday() < 5 and MARKET_WINDOW[0] <= now.time() <= MARKET_WINDOW[1]
+        in_window = is_trading_day(now.date()) and MARKET_WINDOW[0] <= now.time() <= MARKET_WINDOW[1]
         step = timedelta(minutes=self._strat.price_refresh_minutes) if in_window else timedelta(hours=2)
         self._next_price_refresh = now + step
 

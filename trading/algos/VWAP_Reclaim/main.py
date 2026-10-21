@@ -15,6 +15,7 @@ if str(_project_root) not in sys.path:
     sys.path.append(str(_project_root))
 
 from trading.algos.VWAP_Reclaim import config  # noqa: E402
+from trading.common.market_calendar import is_trading_day  # noqa: E402
 from trading.common.utils import (  # noqa: E402
     GracefulShutdown, clear_stop_flag, remove_pid_file, write_pid_file,
 )
@@ -48,7 +49,7 @@ class VwapReclaimBot:
         self._last_heartbeat = datetime.min
 
     def tick(self, now: datetime) -> None:
-        if not (now.weekday() < 5 and _in_window(now)):
+        if not (is_trading_day(now.date()) and _in_window(now)):
             self._maybe_heartbeat(now, None)
             return
 

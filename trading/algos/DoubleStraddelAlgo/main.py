@@ -37,6 +37,10 @@ def _is_trading_day(today=None):
         return False, f'weekend ({today.strftime("%A")})'
     if today.isoformat() in set(getattr(config, 'HOLIDAYS', []) or []):
         return False, f'NSE holiday ({today.isoformat()})'
+    from trading.common.market_calendar import non_trading_reason
+    reason = non_trading_reason(today)
+    if reason:
+        return False, reason
     return True, ''
 
 
