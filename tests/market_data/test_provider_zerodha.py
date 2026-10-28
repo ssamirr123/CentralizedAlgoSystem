@@ -721,6 +721,46 @@ def test_login_zerodha_headless_handles_formatted_totp_key():
     assert token == "generated-access-token-999"
 
 
+def test_login_zerodha_headless_uses_skip_session():
+    from trading.market_data.zerodha_auth import login_zerodha_headless
+
+    http_session = MockHttpSession()
+    login_zerodha_headless(
+        api_key="test-api-key",
+        api_secret="test-secret",
+        user_id="AB1234",
+        password="MyPassword",
+        totp_key="JBSWY3DPEHPK3PXP",
+        session_factory=lambda: http_session,
+        kite_factory=lambda k: MockKiteForAuth(k),
+    )
+    connect_gets = [u for u in http_session.gets if "/connect/login" in u]
+    assert connect_gets and all("skip_session=true" in u for u in connect_gets)
+
+
+def test_login_zerodha_headless_step3_html_page_gives_actionable_error():
+    from trading.market_data.zerodha_auth import AutoLoginError, login_zerodha_headless
+
+    class HtmlPageSession(MockHttpSession):
+        def get(self, url, headers=None, allow_redirects=True, timeout=None):
+            return MockResponse({}, status_code=200, url=url)
+
+    with pytest.raises(AutoLoginError) as ei:
+        login_zerodha_headless(
+            api_key="test-api-key",
+            api_secret="test-secret",
+            user_id="AB1234",
+            password="MyPassword",
+            totp_key="JBSWY3DPEHPK3PXP",
+            session_factory=lambda: HtmlPageSession(),
+            kite_factory=lambda k: MockKiteForAuth(k),
+        )
+    msg = str(ei.value)
+    assert "Step 3 failed" in msg
+    assert "authorize" in msg
+    assert "test-api-key" not in msg
+
+
 def test_session_manager_auto_login_trigger():
     settings = Settings(
         market_data_provider="zerodha",

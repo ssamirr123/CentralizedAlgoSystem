@@ -4,7 +4,7 @@ Automated TOTP-based authentication for Zerodha Kite Connect.
 Automates the complete Kite login flow using the `kiteconnect` SDK and `pyotp`:
   1. POST https://kite.zerodha.com/api/login with user_id + password -> request_id
   2. Generate 6-digit TOTP code via pyotp and POST https://kite.zerodha.com/api/twofa -> session cookies
-  3. GET kite.login_url() -> 302 redirect with request_token
+  3. GET kite.login_url() + skip_session=true -> 302 redirect with request_token
   4. Call kite.generate_session(request_token, api_secret) -> access_token
 
 Provides clear, actionable error messages for every failure stage.
@@ -226,6 +226,12 @@ def login_zerodha_headless(
     except Exception:  # noqa: BLE001
         connect_url = f"https://kite.zerodha.com/connect/login?api_key={api_key.strip()}&v=3"
 
+    # The session is already authenticated by steps 1-2; skip_session tells Kite
+    # not to show its interactive login/continue page and redirect straight to
+    # the app's redirect URL with the request_token.
+    if "skip_session=" not in connect_url:
+        connect_url += ("&" if "?" in connect_url else "?") + "skip_session=true"
+
     request_token: str | None = None
     target_url = connect_url
 
@@ -274,11 +280,12 @@ def login_zerodha_headless(
         if connect_resp.status_code in (301, 302, 303, 307, 308):
             target_url = urllib.parse.urljoin(target_url, location)
         else:
-            body_sample = (getattr(connect_resp, "text", "") or "")[:200].strip()
             raise AutoLoginError(
-                f"Step 3 failed: received HTTP {connect_resp.status_code} instead of OAuth redirect. "
-                "Ensure your Kite Connect app has a registered Redirect URL (e.g. 'https://127.0.0.1/') "
-                f"in https://developers.kite.trade. Response: {body_sample}"
+                f"Step 3 failed: received HTTP {connect_resp.status_code} (a web page) instead of the OAuth redirect. "
+                "Zerodha is likely asking for a one-time manual step. Open "
+                "https://kite.zerodha.com/connect/login?v=3&api_key=<your API key> in a browser, log in, "
+                "and authorize the app if prompted, then retry auto-login. Also confirm that the Kite Connect "
+                "app is active and has a registered Redirect URL in https://developers.kite.trade."
             )
 
     if not request_token:
