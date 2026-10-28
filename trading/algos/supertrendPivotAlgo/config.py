@@ -149,7 +149,7 @@ def _env_flag(name, default="false"):
 
 
 # Set True to run without placing real orders (paper trading).
-DRY_RUN = _env_flag("BOT_DRY_RUN", os.getenv("BOT_DY_RUN", "false"))
+DRY_RUN = _env_flag("BOT_DRY_RUN", os.getenv("BOT_DY_RUN", "True"))
 
 
 # ----------------------------------------------------------------------------

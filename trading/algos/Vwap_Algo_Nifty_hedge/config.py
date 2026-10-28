@@ -67,7 +67,7 @@ def _env_flag(*names, default="false"):
 #   VWAP_HEDGE_DRY_RUN=true   -> this algo only
 #   BOT_DRY_RUN=true          -> shared with the other algos on the box
 # Defaults to PAPER (True): set VWAP_HEDGE_DRY_RUN=false to place REAL orders.
-DRY_RUN = _env_flag("VWAP_HEDGE_DRY_RUN", "BOT_DRY_RUN", "BOT_DY_RUN", default="true")
+DRY_RUN = _env_flag("VWAP_HEDGE_DRY_RUN", "BOT_DRY_RUN", "BOT_DY_RUN", default="false")
 
 # --- Telegram log forwarding ---
 # Create a bot via @BotFather to get the token, and get your chat id
@@ -88,7 +88,7 @@ agent = None   # populated at startup with the StrategyHeartbeatAgent instance
 objconn = ''
 sws = ''
 slhit = {}
-qty = '390'
+qty = '325'
 orderbook = []   # kept as an (empty) list so `for i in orderbook` is always safe
 
 tlv_data = {}
