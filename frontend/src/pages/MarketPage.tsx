@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useMarketIndices } from "@/api/hooks";
+import { useMarketHealth, useMarketIndices, useMarketSessionStatus } from "@/api/hooks";
 import { PageHeader } from "@/components/PageHeader";
 import { QueryBoundary } from "@/components/States";
 import { IndexCard } from "@/components/IndexCard";
@@ -10,12 +10,16 @@ const ORDER = ["NIFTY", "BANKNIFTY", "INDIA_VIX", "SENSEX"];
 
 export function MarketPage() {
   const indices = useMarketIndices();
+  const health = useMarketHealth();
+  const session = useMarketSessionStatus();
+  const provider = (health.data?.provider ?? session.data?.provider ?? "zerodha").toLowerCase();
+  const providerLabel = provider.includes("zerodha") || provider.includes("kite") ? "Zerodha Kite" : "ICICI Breeze";
 
   return (
     <>
       <PageHeader
         title="Market"
-        description="Live index quotes from ICICI Breeze (paper — market data only, no orders)."
+        description={`Live index quotes from ${providerLabel} (paper — market data only, no orders).`}
         actions={
           <>
             <Link className="sm" to="/market/straddle-pulse">

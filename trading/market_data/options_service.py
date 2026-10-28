@@ -71,10 +71,13 @@ def get_live_chain_via_provider(
     if provider_factory is None:
         provider_factory = create_market_data_provider
     settings = settings or load_settings()
+    from trading.market_data.session import get_session_manager
+
+    creds = get_session_manager().credentials()
     provider = provider_factory(
         settings.market_data_provider,
-        api_key=settings.breeze_api_key, api_secret=settings.breeze_secret_key,
-        session_token=settings.breeze_session_token,
+        api_key=creds.api_key, api_secret=creds.secret_key,
+        session_token=creds.session_token,
     )
     provider.connect()
     try:
@@ -104,7 +107,8 @@ def get_live_chain_via_provider(
         underlying=underlying.upper(), expiry=expiry, spot=spot, atm_strike=atm,
         generated_at=call_chain.generated_at, rows=merged_rows, provider=call_chain.provider,
     )
-    return ChainResult(chain=merged, source="ICICI_BREEZE", provider_call_count=2)
+    source_name = (provider.name or "provider").upper()
+    return ChainResult(chain=merged, source=source_name, provider_call_count=2)
 
 
 def get_live_chain_from_cache(

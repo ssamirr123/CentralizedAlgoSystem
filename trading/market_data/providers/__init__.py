@@ -18,6 +18,7 @@ from trading.market_data.providers.base import (
     TickCallback,
 )
 from trading.market_data.providers.icici_breeze import ICICIBreezeProvider
+from trading.market_data.providers.zerodha_kite import ZerodhaKiteProvider
 
 __all__ = [
     "MarketDataProvider",
@@ -28,12 +29,16 @@ __all__ = [
     "ProviderDataError",
     "TickCallback",
     "ICICIBreezeProvider",
+    "ZerodhaKiteProvider",
     "create_market_data_provider",
 ]
 
 _PROVIDERS = {
     "icici_breeze": ICICIBreezeProvider,
     "breeze": ICICIBreezeProvider,
+    "zerodha": ZerodhaKiteProvider,
+    "kite": ZerodhaKiteProvider,
+    "zerodha_kite": ZerodhaKiteProvider,
 }
 
 

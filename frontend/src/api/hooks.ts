@@ -229,3 +229,15 @@ export const useUpdateMarketSession = () => {
     },
   });
 };
+
+export const useAutoLoginMarketSession = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body?: { user_id?: string; password?: string; totp_key?: string }) =>
+      api.autoLoginMarketSession(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market-session"] });
+      qc.invalidateQueries({ queryKey: ["market-health"] });
+    },
+  });
+};

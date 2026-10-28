@@ -17,7 +17,10 @@ PyJWT>=2.9.0
 pandas>=2.2.2
 requests>=2.32.0
 
-# Market-data engine (Stage 19). ICICI Breeze SDK. Imported lazily by
-# trading/market_data/providers/icici_breeze.py so the package still
-# imports (and the unit suite still runs) if this is absent.
+# Market-data engine: Zerodha Kite Connect SDK. Imported lazily by
+# trading/market_data/providers/zerodha_kite.py so tests and package import
+# fine if this is absent.
+kiteconnect>=5.0.0
+
+# ICICI Breeze SDK (alternative provider).
 breeze-connect>=1.0.0
