@@ -136,7 +136,7 @@ async def update_session(
         actor=principal.actor,
         actor_label=principal.label,
         action=audit.MARKET_SESSION_UPDATED,
-        target="breeze:session",
+        target=f"{load_settings().market_data_provider}:session",
         ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
         detail={
@@ -145,6 +145,43 @@ async def update_session(
             "rotated_api_key": bool(body.api_key),
             "rotated_secret_key": bool(body.secret_key),
         },
+    )
+    return _payload()
+
+
+class MarketSessionAutoLoginIn(BaseModel):
+    user_id: str | None = Field(default=None, max_length=128)
+    password: str | None = Field(default=None, max_length=128)
+    totp_key: str | None = Field(default=None, max_length=256)
+
+
+@router.post("/session/auto-login", response_model=MarketSessionStatusOut)
+async def auto_login(
+    request: Request,
+    body: MarketSessionAutoLoginIn | None = None,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(_ADMIN),
+) -> MarketSessionStatusOut:
+    mgr = get_session_manager()
+    check = mgr.auto_login(
+        user_id=body.user_id if body else None,
+        password=body.password if body else None,
+        totp_key=body.totp_key if body else None,
+    )
+    if check.state == SessionState.VALID:
+        try:
+            await get_service().reconnect()
+        except Exception:  # noqa: BLE001
+            logger.exception("market_data.session reconnect_after_auto_login failed")
+    audit.record(
+        db,
+        actor=principal.actor,
+        actor_label=principal.label,
+        action="MARKET_SESSION_AUTO_LOGIN",
+        target=f"{load_settings().market_data_provider}:session",
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"result": check.state.value},
     )
     return _payload()
 

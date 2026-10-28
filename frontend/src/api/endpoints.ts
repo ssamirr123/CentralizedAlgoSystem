@@ -133,6 +133,9 @@ export const getMarketSessionStatus = () =>
 export const updateMarketSession = (body: { session_token: string; api_key?: string; secret_key?: string }) =>
   apiRequest<import("./types").MarketSessionStatus>("/api/market/session", { method: "POST", body });
 
+export const autoLoginMarketSession = (body?: { user_id?: string; password?: string; totp_key?: string }) =>
+  apiRequest<import("./types").MarketSessionStatus>("/api/market/session/auto-login", { method: "POST", body });
+
 // --- Straddle Pulse (NIFTY + SENSEX expiry-cycle model) --------------------
 export const getStraddleUnderlyings = () =>
   apiRequest<import("./types").StraddleUnderlying[]>("/api/market/straddle-pulse/underlyings");

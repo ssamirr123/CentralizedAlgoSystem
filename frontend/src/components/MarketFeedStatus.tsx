@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { useMarketHealth, useMarketSessionStatus, useUpdateMarketSession } from "@/api/hooks";
+import {
+  useAutoLoginMarketSession,
+  useMarketHealth,
+  useMarketSessionStatus,
+  useUpdateMarketSession,
+} from "@/api/hooks";
 import { useAuth } from "@/auth/AuthContext";
 import { ApiError } from "@/api/client";
 import { formatIST } from "@/lib/format";
@@ -21,6 +26,7 @@ export function MarketFeedStatus() {
   const { hasPermission } = useAuth();
   const canManage = hasPermission("ADMIN");
   const update = useUpdateMarketSession();
+  const autoLogin = useAutoLoginMarketSession();
 
   const [open, setOpen] = useState(false);
   const [token, setToken] = useState("");
@@ -31,12 +37,17 @@ export function MarketFeedStatus() {
   const sess = h?.session ?? s?.session_state ?? "—";
   const needsSession = sess === "SESSION_REQUIRED" || sess === "NOT_CONFIGURED";
 
+  const rawProvider = (h?.provider ?? s?.provider ?? "zerodha").toLowerCase();
+  const isZerodha = rawProvider.includes("zerodha") || rawProvider.includes("kite");
+  const providerLabel = isZerodha ? "Zerodha Kite" : "ICICI Breeze";
+  const tokenLabel = isZerodha ? "access token" : "session token";
+
   return (
     <div className="card">
       <h2>Market Feed</h2>
       <dl className="kv">
         <dt>Provider</dt>
-        <dd>{h?.provider ?? s?.provider ?? "icici_breeze"}</dd>
+        <dd>{providerLabel} ({h?.provider ?? s?.provider ?? "zerodha"})</dd>
         <dt>Session</dt>
         <dd>
           <span className={`badge ${STATE_CLASS[sess] ?? "unknown"}`}>
@@ -75,29 +86,61 @@ export function MarketFeedStatus() {
 
       {needsSession && (
         <div className="inline-note warn" style={{ marginTop: 10 }}>
-          Breeze session is <strong>{sess}</strong>. The market feed is not running. An admin must provide
-          today’s session token.
+          {providerLabel} session is <strong>{sess}</strong>. The market feed is not running. An admin must provide
+          today’s {tokenLabel} or trigger auto-login.
         </div>
       )}
 
       {canManage && (
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {isZerodha && (
+            <button
+              className="sm"
+              disabled={autoLogin.isPending}
+              onClick={() => autoLogin.mutate(undefined)}
+            >
+              {autoLogin.isPending ? "Logging in…" : "⚡ Auto Login"}
+            </button>
+          )}
           <button className="sm primary" onClick={() => setOpen(true)}>
-            Refresh Breeze Session
+            Refresh {providerLabel} Session
           </button>
+        </div>
+      )}
+
+      {autoLogin.error instanceof ApiError && (
+        <div className="form-error" style={{ marginTop: 8 }}>
+          Auto-login error: {autoLogin.error.detail}
         </div>
       )}
 
       {open && (
         <div className="modal-overlay" role="dialog" aria-modal="true" onClick={() => setOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>Refresh Breeze Session</h3>
+            <h3>Refresh {providerLabel} Session</h3>
             <p style={{ color: "var(--text-dim)", fontSize: 12.5, marginTop: 0 }}>
-              Generate today’s token via the ICICI Breeze login flow, then paste it here. It is stored
+              Generate today’s {tokenLabel} via {isZerodha ? "Zerodha Kite Connect" : "the ICICI Breeze login flow"}, then paste it here. It is stored
               server-side only and never shown again.
             </p>
+            {isZerodha && (
+              <div style={{ marginBottom: 14 }}>
+                <button
+                  type="button"
+                  className="sm"
+                  style={{ width: "100%" }}
+                  disabled={autoLogin.isPending}
+                  onClick={() =>
+                    autoLogin.mutate(undefined, {
+                      onSuccess: (r) => r.session_state === "VALID" && setOpen(false),
+                    })
+                  }
+                >
+                  {autoLogin.isPending ? "Executing Auto Login…" : "⚡ Auto Login using TOTP"}
+                </button>
+              </div>
+            )}
             <div className="field">
-              <label>Session token</label>
+              <label>{isZerodha ? "Or enter Access Token manually" : "Session token"}</label>
               <input value={token} autoFocus onChange={(e) => setToken(e.target.value)} />
             </div>
             {update.error instanceof ApiError && (
@@ -111,12 +154,12 @@ export function MarketFeedStatus() {
               </div>
             )}
             <div className="actions">
-              <button className="ghost" onClick={() => setOpen(false)} disabled={update.isPending}>
+              <button className="ghost" onClick={() => setOpen(false)} disabled={update.isPending || autoLogin.isPending}>
                 Close
               </button>
               <button
                 className="primary"
-                disabled={update.isPending || token.trim().length === 0}
+                disabled={update.isPending || autoLogin.isPending || token.trim().length === 0}
                 onClick={() =>
                   update.mutate(
                     { session_token: token.trim() },

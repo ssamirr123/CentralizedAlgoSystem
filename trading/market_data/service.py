@@ -133,13 +133,13 @@ class MarketDataService:
         s = self.settings
         logger.info("market_data.start begin tz=%s", s.market_data_timezone)
 
-        # 2. verify Breeze session
+        # 2. verify session
         chk = self._sm.check()
         if chk.state is not SessionState.VALID:
             FEED_STATUS.update(feed_state=FeedState.SESSION_REQUIRED, last_error=chk.detail)
-            raise RuntimeError(f"Breeze session not usable: {chk.state.value}")
+            raise RuntimeError(f"{s.market_data_provider} session not usable: {chk.state.value}")
 
-        # 3. init Breeze provider
+        # 3. init provider
         if self._provider is None:
             creds = self._sm.credentials()
             self._provider = create_market_data_provider(
@@ -461,6 +461,14 @@ class MarketDataService:
     def _resolve_tick(self, tick: dict) -> Instrument | None:
         """Map a raw option tick payload back to a known contract."""
         try:
+            # Zerodha ticks provide integer instrument_token
+            token = tick.get("instrument_token")
+            if token is not None:
+                token_str = str(token)
+                for inst in self.master._by_symbol.values():
+                    if inst.provider_token == token_str:
+                        return inst
+
             from trading.market_data.providers.icici_breeze import (
                 _parse_expiry,
                 _tick_symbol_to_internal,

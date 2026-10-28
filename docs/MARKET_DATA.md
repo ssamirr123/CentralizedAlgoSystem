@@ -196,8 +196,8 @@ only).
 All via `trading/core/config.py::Settings` (no second `.env` system):
 
 ```
-MARKET_DATA_ENABLED=false          # opt-in; nothing contacts Breeze unless true
-MARKET_DATA_PROVIDER=icici_breeze
+MARKET_DATA_ENABLED=false          # opt-in; nothing contacts the provider unless true
+MARKET_DATA_PROVIDER=zerodha       # zerodha | icici_breeze
 MARKET_DATA_TIMEZONE=Asia/Kolkata
 MARKET_DATA_START_TIME=09:10
 MARKET_DATA_STOP_TIME=15:45
@@ -207,6 +207,14 @@ MARKET_DATA_STALE_SECONDS=10
 MARKET_WS_UPDATE_INTERVAL_MS=1000
 MARKET_DATA_RETENTION_DAYS=365
 OPTION_DATA_RETENTION_DAYS=180
+
+# Zerodha Kite Connect (when MARKET_DATA_PROVIDER=zerodha)
+ZERODHA_API_KEY=
+ZERODHA_API_SECRET=
+ZERODHA_ACCESS_TOKEN=             # Daily access token from Kite login
+ZERODHA_SECRET_ID=                # optional AWS Secrets Manager id/arn
+
+# ICICI Breeze (when MARKET_DATA_PROVIDER=icici_breeze)
 BREEZE_ENABLED=false
 BREEZE_API_KEY=      (fallback ICICI_BREEZE_API_KEY)
 BREEZE_SECRET_KEY=   (fallback ICICI_BREEZE_API_SECRET)

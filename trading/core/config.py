@@ -150,12 +150,12 @@ class Settings:
         default_factory=lambda: _env_int("REALTIME_CLIENT_TIMEOUT_SECONDS", 60)
     )
 
-    # --- Stage 19: market-data engine (ICICI Breeze) ------------------
-    # Opt-in: a normal backend deploy does NOT try to reach Breeze unless
-    # this is set. The worker + scheduler only start when it is true.
+    # --- Stage 19: market-data engine (Zerodha Kite / ICICI Breeze) ----
+    # Opt-in: a normal backend deploy does NOT try to reach the provider
+    # unless this is set. The worker + scheduler only start when it is true.
     market_data_enabled: bool = field(default_factory=lambda: _env_bool("MARKET_DATA_ENABLED"))
     market_data_provider: str = field(
-        default_factory=lambda: _env("MARKET_DATA_PROVIDER", "icici_breeze").lower()
+        default_factory=lambda: _env("MARKET_DATA_PROVIDER", "zerodha").lower()
     )
     market_data_timezone: str = field(
         default_factory=lambda: _env("MARKET_DATA_TIMEZONE", "Asia/Kolkata")
@@ -187,10 +187,33 @@ class Settings:
     option_data_retention_days: int = field(
         default_factory=lambda: _env_int("OPTION_DATA_RETENTION_DAYS", 180)
     )
-    # ICICI Breeze credentials. Primary names are BREEZE_*; the older
-    # ICICI_BREEZE_* names (BrokerCredentials / the order stub) are
-    # accepted as a fallback so an existing env keeps working. Never
-    # logged, never returned by any API response.
+    # Zerodha Kite Connect credentials (when MARKET_DATA_PROVIDER=zerodha/kite).
+    # Primary names are ZERODHA_*. Never logged, never returned by any API.
+    zerodha_enabled: bool = field(default_factory=lambda: _env_bool("ZERODHA_ENABLED"))
+    zerodha_api_key: str = field(
+        default_factory=lambda: _env("ZERODHA_API_KEY") or _env("KITE_API_KEY")
+    )
+    zerodha_api_secret: str = field(
+        default_factory=lambda: _env("ZERODHA_API_SECRET") or _env("KITE_API_SECRET")
+    )
+    zerodha_access_token: str = field(
+        default_factory=lambda: _env("ZERODHA_ACCESS_TOKEN") or _env("KITE_ACCESS_TOKEN")
+    )
+    zerodha_secret_id: str = field(
+        default_factory=lambda: _env("ZERODHA_SECRET_ID") or _env("KITE_SECRET_ID")
+    )
+    # Optional credentials for automated daily TOTP login
+    zerodha_user_id: str = field(
+        default_factory=lambda: _env("ZERODHA_USER_ID") or _env("KITE_USER_ID")
+    )
+    zerodha_password: str = field(
+        default_factory=lambda: _env("ZERODHA_PASSWORD") or _env("KITE_PASSWORD")
+    )
+    zerodha_totp_key: str = field(
+        default_factory=lambda: _env("ZERODHA_TOTP_KEY") or _env("ZERODHA_TOTP_SECRET") or _env("KITE_TOTP_KEY")
+    )
+    # ICICI Breeze credentials (when MARKET_DATA_PROVIDER=icici_breeze). Primary
+    # names are BREEZE_*; the older ICICI_BREEZE_* names are accepted as fallback.
     breeze_enabled: bool = field(default_factory=lambda: _env_bool("BREEZE_ENABLED"))
     breeze_api_key: str = field(
         default_factory=lambda: _env("BREEZE_API_KEY") or _env("ICICI_BREEZE_API_KEY")
