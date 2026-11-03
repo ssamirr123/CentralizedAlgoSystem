@@ -252,6 +252,25 @@ class FakeKiteTicker:
             self.on_ticks(self, ticks)
 
 
+class DeferredKiteTicker(FakeKiteTicker):
+    """Like the real KiteTicker: connect(threaded=True) returns before the
+    socket opens, and subscribe() raises AttributeError until it has."""
+
+    def connect(self, threaded=True):
+        pass
+
+    def open(self):
+        self.ws_connected = True
+        if self.on_connect:
+            self.on_connect(self, {})
+
+    def subscribe(self, tokens):
+        if not self.ws_connected:
+            self.premature_subscribes = getattr(self, "premature_subscribes", 0) + 1
+            raise AttributeError("'NoneType' object has no attribute 'sendMessage'")
+        super().subscribe(tokens)
+
+
 def _make_provider(*, session_error=None, quote_error=None):
     holder: dict[str, Any] = {}
 
@@ -450,6 +469,41 @@ def test_subscribe_and_tick_handling():
     assert opt_q.oi == 1300000
     assert opt_q.bid == 159.5
     assert opt_q.ask == 160.5
+
+
+def test_subscribe_before_socket_open_defers_to_on_connect():
+    holder: dict[str, Any] = {}
+
+    def ticker_factory(api_key, access_token):
+        holder["ticker"] = DeferredKiteTicker(api_key, access_token)
+        return holder["ticker"]
+
+    p = ZerodhaKiteProvider(
+        api_key=_API_KEY, api_secret=_SECRET, session_token=_ACCESS_TOKEN,
+        client_factory=lambda k: FakeKiteClient(k), ticker_factory=ticker_factory,
+    )
+    p.connect()
+    nifty = index_instrument("NIFTY")
+    opt = option_instrument(
+        "NIFTY", date(2026, 9, 24), 25000, "CE", provider="zerodha", provider_token="10001"
+    )
+
+    p.subscribe([nifty], lambda q: None)
+    p.subscribe([opt], lambda q: None)  # second call while the socket is still opening
+    ticker = holder["ticker"]
+    assert ticker.subscribed == []
+    # The real KiteTicker.subscribe() needs an open socket; it must not be called early.
+    assert getattr(ticker, "premature_subscribes", 0) == 0
+
+    ticker.open()
+    assert sorted(ticker.subscribed) == [10001, 256265]
+
+    # Once open, later subscribes go straight to the ticker.
+    opt2 = option_instrument(
+        "NIFTY", date(2026, 9, 24), 25100, "CE", provider="zerodha", provider_token="10002"
+    )
+    p.subscribe([opt2], lambda q: None)
+    assert 10002 in ticker.subscribed
 
 
 def test_unsubscribe():

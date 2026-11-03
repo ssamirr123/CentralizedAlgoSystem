@@ -196,11 +196,12 @@ class ZerodhaKiteProvider(MarketDataProvider):
         logger.info("zerodha.connected provider=%s", self.name)
 
     def disconnect(self) -> None:
-        if self._ws_connected and self._ticker is not None:
+        if self._ticker is not None:
             try:
                 self._ticker.close()
             except Exception:  # noqa: BLE001
                 pass
+        self._ticker = None
         self._ws_connected = False
         self._connected = False
         self._subscribed_tokens.clear()
@@ -486,14 +487,16 @@ class ZerodhaKiteProvider(MarketDataProvider):
                 self._subscribed_tokens.add(token)
                 tokens_to_sub.append(token)
 
-        if not self._ws_connected:
+        if self._ticker is None:
             self._start_ticker()
-        elif self._ticker and tokens_to_sub:
+        elif self._ws_connected and tokens_to_sub:
             try:
                 self._ticker.subscribe(tokens_to_sub)
                 self._ticker.set_mode(self._ticker.MODE_FULL, tokens_to_sub)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("zerodha.ws subscribe failed: %s", type(exc).__name__)
+                logger.warning("zerodha.ws subscribe failed: %s: %s", type(exc).__name__, exc)
+        # else: the socket is still opening; the tokens are recorded above and
+        # on_connect subscribes every recorded token once the socket is up.
 
     def unsubscribe(self, instruments: Sequence[Instrument]) -> None:
         tokens_to_unsub: list[int] = []
@@ -552,9 +555,11 @@ class ZerodhaKiteProvider(MarketDataProvider):
         self._ticker.on_error = on_error
 
         try:
+            # threaded connect returns before the socket is open; _ws_connected
+            # is set by on_connect, never here.
             self._ticker.connect(threaded=True)
-            self._ws_connected = True
         except Exception as exc:  # noqa: BLE001
+            self._ticker = None
             raise ProviderConnectionError(f"Zerodha KiteTicker connect failed ({type(exc).__name__})") from exc
 
     def _handle_tick(self, tick: Any) -> None:
