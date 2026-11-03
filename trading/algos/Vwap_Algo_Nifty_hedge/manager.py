@@ -137,7 +137,7 @@ def _trademanager(strike):
                 triggerhigh = df['High'][count]
 
             #Booking
-            if(df['Datetime'][count]=='15:25:00'):
+            if(df['Datetime'][count]=='15:15:00'):
                 if(isintrade):
                     time.sleep(random.randint(1,9)/10)
                     # Cancel the resting SL first so it can't fire after the buy-back.
