@@ -51,7 +51,12 @@ def _trademanager(strike):
                 continue
 
             df = rest_func.make_vwap(pd.DataFrame(config.ohlc_data[token]))
-            df["Vwap"] = df["Vwap"].round(2)
+            df["Vwap"] = pd.to_numeric(df["Vwap"], errors='coerce').round(2)
+            if df["Vwap"].isna().all():
+                print(f'[WARNING] {strike}: VWAP not available yet - retrying next candle')
+                firstflagentry = False
+                time.sleep(1)
+                continue
             count = len(df)-1
 
             ###Timeup
