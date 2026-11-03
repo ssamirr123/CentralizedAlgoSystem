@@ -56,7 +56,7 @@ threading.Thread(target=Websocket.ConnectSocket).start()
 while(True):
     dt = datetime.now()
     #Always use minutes as odd number,don't change second   #Attention#
-    if(dt.hour==9 and dt.minute==17 and dt.second==2):
+    if(dt.hour==10 and dt.minute==21 and dt.second==2):
         rest_func.add_make_option()
         break
     time.sleep(0.1)
