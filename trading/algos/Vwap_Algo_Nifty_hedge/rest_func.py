@@ -91,7 +91,14 @@ def make_vwap(dff):
     numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
     dff[numeric_cols] = dff[numeric_cols].astype(float)
     dff.set_index('Datetime', inplace=True)
-    dff['Vwap'] = ta.vwap(dff['High'], dff['Low'], dff['Close'], dff['Volume'])
+    vwap = ta.vwap(dff['High'], dff['Low'], dff['Close'], dff['Volume'])
+    if vwap is None:
+        # pandas_ta returns None (and prints "VWAP requires an ordered DatetimeIndex")
+        # for a single candle / zero volume. Fall back to the plain cumulative VWAP.
+        tp = (dff['High'] + dff['Low'] + dff['Close']) / 3
+        cum_vol = dff['Volume'].cumsum().replace(0, float('nan'))
+        vwap = ((tp * dff['Volume']).cumsum() / cum_vol).fillna(dff['Close'])
+    dff['Vwap'] = vwap.astype(float)
     dff.index = dff.index.strftime('%H:%M:%S')
     dff.reset_index(inplace=True)
     return dff
