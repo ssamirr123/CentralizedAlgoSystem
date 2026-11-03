@@ -506,6 +506,31 @@ def test_subscribe_before_socket_open_defers_to_on_connect():
     assert 10002 in ticker.subscribed
 
 
+def test_ws_connect_runs_on_reactor_thread_when_reactor_running(monkeypatch):
+    """A later connect in a long-lived process must go through reactor.callFromThread."""
+    import twisted.internet as ti
+
+    class FakeReactor:
+        running = True
+
+        def __init__(self):
+            self.calls = []
+
+        def callFromThread(self, fn, *args):
+            self.calls.append(fn.__name__)
+            fn(*args)
+
+    fake = FakeReactor()
+    monkeypatch.setattr(ti, "reactor", fake, raising=False)
+
+    p, holder = _make_provider()
+    p.connect()
+    p.subscribe([index_instrument("NIFTY")], lambda q: None)
+
+    assert fake.calls == ["_connect_ticker"]
+    assert holder["ticker"].ws_connected
+
+
 def test_unsubscribe():
     p, holder = _make_provider()
     p.connect()
