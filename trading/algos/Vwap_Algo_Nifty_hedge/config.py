@@ -88,7 +88,7 @@ agent = None   # populated at startup with the StrategyHeartbeatAgent instance
 objconn = ''
 sws = ''
 slhit = {}
-qty = '65'
+qty = '325'
 orderbook = []   # kept as an (empty) list so `for i in orderbook` is always safe
 
 tlv_data = {}
