@@ -60,6 +60,7 @@ def run():
           f"{[(l.strategy, l.symbol, l.qty, l.entry_price) for l in store.legs(st)]}")
     last_min = None
     day_started = False
+    warned_not_live = False
     last_intrabar = last_reconcile = 0.0
     try:
         from trading.common.utils import is_stop_requested
@@ -78,7 +79,23 @@ def run():
 
         mi = minute_index(now)
         done = mi - 1                                  # candle that has just closed
+        live = True
         if 0 <= done <= config.LAST_MINUTE and now.second >= 2 and done != last_min:
+            live = feed.market_live()
+            if not live:
+                # Holiday guard: the index has not moved today -> exchange closed (or no data).
+                # Strategies are not called and NO order is sent; a pending ST10 flip or a
+                # deferred exit simply waits until the market is confirmed live.
+                if done >= 2 and not warned_not_live:
+                    warned_not_live = True
+                    print(f"[WARNING] [ENGINE] NIFTY index has not moved today (holiday or no market data?) - "
+                          f"NO orders will be sent until it does. Calendar says trading day: {date.today()}")
+                last_min = done
+                time.sleep(0.5)
+                continue
+            if warned_not_live:
+                warned_not_live = False
+                print("[RUN MODE] market confirmed live - strategies resumed")
             if not day_started:
                 day_started = True
                 ctx.run_deferred_exits()
@@ -95,13 +112,13 @@ def run():
                 print(f"[ERROR] [ENGINE] risk check error: {e}")
             last_min = done
 
-        if 0 <= mi <= config.LAST_MINUTE and time.monotonic() - last_intrabar >= 2:
+        if 0 <= mi <= config.LAST_MINUTE and day_started and time.monotonic() - last_intrabar >= 2:
             last_intrabar = time.monotonic()
             try:
                 guard.intrabar(ctx)
             except Exception as e:
                 print(f"[ERROR] [ENGINE] intrabar check error: {e}")
-        if 0 <= mi <= config.LAST_MINUTE and time.monotonic() - last_reconcile >= config.RECONCILE_INTERVAL:
+        if 0 <= mi <= config.LAST_MINUTE and day_started and time.monotonic() - last_reconcile >= config.RECONCILE_INTERVAL:
             last_reconcile = time.monotonic()
             try:
                 guard.reconcile(ctx)
