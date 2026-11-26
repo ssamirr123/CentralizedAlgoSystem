@@ -157,6 +157,20 @@ def test_stop_all_algos_sends_stop(all_algos_env):
     assert "STOP_ALGO" in sent
 
 
+def test_stop_all_algos_honours_exclude_list(all_algos_env):
+    all_algos_env._list_enabled_algos = MagicMock(return_value=[
+        {"algo_id": "algo_a", "server_id": "ec2-1", "enabled": True},
+        {"algo_id": "NiftyEdgePortfolio", "server_id": "ec2-1", "enabled": True},
+    ])
+    all_algos_env.ssm_client = MagicMock()
+    all_algos_env.ssm_client.send_command.return_value = {"Command": {"CommandId": "cmd-x"}}
+    r = all_algos_env.lambda_handler({"action": "stop_all_algos", "exclude_algos": ["NiftyEdgePortfolio"]}, None)
+    assert [x["algo_id"] for x in r["results"]] == ["algo_a"]
+    assert all_algos_env.ssm_client.send_command.call_count == 1
+    sent = all_algos_env.ssm_client.send_command.call_args.kwargs["Parameters"]["commands"][0]
+    assert "algo_a" in sent and "NiftyEdgePortfolio" not in sent
+
+
 def test_all_algos_partial_failure(all_algos_env):
     all_algos_env._list_enabled_algos = MagicMock(return_value=[
         {"algo_id": "algo_a", "server_id": "ec2-1", "enabled": True},
