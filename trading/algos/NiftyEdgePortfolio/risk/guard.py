@@ -39,7 +39,7 @@ def open_mtm(ctx) -> float:
 
 def can_enter(ctx, strategy: str, lots: int) -> bool:
     if os.path.exists(config.HALT_FILE):
-        _alert_once("halt", f"[RISK] HALTED ({config.HALT_FILE} exists) - no new entries. Delete the file to resume.")
+        _alert_once("halt", f"[WARNING] [RISK] HALTED ({config.HALT_FILE} exists) - no new entries. Delete the file to resume.")
         return False
     if ctx.block_new:
         return False
@@ -51,13 +51,13 @@ def can_enter(ctx, strategy: str, lots: int) -> bool:
         need = lots * config.STRATEGIES[strategy]["margin_per_lot"] * config.MARGIN_BUFFER
         avail = orders.available_margin()
         if avail is not None and avail < need:
-            print(f"[RISK] {strategy}: margin {avail:,.0f} < needed {need:,.0f} - entry skipped")
+            print(f"[WARNING] [RISK] {strategy}: margin {avail:,.0f} < needed {need:,.0f} - entry skipped")
             return False
     return True
 
 
 def flatten_all(ctx, reason):
-    print(f"[EMERGENCY] {reason}: squaring off ALL legs")
+    print(f"[WARNING] SQUARE OFF ALL ({reason}) - KILL SWITCH")
     for leg in store.legs(ctx.st):
         ctx.close_leg(leg, f"EMERGENCY_{reason}")
 
@@ -67,15 +67,15 @@ def after_minute(ctx):
     ctx.day_pnl = day
     if day <= -abs(config.DAILY_LOSS_LIMIT):
         if config.DAILY_LOSS_ACTION == "FLATTEN":
-            _alert_once(f"dl-{ctx.today}", f"[RISK] day P&L {day:,.0f} <= -{config.DAILY_LOSS_LIMIT:,} -> FLATTEN")
+            _alert_once(f"dl-{ctx.today}", f"[WARNING] [RISK] day P&L {day:,.0f} <= -{config.DAILY_LOSS_LIMIT:,} -> FLATTEN")
             flatten_all(ctx, "DAILY_LOSS")
         else:
-            _alert_once(f"dl-{ctx.today}", f"[RISK] day P&L {day:,.0f} <= -{config.DAILY_LOSS_LIMIT:,} -> no new entries today (open legs keep their rules)")
+            _alert_once(f"dl-{ctx.today}", f"[WARNING] [RISK] day P&L {day:,.0f} <= -{config.DAILY_LOSS_LIMIT:,} -> no new entries today (open legs keep their rules)")
         ctx.block_new = True
     eq = ctx.st["equity"]
     dd = eq["cum"] + open_mtm(ctx) - eq["peak"]
     if dd <= -abs(config.PORTFOLIO_DD_STOP):
-        _alert_once("pdd", f"[RISK] portfolio drawdown {dd:,.0f} <= -{config.PORTFOLIO_DD_STOP:,} -> FLATTEN + HALT")
+        _alert_once("pdd", f"[WARNING] [RISK] portfolio drawdown {dd:,.0f} <= -{config.PORTFOLIO_DD_STOP:,} -> FLATTEN + HALT")
         flatten_all(ctx, "PORTFOLIO_DD")
         os.makedirs(config.RUNTIME_DIR, exist_ok=True)
         with open(config.HALT_FILE, "w") as fh:
@@ -102,7 +102,7 @@ def intrabar(ctx):
                 continue
         ltp = config.ltp.get(leg.token)
         if leg.disaster_sl and ltp is not None and ltp >= leg.disaster_sl:
-            print(f"[RISK] {leg.strategy} {leg.symbol} LTP {ltp} >= disaster stop {leg.disaster_sl}")
+            print(f"[WARNING] [RISK] {leg.strategy} {leg.symbol} LTP {ltp} >= disaster stop {leg.disaster_sl}")
             ctx.close_leg(leg, "DISASTER_SL")
 
 
@@ -139,7 +139,7 @@ def reconcile(ctx):
             continue
         info = instruments.by_token(tok)
         sym = info[3] if info else tok
-        print(f"[GUARD] MANUAL/UNKNOWN position {sym}: broker {actual.get(tok, 0)} vs algo {expected.get(tok, 0)} (diff {diff})")
+        print(f"[WARNING] [GUARD] MANUAL/UNKNOWN position {sym}: broker {actual.get(tok, 0)} vs algo {expected.get(tok, 0)} (diff {diff})")
         if mg.get("auto_exit") and not config.DRY_RUN:
             side = "BUY" if diff < 0 else "SELL"
             q, avg = orders.execute(sym, tok, abs(diff), side, "NEP_GUARD")
