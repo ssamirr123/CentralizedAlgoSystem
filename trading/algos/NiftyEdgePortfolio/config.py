@@ -74,6 +74,7 @@ STRATEGIES = {
     "otm4_1day":  {"enabled": True, "lots": 1, "tag": "NEP_OTM4",  "margin_per_lot": 200000},
     "btst9":      {"enabled": True, "lots": 1, "tag": "NEP_BTST9", "margin_per_lot": 100000},
     "st10":       {"enabled": True, "lots": 1, "tag": "NEP_ST10",  "margin_per_lot": 150000},
+    "stbt":       {"enabled": True, "lots": 1, "tag": "NEP_STBT",  "margin_per_lot": 200000},   # added 26 Nov 2026 (P27); paper first
 }
 
 # Minute index m: 0 = 09:15 candle ... 374 = 15:29 candle.
@@ -121,6 +122,18 @@ ST10 = {
     "history_days": 20,       # live warm-up history for the indicator
     "enter_on_start": False,  # False: wait for the next flip after a fresh start (no open position)
     "disaster_mult": None,    # tested naked; set e.g. 3.0 for a catastrophe stop (changes the strategy)
+}
+
+# STBT "Sell Today Buy Tomorrow" (backtest P27, SELL reading): 09:15-11:15 range breakout, sell 200-ITM option against it
+STBT = {
+    "range_end_minute": 120,  # range = minutes 0..119 (09:15-11:14); scan from the 11:15 candle
+    "last_entry_minute": 360, # 15:15 close is the last candle that can trigger
+    "min_range_bars": 100,    # skip the day if the morning bars are missing
+    "itm_points": 200,        # UP -> SELL PE ATM+200, DOWN -> SELL CE ATM-200
+    "sl_pct": 0.005,          # spot 0.5% against the trade (1-min high/low), overnight included
+    "exit_minute": 20,        # next session 09:35 close
+    "max_late_minutes": 2,    # a breakout found later than this (restart/lag) is skipped
+    "disaster_mult": 2.0,     # broker-resting safety stop on the option (spot SL normally fires near ~1.4-1.7x)
 }
 
 # ============================ ORDERS ============================

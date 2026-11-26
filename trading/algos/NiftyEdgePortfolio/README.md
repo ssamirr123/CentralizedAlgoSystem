@@ -12,6 +12,7 @@ independent plug-in with its own on/off switch, lots, order tag, state and P&L.
 | `otm4_1day` | DTE1. 09:20 close: sell CE ATM+200 and PE ATM−200. SL: 1-min close ≥ 1.5× entry (overnight too). Exit expiry day 15:15. | 1 |
 | `btst9` | Daily. 09:20 close: per side, strike nearest ₹100 (next weekly on expiry day). Sell on the candle after a close ≤ 50% of that. SL 1.5× on closes. Exit next session 09:20. | 1 |
 | `st10` | 10-min Supertrend(10,3) on spot. On a flip, close the short and sell the ATM option against the trend (PE in an up-trend, CE in a down-trend), next weekly on expiry day; roll at 09:20 on expiry day. Naked, held overnight. | 1 |
+| `stbt` | Daily "Sell Today Buy Tomorrow". Range = spot 09:15–11:14. First 1-min close beyond it (11:15–15:15): UP → sell PE ATM+200, DOWN → sell CE ATM−200 (next weekly on expiry day). SL: spot 0.5% against, on 1-min high/low, overnight included. Exit next session 09:35. Added 26 Nov 2026 — paper first. | 1 |
 
 ## Layout
 ```
@@ -28,7 +29,7 @@ risk/guard.py      daily loss limit, portfolio drawdown stop + HALT file, margin
                    disaster stops, broker-SL fill detection, manual-trade guard
 state/store.py     multi-day JSON state (overnight legs + indicator state survive restarts)
 state/journal.py   closed trades with charges -> runtime/journal.csv; equity peak for the drawdown stop
-strategies/        strangle60.py  otm4_1day.py  btst9.py  st10.py  (+ base.py)
+strategies/        strangle60.py  otm4_1day.py  btst9.py  st10.py  stbt.py  (+ base.py)
 replay/            replay.py (runs the live strategy code on your 1-min CSVs) + compare_backtest.py
 ```
 
@@ -50,6 +51,7 @@ then `python -m replay.compare_backtest --replay replay/replay_trades.csv --rese
 | otm4_1day | 581 / 591 (98.3%) |
 | btst9 | 742 / 767 (96.7%) |
 | st10 | 1,713 / 1,736 (98.7%) |
+| stbt | 69 / 69 trades Jan–Apr 2024 (same strikes and entry times; SL exits 1 min later in replay) |
 
 Every difference traced so far is a limitation of the research panels, where the live
 code follows the rule correctly: strikes outside the panel's ±500 window, the next
