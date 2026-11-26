@@ -263,13 +263,13 @@ Apply (after redeploying the Lambda with the exclude_algos support):
 
 ```powershell
 cd trading/infrastructure/scheduler
-aws scheduler update-schedule --name <your 15:27 schedule name> `
+aws scheduler update-schedule --name TradingSchedule-SquareOff `
   --schedule-expression "cron(27 15 ? * MON-FRI *)" --schedule-expression-timezone "Asia/Kolkata" `
   --flexible-time-window file://flex-off.json --target file://target-stop-algos.json
-aws scheduler update-schedule --name <your 15:30 schedule name> `
+aws scheduler update-schedule --name TradingSchedule-StopAlgos `
   --schedule-expression "cron(30 15 ? * MON-FRI *)" --schedule-expression-timezone "Asia/Kolkata" `
   --flexible-time-window file://flex-off.json --target file://target-stop-algos.json
-aws scheduler create-schedule --name trading-stop-algos-1533 `
+aws scheduler create-schedule --name TradingSchedule-StopAlgosLate `
   --schedule-expression "cron(33 15 ? * MON-FRI *)" --schedule-expression-timezone "Asia/Kolkata" `
   --flexible-time-window file://flex-off.json --target file://target-stop-algos-late.json
 ```
