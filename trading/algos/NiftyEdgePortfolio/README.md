@@ -57,6 +57,12 @@ weekly missing around special Saturday sessions (e.g. 2024-02-29, 2025-01-30), d
 missing from the data (e.g. 2021-12-01), and float32 rounding when a close equals the
 stop exactly.
 
+## Holiday guard
+On top of the NSE calendar check at startup (`trading.common.market_calendar`, verified for 2025-2026 only),
+the engine sends NO order - entry or exit - until the NIFTY index price has changed at least 3 times that day
+(websocket ticks, or two different REST quotes if the websocket is down). On a holiday the index never moves,
+so nothing can become an AMO even if the calendar is wrong (e.g. 2027 before NSE's list is added).
+
 ## Run
 ```bash
 pip install -r requirements.txt

@@ -193,3 +193,33 @@ def test_paper_fill_uses_ltp_minus_slippage(nep, monkeypatch):
     monkeypatch.setattr(feed, "get_ltp", lambda token, exchange=None, fallback_rest=True: 61.0)
     assert orders.execute("NIFTY02JUN2625150CE", "123", 65, "SELL", "NEP_S60") == (65, 60.5)
     assert orders.execute("NIFTY02JUN2625150CE", "123", 65, "BUY", "NEP_S60") == (65, 61.5)
+
+
+def test_holiday_guard_needs_the_index_to_move(nep):
+    config = importlib.import_module("config")
+    feed = importlib.import_module("feed")
+    config.objconn = None
+    tick = lambda px: feed._on_data(None, {"token": config.INDEX_TOKEN, "last_traded_price": int(px * 100)})
+    for _ in range(50):                 # holiday: the feed only repeats yesterday's close
+        tick(24500.0)
+    assert feed.market_live() is False
+    for px in (24501.0, 24503.5, 24499.0):   # a real session: the index moves
+        tick(px)
+    assert feed.market_live() is True
+
+
+class _RestOnly:
+    def __init__(self, prices):
+        self.prices = list(prices)
+
+    def ltpData(self, exch, sym, tok):
+        return {"data": {"ltp": self.prices.pop(0)}}
+
+
+def test_holiday_guard_rest_fallback_when_websocket_is_down(nep):
+    config = importlib.import_module("config")
+    feed = importlib.import_module("feed")
+    config.objconn = _RestOnly([24500.0, 24500.0, 24500.0])
+    assert feed.market_live() is False and feed.market_live() is False and feed.market_live() is False
+    config.objconn = _RestOnly([24510.0])
+    assert feed.market_live() is True          # 24500 -> 24510 across two samples

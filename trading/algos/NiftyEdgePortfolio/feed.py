@@ -16,12 +16,57 @@ _subs: dict[str, int] = {}        # token -> exchangeType (1 = NSE cash/index, 2
 _lock = threading.Lock()
 _last_tick = 0.0
 
+# ---- "is the market actually trading today?" (calendar-independent holiday guard)
+# On an exchange holiday the index price never changes. Orders sent anyway are
+# queued by Angel One as AMOs and execute at the next open - so nothing may be
+# sent until the NIFTY index has changed price a few times today.
+MIN_INDEX_CHANGES = 3
+_idx = {"day": None, "last": None, "changes": 0, "rest": [], "live": False}
+
+
+def _idx_today():
+    from datetime import date
+    d = date.today().isoformat()
+    if _idx["day"] != d:
+        _idx.update(day=d, last=None, changes=0, rest=[], live=False)
+
+
+def _note_index_price(px: float):
+    _idx_today()
+    if _idx["last"] is not None and px != _idx["last"]:
+        _idx["changes"] += 1
+    _idx["last"] = px
+
+
+def market_live() -> bool:
+    """True once today's NIFTY index price has really moved (websocket ticks, or two
+    different REST quotes taken a minute apart if the websocket is down)."""
+    _idx_today()
+    if _idx["live"]:
+        return True
+    if _idx["changes"] >= MIN_INDEX_CHANGES:
+        _idx["live"] = True
+        return True
+    if config.objconn is not None:
+        try:
+            v = float(config.objconn.ltpData(config.INDEX_EXCH, "", config.INDEX_TOKEN)["data"]["ltp"])
+            _idx["rest"].append(v)
+            if len(set(_idx["rest"])) >= 2:
+                _idx["live"] = True
+        except Exception as e:
+            print(f"[WS] REST index quote failed: {e}")
+    return _idx["live"]
+
 
 def _on_data(wsapp, message):
     global _last_tick
     try:
-        config.ltp[str(message["token"])] = message["last_traded_price"] / 100.0
+        tok = str(message["token"])
+        px = message["last_traded_price"] / 100.0
+        config.ltp[tok] = px
         _last_tick = time.time()
+        if tok == config.INDEX_TOKEN:
+            _note_index_price(px)
     except Exception as e:
         print(f"[WS ERROR] on_data: {e}")
 
