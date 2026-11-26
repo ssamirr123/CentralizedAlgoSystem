@@ -223,3 +223,73 @@ def test_holiday_guard_rest_fallback_when_websocket_is_down(nep):
     assert feed.market_live() is False and feed.market_live() is False and feed.market_live() is False
     config.objconn = _RestOnly([24510.0])
     assert feed.market_live() is True          # 24500 -> 24510 across two samples
+
+
+class StbtCtx(FakeCtx):
+    """FakeCtx + 1-min spot bars and entry_expiry for the STBT strategy."""
+
+    def __init__(self, today, expiries, chain, bars):
+        super().__init__(today, expiries, None, chain)
+        self.bars = bars                     # {minute: (o, h, l, c)}
+
+    def spot_bars(self, n):
+        return [(j, *b) for j, b in sorted(self.bars.items()) if j <= self.minute]
+
+    def entry_expiry(self):
+        return self._exp[1] if self._exp[0] == self.today and len(self._exp) > 1 else self._exp[0]
+
+
+def test_stbt_breakout_sells_itm_against_it_and_uses_spot_stops(nep):
+    config = importlib.import_module("config")
+    S = importlib.import_module("strategies.stbt").Stbt
+    d, nd = date(2026, 6, 1), date(2026, 6, 2)
+    bars = {j: (25000.0, 25040.0, 24960.0, 25000.0) for j in range(120)}         # range 24960-25040
+    bars.update({j: (25000.0, 25030.0, 24990.0, 25010.0) for j in range(120, 150)})
+    bars[150] = (25030.0, 25060.0, 25030.0, 25052.0)                               # close > high -> UP
+    chain = {(25250, "PE"): 230.0, (24850, "CE"): 240.0}
+    ctx = StbtCtx(d, [date(2026, 6, 4)], chain, bars)
+    s = S(config.STBT, lots=1, tag="T", lot_size=65)
+    for m in range(0, 151):
+        ctx.minute = m
+        s.on_minute(ctx)
+    assert [(l.strike, l.opt) for l in ctx.opened] == [(25250, "PE")]           # ATM 25050 + 200, sold PE
+    leg = ctx.opened[0]
+    assert leg.meta["dir"] == "UP" and leg.meta["spot_sl"] == round(25052 * 0.995, 2)
+    assert leg.sl is None and leg.disaster_sl == 460.0                           # 2x safety stop only
+    for m in range(151, 375):                                                    # no second trade, no stop
+        ctx.minute = m
+        ctx.bars[m] = (25050.0, 25060.0, 25040.0, 25050.0)
+        s.on_minute(ctx)
+    assert len(ctx.opened) == 1 and ctx.closed == []
+    # next session: a low touching the spot stop at 09:22 -> exit
+    ctx.today, ctx.bars = nd, {j: (25000.0, 25010.0, 24990.0, 25000.0) for j in range(7)}
+    ctx.bars[7] = (24950.0, 24960.0, 24920.0, 24930.0)
+    for m in range(0, 8):
+        ctx.minute = m
+        s.on_minute(ctx)
+    assert ctx.closed == [("PE", "SL_SPOT_NEXTDAY", 7)]
+
+
+def test_stbt_time_exit_and_late_breakout_skip(nep):
+    config = importlib.import_module("config")
+    S = importlib.import_module("strategies.stbt").Stbt
+    d, nd = date(2026, 6, 1), date(2026, 6, 2)
+    bars = {j: (25000.0, 25040.0, 24960.0, 25000.0) for j in range(120)}
+    bars[120] = (24990.0, 24990.0, 24940.0, 24950.0)                              # close < low -> DOWN
+    ctx = StbtCtx(d, [date(2026, 6, 4)], {(24750, "CE"): 300.0}, bars)
+    s = S(config.STBT, lots=1, tag="T", lot_size=65)
+    for m in range(0, 121):
+        ctx.minute = m
+        s.on_minute(ctx)
+    assert [(l.strike, l.opt) for l in ctx.opened] == [(24750, "CE")]          # ATM 24950 - 200, sold CE
+    ctx.today, ctx.bars = nd, {j: (24900.0, 24910.0, 24890.0, 24900.0) for j in range(25)}
+    for m in range(0, 25):
+        ctx.minute = m
+        s.on_minute(ctx)
+    assert ctx.closed == [("CE", "TIME_0935", 20)]
+    # restart long after the breakout: the strategy must not enter late
+    ctx2 = StbtCtx(d, [date(2026, 6, 4)], {(24750, "CE"): 300.0}, dict(bars))
+    s2 = S(config.STBT, lots=1, tag="T", lot_size=65)
+    ctx2.minute = 140
+    s2.on_minute(ctx2)
+    assert ctx2.opened == []
