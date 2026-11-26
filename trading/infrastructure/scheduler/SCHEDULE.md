@@ -243,3 +243,35 @@ Note the Stage-15 coordination gap above still applies per box: the
 strategy watchdog units must be torn down (or `STOP_ALGO` must also
 `systemctl stop` them) for `stop_all_ec2` to actually power a box down at
 16:00.
+
+
+## Late-close algos (Nov 2026): NiftyEdgePortfolio
+
+NiftyEdgePortfolio holds positions overnight and must see the 15:25-15:29
+candles (overnight stop checks, BTST 9 entries, ST10's last 10-min bar). It
+ends its own day at 15:31 and keeps positions in runtime/state.json - a stop
+never squares it off. So:
+
+```
+15:27 IST  stop_all_algos  {"exclude_algos": ["NiftyEdgePortfolio"]}   <- target-stop-algos.json
+15:30 IST  stop_all_algos  {"exclude_algos": ["NiftyEdgePortfolio"]}   <- target-stop-algos.json
+15:33 IST  stop_all_algos  (no exclusions; safety net)                 <- target-stop-algos-late.json
+16:00 IST  stop_ec2
+```
+
+Apply (after redeploying the Lambda with the exclude_algos support):
+
+```powershell
+cd trading/infrastructure/scheduler
+aws scheduler update-schedule --name <your 15:27 schedule name> `
+  --schedule-expression "cron(27 15 ? * MON-FRI *)" --schedule-expression-timezone "Asia/Kolkata" `
+  --flexible-time-window file://flex-off.json --target file://target-stop-algos.json
+aws scheduler update-schedule --name <your 15:30 schedule name> `
+  --schedule-expression "cron(30 15 ? * MON-FRI *)" --schedule-expression-timezone "Asia/Kolkata" `
+  --flexible-time-window file://flex-off.json --target file://target-stop-algos.json
+aws scheduler create-schedule --name trading-stop-algos-1533 `
+  --schedule-expression "cron(33 15 ? * MON-FRI *)" --schedule-expression-timezone "Asia/Kolkata" `
+  --flexible-time-window file://flex-off.json --target file://target-stop-algos-late.json
+```
+(`aws scheduler list-schedules` shows the existing names; keep whatever
+timezone / expression settings your existing schedules use.)

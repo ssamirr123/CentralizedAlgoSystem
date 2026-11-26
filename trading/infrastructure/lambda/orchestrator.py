@@ -593,6 +593,16 @@ def _action_all_algos_command(action: str, event: dict) -> dict:
         _log_event("ALL_ALGOS_NONE_ENABLED", action=action)
         return {"success": True, "results": [], "message": "no enabled algos found"}
 
+    # Optional "exclude_algos": [names] -- e.g. the 15:27 square-off stop skips
+    # algos that hold positions overnight and end their own day later
+    # (NiftyEdgePortfolio stops itself at 15:31); a later bulk stop with no
+    # exclusions is the safety net for them.
+    exclude = {str(n) for n in (event.get("exclude_algos") or [])}
+    if exclude:
+        skipped = [a["algo_id"] for a in algos if a["algo_id"] in exclude]
+        algos = [a for a in algos if a["algo_id"] not in exclude]
+        _log_event("ALL_ALGOS_EXCLUDED", action=action, excluded=skipped)
+
     single_action = action.removesuffix("_all_algos") + "_algo"  # e.g. start_all_algos -> start_algo
     results = []
     for algo in algos:
