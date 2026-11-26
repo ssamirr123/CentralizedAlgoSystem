@@ -71,9 +71,9 @@ CHAIN_HALF_WIDTH = 2000      # subscribe strikes ATM +/- this for chain scans
 # Rollout: strangle60 first, then otm4_1day + btst9, then st10 - flip "enabled" one at a time.
 STRATEGIES = {
     "strangle60": {"enabled": True,  "lots": 1, "tag": "NEP_S60",   "margin_per_lot": 125000},
-    "otm4_1day":  {"enabled": False, "lots": 1, "tag": "NEP_OTM4",  "margin_per_lot": 200000},
-    "btst9":      {"enabled": False, "lots": 1, "tag": "NEP_BTST9", "margin_per_lot": 100000},
-    "st10":       {"enabled": False, "lots": 1, "tag": "NEP_ST10",  "margin_per_lot": 150000},
+    "otm4_1day":  {"enabled": True, "lots": 1, "tag": "NEP_OTM4",  "margin_per_lot": 200000},
+    "btst9":      {"enabled": True, "lots": 1, "tag": "NEP_BTST9", "margin_per_lot": 100000},
+    "st10":       {"enabled": True, "lots": 1, "tag": "NEP_ST10",  "margin_per_lot": 150000},
 }
 
 # Minute index m: 0 = 09:15 candle ... 374 = 15:29 candle.
