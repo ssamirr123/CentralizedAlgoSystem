@@ -1,0 +1,6 @@
+# Angel One SmartAPI (SmartConnect + SmartWebSocketV2)
+smartapi-python
+pyotp
+pandas
+numpy
+requests
