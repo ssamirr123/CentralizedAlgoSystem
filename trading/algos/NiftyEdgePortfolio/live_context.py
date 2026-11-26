@@ -115,13 +115,13 @@ class LiveContext(Context):
             return None
         r = self._tok(leg.expiry, leg.strike, leg.opt)
         if r is None:
-            print(f"[{leg.strategy}] no instrument for {leg.expiry} {leg.strike}{leg.opt} - entry skipped")
+            print(f"[WARNING] [{leg.strategy}] no instrument for {leg.expiry} {leg.strike}{leg.opt} - entry skipped")
             return None
         leg.symbol, leg.token = r
         feed.subscribe([leg.token])
         q, avg = orders.execute(leg.symbol, leg.token, leg.qty, "SELL", leg.tag)
         if not q or avg is None:
-            print(f"[{leg.strategy}] ENTRY FAILED {leg.symbol} ({reason})")
+            print(f"[ERROR] [{leg.strategy}] ENTRY FAILED {leg.symbol} ({reason})")
             return None
         leg.qty = int(q)
         leg.entry_price = float(avg)
@@ -130,7 +130,7 @@ class LiveContext(Context):
         if config.PLACE_BROKER_SL and leg.disaster_sl:
             leg.broker_sl_oid = orders.place_stoploss(leg.symbol, leg.token, leg.qty, leg.disaster_sl, leg.tag)
         store.put_leg(self.st, leg)
-        print(f"[{leg.strategy}] ENTRY {reason} SELL {leg.symbol} qty={leg.qty} @ {leg.entry_price} "
+        print(f"[ENTRY] [{leg.strategy}] {reason} SELL {leg.symbol} qty={leg.qty} @ {leg.entry_price} "
               f"SL(close)={leg.sl} disaster={leg.disaster_sl} ref={leg.meta.get('ref_price')}")
         return leg
 
@@ -151,7 +151,7 @@ class LiveContext(Context):
             orders.cancel(leg.broker_sl_oid, "STOPLOSS")
         q, avg = orders.execute(leg.symbol, leg.token, leg.qty, "BUY", leg.tag, emergency=reason.startswith("EMERGENCY"))
         if not q:
-            print(f"[{leg.strategy}] EXIT FAILED {leg.symbol} ({reason}) - STILL OPEN, CHECK THE BROKER")
+            print(f"[ERROR] [{leg.strategy}] EXIT FAILED {leg.symbol} ({reason}) - STILL OPEN, CHECK THE BROKER")
             return False
         self._finish(leg, avg, reason)
         return True
@@ -166,7 +166,7 @@ class LiveContext(Context):
         leg.exit_reason = reason
         net = journal.record(self.st, leg)
         store.put_leg(self.st, leg)
-        print(f"[{leg.strategy}] EXIT {reason} BUY {leg.symbol} qty={leg.qty} @ {leg.exit_price} "
+        print(f"[EXIT] [{leg.strategy}] {reason} BUY {leg.symbol} qty={leg.qty} @ {leg.exit_price} "
               f"(entry {leg.entry_price}) net Rs {net:,.0f}")
 
     def run_deferred_exits(self):

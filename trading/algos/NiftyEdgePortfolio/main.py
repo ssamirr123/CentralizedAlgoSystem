@@ -54,7 +54,7 @@ def main():
     time.sleep(3)
     ctx = engine.run()
     monitor.stop("STOPPED", ctx)
-    print("[STARTUP] engine finished for the day")
+    print("[STARTUP] SHUTTING DOWN - engine finished for the day")
     return 0
 
 
