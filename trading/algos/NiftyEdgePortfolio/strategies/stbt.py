@@ -35,24 +35,38 @@ class Stbt(Strategy):
             st["last_m"] = p["range_end_minute"] - 1
 
         legs = ctx.open_legs(self.name)
-        bar = None
+        bars = {}
         if legs or (not st["done"] and p["range_end_minute"] <= m <= p["last_entry_minute"]):
             bars = {b[0]: b for b in ctx.spot_bars(1)}          # (j, o, h, l, c), j = minute index
-            bar = bars.get(m)
-        else:
-            bars = {}
 
-        # ---- manage open legs: spot SL (intrabar on the 1-min bar) and next-day 09:35 exit ----
+        # ---- manage open legs: spot SL on every 1-min bar not yet checked (a late/failed fetch is caught up),
+        #      then the next-day 09:35 exit ----
         for leg in legs:
             meta = leg.meta or {}
             entered_today = leg.entry_dt[:10] == today
-            if bar is not None and meta.get("spot_sl") is not None:
-                _, _o, h, l, _c = bar
-                if (meta["dir"] == "UP" and l <= meta["spot_sl"]) or (meta["dir"] == "DOWN" and h >= meta["spot_sl"]):
-                    ctx.close_leg(leg, "SL_SPOT" if entered_today else ("SL_GAP" if m == 0 else "SL_SPOT_NEXTDAY"))
-                    continue
+            prog = st.setdefault("sl_checked", {})              # leg id -> last minute checked today (reset each day)
+            start = prog.get(leg.id, meta.get("entry_minute", -1) if entered_today else -1) + 1
+            hit = None
+            for j in range(start, m + 1):
+                b = bars.get(j)
+                if b is None:
+                    break                                       # not available yet: re-check from here next minute
+                _, _o, h, l, _c = b
+                prog[leg.id] = j
+                if meta.get("spot_sl") is not None and (
+                        (meta["dir"] == "UP" and l <= meta["spot_sl"]) or (meta["dir"] == "DOWN" and h >= meta["spot_sl"])):
+                    hit = j
+                    break
+            if hit is not None:
+                why = "SL_SPOT" if entered_today else ("SL_GAP" if hit == 0 else "SL_SPOT_NEXTDAY")
+                if hit < m:
+                    ctx.log(f"[{self.name}] spot SL touched at minute {hit}, detected at {m} (late candle) - exiting now")
+                ctx.close_leg(leg, why)
+                continue
             if not entered_today and m >= p["exit_minute"]:
                 ctx.close_leg(leg, "TIME_0935")
+        if legs:
+            ctx.save()
 
         # ---- breakout scan ----
         if st["done"] or not (p["range_end_minute"] <= m <= p["last_entry_minute"]):
@@ -94,5 +108,5 @@ class Stbt(Strategy):
         spot_sl = round(close * (1 - p["sl_pct"]) if dirn == "UP" else close * (1 + p["sl_pct"]), 2)
         ctx.log(f"[{self.name}] range {lo:.2f}-{hi:.2f} | breakout {dirn} close {close:.2f} -> SELL {strike}{opt}, spot SL {spot_sl}")
         leg = self.new_leg(expiry, strike, opt, None, p["disaster_mult"], dir=dirn, spot_in=close, spot_sl=spot_sl,
-                           range_hi=hi, range_lo=lo)
+                           range_hi=hi, range_lo=lo, entry_minute=m)
         ctx.open_leg(leg, f"ENTRY_BREAKOUT_{dirn}")

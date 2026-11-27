@@ -3,6 +3,7 @@ Live implementation of context.Context: Angel One prices + orders (or paper fill
 """
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta
 
 import config
@@ -27,7 +28,10 @@ class LiveContext(Context):
         self.minute = -1
         self.block_new = False
         self.day_pnl = 0.0
-        self._bars_cache = {}       # (minutes, minute) -> bars
+        self._bars_cache = {}       # (minutes, minute) -> bars (only complete results are cached)
+        self._api_m1 = {}           # minute -> (o, h, l, c) from getCandleData backfill (today)
+        self._api_day = None
+        self._last_backfill = 0.0
 
     # ---- market data -------------------------------------------------
     def spot(self):
@@ -78,20 +82,51 @@ class LiveContext(Context):
             out.append((ts.replace(tzinfo=None), float(row[1]), float(row[2]), float(row[3]), float(row[4])))
         return out
 
+    BACKFILL_EVERY = 20.0          # seconds between getCandleData gap fills (failures are retried, never cached)
+
+    def _m1(self):
+        """Completed 1-min NIFTY bars for today, minute -> (o, h, l, c).
+        Primary source: bars built from WebSocket ticks (no API calls). getCandleData is used only to fill
+        minutes with no tick bar or a possibly incomplete one (start-up, reconnect), at most every 20 s."""
+        if self._api_day != self.today:
+            self._api_day, self._api_m1 = self.today, {}
+        tick, partial = feed.index_bars(self.today)
+        need = [j for j in range(0, self.minute + 1) if j not in self._api_m1 and (j not in tick or j in partial)]
+        if need and time.time() - self._last_backfill >= self.BACKFILL_EVERY:
+            self._last_backfill = time.time()
+            d0 = datetime.combine(self.today, datetime.min.time())
+            frm = d0.replace(hour=9, minute=15) + timedelta(minutes=min(need))
+            for ts, o, h, l, c in self._candles(frm, d0.replace(hour=15, minute=30), 1):
+                j = minute_index(ts)
+                if 0 <= j <= self.minute:
+                    self._api_m1[j] = (o, h, l, c)
+        out = {}
+        for j in range(0, self.minute + 1):
+            b = self._api_m1.get(j) or tick.get(j)
+            if b is not None:
+                out[j] = b
+        return out
+
     def spot_bars(self, minutes):
         key = (minutes, self.minute)
-        if key not in self._bars_cache:
-            self._bars_cache = {}
-            d0 = datetime.combine(self.today, datetime.min.time())
-            rows = self._candles(d0.replace(hour=9, minute=15), d0.replace(hour=15, minute=30), minutes)
-            bars = []
-            for ts, o, h, l, c in rows:
-                s = minute_index(ts)
-                end = min(s + minutes - 1, 374)
-                if 0 <= s <= 374 and end <= self.minute:          # completed bars only
-                    bars.append((s // minutes, o, h, l, c))
+        if key in self._bars_cache:
+            return self._bars_cache[key]
+        m1 = self._m1()
+        bars, complete = [], True
+        for j in range(0, 375 // minutes + 1):
+            s = j * minutes
+            e = min(s + minutes - 1, 374)
+            if s > 374 or e > self.minute:                    # completed bars only
+                break
+            seg = [m1[k] for k in range(s, e + 1) if k in m1]
+            if len(seg) < e - s + 1:          # a gap: return only the unbroken run before it (ST10 needs bars in order)
+                complete = False
+                break
+            bars.append((j, seg[0][0], max(b[1] for b in seg), min(b[2] for b in seg), seg[-1][3]))
+        if complete:
+            self._bars_cache = {k: v for k, v in self._bars_cache.items() if k[1] == self.minute}
             self._bars_cache[key] = bars
-        return self._bars_cache[key]
+        return bars
 
     def spot_history_bars(self, minutes, days):
         days = days or 20
