@@ -293,3 +293,86 @@ def test_stbt_time_exit_and_late_breakout_skip(nep):
     ctx2.minute = 140
     s2.on_minute(ctx2)
     assert ctx2.opened == []
+
+
+def test_feed_builds_1min_index_bars_from_ticks(nep):
+    from datetime import datetime
+    feed = importlib.import_module("feed")
+    t = datetime(2026, 6, 1, 9, 15, 5)
+    for sec, px in ((5, 25000.0), (20, 25010.0), (40, 24990.0), (59, 25002.0)):
+        feed._note_index_bar(px, now=t.replace(second=sec))
+    feed._note_index_bar(25003.0, now=t.replace(minute=16, second=1))
+    bars, partial = feed.index_bars(t.date())
+    assert bars[0] == (25000.0, 25010.0, 24990.0, 25002.0) and bars[1] == (25003.0,) * 4
+    assert partial == {0}                                   # first tick of the day: may be incomplete -> API backfill
+
+
+def test_live_spot_bars_aggregate_ticks_and_stop_at_a_gap(nep, monkeypatch):
+    import time as _t
+    feed = importlib.import_module("feed")
+    LC = importlib.import_module("live_context").LiveContext
+    d = date(2026, 6, 1)
+    m1 = {j: (100.0 + j, 101.0 + j, 99.0 + j, 100.5 + j) for j in range(0, 25) if j != 13}
+    monkeypatch.setattr(feed, "index_bars", lambda day=None: (m1, set()))
+    ctx = LC.__new__(LC)
+    ctx.today, ctx.minute = d, 24
+    ctx._bars_cache, ctx._api_m1, ctx._api_day, ctx._last_backfill = {}, {}, d, _t.time()   # no API call
+    b10 = ctx.spot_bars(10)
+    assert b10 == [(0, 100.0, 110.0, 99.0, 109.5)]           # bar 1 (minutes 10-19) has a gap -> not returned yet
+    assert [b[0] for b in ctx.spot_bars(1)] == list(range(13))
+    m1[13] = (113.0, 114.0, 112.0, 113.5)                    # gap filled (e.g. by backfill) -> picked up next call
+    ctx._bars_cache = {}
+    assert [b[0] for b in ctx.spot_bars(10)] == [0, 1]
+
+
+def test_stbt_spot_sl_catches_up_a_missed_minute(nep):
+    config = importlib.import_module("config")
+    S = importlib.import_module("strategies.stbt").Stbt
+    d = date(2026, 6, 1)
+    bars = {j: (25000.0, 25040.0, 24960.0, 25000.0) for j in range(120)}
+    bars[120] = (25030.0, 25060.0, 25030.0, 25052.0)                               # UP breakout
+    ctx = StbtCtx(d, [date(2026, 6, 4)], {(25250, "PE"): 230.0}, bars)
+    s = S(config.STBT, lots=1, tag="T", lot_size=65)
+    for m in range(0, 121):
+        ctx.minute = m
+        s.on_minute(ctx)
+    assert len(ctx.opened) == 1
+    ctx.minute = 121                                    # minute 121's candle not available yet (failed fetch)
+    s.on_minute(ctx)
+    assert ctx.closed == []
+    ctx.bars[121] = (25000.0, 25010.0, 24900.0, 24950.0)                           # it touched the stop (24926.74)
+    ctx.bars[122] = (24950.0, 24990.0, 24940.0, 24980.0)                           # the next one did not
+    ctx.minute = 122
+    s.on_minute(ctx)
+    assert ctx.closed == [("PE", "SL_SPOT", 122)]
+
+
+def test_bars_are_saved_and_reused_for_restart_and_history(nep, monkeypatch, tmp_path):
+    import time as _t
+    from datetime import date as _d
+    config = importlib.import_module("config")
+    feed = importlib.import_module("feed")
+    instruments = importlib.import_module("instruments")
+    LC = importlib.import_module("live_context").LiveContext
+    monkeypatch.setattr(config, "BARS_DIR", tmp_path)
+    d0, d1 = _d(2026, 6, 1), _d(2026, 6, 2)
+    full = {j: (100.0 + j, 101.0 + j, 99.0 + j, 100.5 + j) for j in range(375)}
+    monkeypatch.setattr(feed, "index_bars", lambda day=None: (full, {0}))
+    c0 = LC.__new__(LC)
+    c0.today, c0.minute = d0, 374
+    c0._bars_cache, c0._api_m1, c0._api_day, c0._last_backfill = {}, {}, d0, _t.time()
+    c0.persist_bars()
+    saved = c0._load_day_bars(d0)
+    assert len(saved) == 374 and 0 not in saved           # the possibly-partial first minute is not saved
+    saved[0] = full[0]                                     # pretend the backfill filled it
+    import json, os
+    with open(os.path.join(str(tmp_path), "2026-06-01.json"), "w") as fh:
+        json.dump({str(k): list(v) for k, v in saved.items()}, fh)
+    calls = []
+    c1 = LC.__new__(LC)
+    c1.today = d1
+    c1._candles = lambda *a, **k: calls.append(a) or []
+    monkeypatch.setattr(instruments, "previous_trading_days", lambda d, n: [d0])
+    h = c1.spot_history_bars(10, 1)
+    assert calls == []                                     # no getCandleData: read from the saved file
+    assert h[0] == ("2026-06-01", 0, 100.0, 110.0, 99.0, 109.5) and len(h) == 38

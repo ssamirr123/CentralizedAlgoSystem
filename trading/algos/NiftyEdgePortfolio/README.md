@@ -8,9 +8,9 @@ independent plug-in with its own on/off switch, lots, order tag, state and P&L.
 
 | Plug-in | Rules (exactly as backtested) | Lots |
 |---|---|---|
-| `strangle60` | Expiry day. 09:19 close: CE ≥ ATM and PE ≤ ATM nearest ₹60 (skip if > ₹18 away). 09:20 close: sell both. Exit a leg when a 1-min close ≥ 2× entry. Exit 15:15. | 1 |
+| `strangle60` | Expiry day. 09:19 close: CE ≥ ATM and PE ≤ ATM nearest ₹60 (skip if > ₹18 away). 09:20 close: sell both. Exit a leg when a 1-min close ≥ 2× entry. Exit 15:15. | 2 |
 | `otm4_1day` | DTE1. 09:20 close: sell CE ATM+200 and PE ATM−200. SL: 1-min close ≥ 1.5× entry (overnight too). Exit expiry day 15:15. | 1 |
-| `btst9` | Daily. 09:20 close: per side, strike nearest ₹100 (next weekly on expiry day). Sell on the candle after a close ≤ 50% of that. SL 1.5× on closes. Exit next session 09:20. | 1 |
+| `btst9` | Daily. 09:20 close: per side, strike nearest ₹100 (next weekly on expiry day). Sell on the candle after a close ≤ 50% of that. SL 1.5× on closes. Exit next session 09:20. | 2 |
 | `st10` | 10-min Supertrend(10,3) on spot. On a flip, close the short and sell the ATM option against the trend (PE in an up-trend, CE in a down-trend), next weekly on expiry day; roll at 09:20 on expiry day. Naked, held overnight. | 1 |
 | `stbt` | Daily "Sell Today Buy Tomorrow". Range = spot 09:15–11:14. First 1-min close beyond it (11:15–15:15): UP → sell PE ATM+200, DOWN → sell CE ATM−200 (next weekly on expiry day). SL: spot 0.5% against, on 1-min high/low, overnight included. Exit next session 09:35. Added 26 Nov 2026 — paper first. | 1 |
 
@@ -90,3 +90,11 @@ Credentials come from the environment / `trading/.env` (`ANGELONE_CLIENT_ID`, `A
   Telegram alerts, restart mid-day resumes open legs without duplicate orders.
 - Risk: `DAILY_LOSS_LIMIT` ₹25k (blocks new entries), `PORTFOLIO_DD_STOP` ₹1.4L (flatten + `runtime/HALTED`;
   delete the file by hand to resume).
+
+**Sizing (P30 optimisation, 26 Nov 2026):** strangle60 ×2, otm4_1day ×1, btst9 ×2, st10 ×1, stbt ×1 — backtest ₹23.1L vs ₹19.2L at 1 lot each, max DD −₹86.1k, peak margin ~₹10L on Tuesday (verify with the broker).
+
+## Market data (WebSocket first)
+- **NIFTY 1-min bars** are built from WebSocket index ticks (`feed.index_bars`); N-min bars are aggregated from them. Saved every minute to `runtime/bars/YYYY-MM-DD.json` and reloaded after a restart.
+- **ST10 history** (20 days) is read from those saved bar files; `getCandleData` is used only for days not saved yet (first weeks after deployment) and to backfill minutes missed while the algo was down (at most every 20 s).
+- **Option prices**: CE/PE strikes ATM ±2000 of the nearest 2 expiries are pre-subscribed at start-up and at the open (re-centred if NIFTY moves 500+), so chain reads come from the WebSocket; REST quotes only fill gaps.
+- Orders, order book, positions and margin are REST by nature.

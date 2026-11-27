@@ -58,6 +58,42 @@ def market_live() -> bool:
     return _idx["live"]
 
 
+# ---- 1-min NIFTY bars built from WebSocket ticks (no API calls; getCandleData only backfills gaps) ----
+_bars = {"day": None, "m": {}, "partial": set(), "last_ts": None}
+
+
+def _note_index_bar(px: float, now=None):
+    from datetime import datetime
+    now = now or datetime.now()
+    m = now.hour * 60 + now.minute - 555
+    if not 0 <= m <= 374:
+        return
+    d = now.date()
+    if _bars["day"] != d:
+        _bars.update(day=d, m={}, partial=set(), last_ts=None)
+    last = _bars["last_ts"]
+    if last is None or (now - last).total_seconds() > 60:
+        _bars["partial"].add(m)          # first tick after a start / outage: this minute may be incomplete
+    _bars["last_ts"] = now
+    b = _bars["m"].get(m)
+    if b is None:
+        _bars["m"][m] = [px, px, px, px]
+    else:
+        if px > b[1]:
+            b[1] = px
+        if px < b[2]:
+            b[2] = px
+        b[3] = px
+
+
+def index_bars(day=None):
+    """{minute: (o, h, l, c)} of tick-built bars for today, and the set of minutes that may be incomplete."""
+    from datetime import date
+    if _bars["day"] != (day or date.today()):
+        return {}, set()
+    return {k: tuple(v) for k, v in list(_bars["m"].items())}, set(_bars["partial"])
+
+
 def _on_data(wsapp, message):
     global _last_tick
     try:
@@ -67,6 +103,7 @@ def _on_data(wsapp, message):
         _last_tick = time.time()
         if tok == config.INDEX_TOKEN:
             _note_index_price(px)
+            _note_index_bar(px)
     except Exception as e:
         print(f"[WS ERROR] on_data: {e}")
 

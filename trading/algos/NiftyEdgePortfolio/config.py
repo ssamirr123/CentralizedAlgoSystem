@@ -67,12 +67,12 @@ FREEZE_QTY = 1800            # exchange freeze quantity per order
 CHAIN_HALF_WIDTH = 2000      # subscribe strikes ATM +/- this for chain scans
 
 # ============================ STRATEGIES ============================
-# Live plan (Algo Portfolio page, 26 Nov 2026): 1 lot each on Rs12.5L.
+# Live plan (Algo Portfolio page, P30 optimisation 26 Nov 2026): strangle60 x2, otm4 x1, btst9 x2, st10 x1, stbt x1 on Rs12.5L (peak margin ~Rs10L, verify with broker).
 # Rollout: strangle60 first, then otm4_1day + btst9, then st10 - flip "enabled" one at a time.
 STRATEGIES = {
-    "strangle60": {"enabled": True,  "lots": 1, "tag": "NEP_S60",   "margin_per_lot": 125000},
+    "strangle60": {"enabled": True,  "lots": 2, "tag": "NEP_S60",   "margin_per_lot": 125000},
     "otm4_1day":  {"enabled": True, "lots": 1, "tag": "NEP_OTM4",  "margin_per_lot": 200000},
-    "btst9":      {"enabled": True, "lots": 1, "tag": "NEP_BTST9", "margin_per_lot": 100000},
+    "btst9":      {"enabled": True, "lots": 2, "tag": "NEP_BTST9", "margin_per_lot": 100000},
     "st10":       {"enabled": True, "lots": 1, "tag": "NEP_ST10",  "margin_per_lot": 150000},
     "stbt":       {"enabled": True, "lots": 1, "tag": "NEP_STBT",  "margin_per_lot": 200000},   # added 26 Nov 2026 (P27); paper first
 }
@@ -175,6 +175,8 @@ ALGO_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = ALGO_DIR / "runtime"       # git-ignored
 STATE_FILE = RUNTIME_DIR / "state.json"  # multi-day (overnight legs survive restarts)
 JOURNAL_FILE = RUNTIME_DIR / "journal.csv"
+BARS_DIR = RUNTIME_DIR / "bars"          # 1-min NIFTY bars per day (tick-built), reused for restarts and ST10 history
+CHAIN_WS_RANGE = 2000                      # pre-subscribe CE/PE strikes ATM +/- this on the WebSocket (nearest 2 expiries)
 HALT_FILE = RUNTIME_DIR / "HALTED"       # created by the portfolio stop; delete by hand to resume
 
 # ============================ MONITOR / TELEGRAM ============================
