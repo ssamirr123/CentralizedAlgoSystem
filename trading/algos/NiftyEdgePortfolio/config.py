@@ -175,6 +175,8 @@ ALGO_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = ALGO_DIR / "runtime"       # git-ignored
 STATE_FILE = RUNTIME_DIR / "state.json"  # multi-day (overnight legs survive restarts)
 JOURNAL_FILE = RUNTIME_DIR / "journal.csv"
+BARS_DIR = RUNTIME_DIR / "bars"          # 1-min NIFTY bars per day (tick-built), reused for restarts and ST10 history
+CHAIN_WS_RANGE = 2000                      # pre-subscribe CE/PE strikes ATM +/- this on the WebSocket (nearest 2 expiries)
 HALT_FILE = RUNTIME_DIR / "HALTED"       # created by the portfolio stop; delete by hand to resume
 
 # ============================ MONITOR / TELEGRAM ============================

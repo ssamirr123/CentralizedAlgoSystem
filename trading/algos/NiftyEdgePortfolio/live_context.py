@@ -3,6 +3,8 @@ Live implementation of context.Context: Angel One prices + orders (or paper fill
 """
 from __future__ import annotations
 
+import json
+import os
 import time
 from datetime import date, datetime, timedelta
 
@@ -89,7 +91,7 @@ class LiveContext(Context):
         Primary source: bars built from WebSocket ticks (no API calls). getCandleData is used only to fill
         minutes with no tick bar or a possibly incomplete one (start-up, reconnect), at most every 20 s."""
         if self._api_day != self.today:
-            self._api_day, self._api_m1 = self.today, {}
+            self._api_day, self._api_m1 = self.today, self._load_day_bars(self.today)   # bars saved before a restart
         tick, partial = feed.index_bars(self.today)
         need = [j for j in range(0, self.minute + 1) if j not in self._api_m1 and (j not in tick or j in partial)]
         if need and time.time() - self._last_backfill >= self.BACKFILL_EVERY:
@@ -106,6 +108,63 @@ class LiveContext(Context):
             if b is not None:
                 out[j] = b
         return out
+
+    # ---- bar files: runtime/bars/YYYY-MM-DD.json  {minute: [o, h, l, c]} -----------------
+    @staticmethod
+    def _bars_file(d):
+        return os.path.join(str(config.BARS_DIR), f"{d.isoformat()}.json")
+
+    def _load_day_bars(self, d):
+        try:
+            with open(self._bars_file(d)) as fh:
+                return {int(k): tuple(v) for k, v in json.load(fh).items()}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            print(f"[WARNING] bar file {d} unreadable: {e}")
+            return {}
+
+    def persist_bars(self):
+        """Save today's complete 1-min bars (called once a minute by the engine)."""
+        try:
+            tick, partial = feed.index_bars(self.today)
+            keep = dict(self._api_m1) if self._api_day == self.today else {}
+            for j, b in tick.items():
+                if j <= self.minute and j not in partial and j not in keep:
+                    keep[j] = b
+            if not keep:
+                return
+            os.makedirs(str(config.BARS_DIR), exist_ok=True)
+            f = self._bars_file(self.today)
+            with open(f + ".tmp", "w") as fh:
+                json.dump({str(k): list(v) for k, v in sorted(keep.items())}, fh)
+            os.replace(f + ".tmp", f)
+        except Exception as e:
+            print(f"[WARNING] could not save bars: {e}")
+
+    # ---- WebSocket chain pre-subscription -------------------------------------
+    def prewarm_chains(self):
+        """Subscribe CE/PE strikes ATM +/- CHAIN_WS_RANGE of the nearest 2 expiries, so the 09:19-09:20
+        chain reads (strangle60, btst9) and option LTPs come from the WebSocket, not REST quotes."""
+        spot = self.spot()
+        if spot is None:
+            return
+        atm = int(round(spot / 50) * 50)
+        if getattr(self, "_chain_centre", None) is not None and abs(atm - self._chain_centre) < 500:
+            return
+        if len(getattr(feed, "_subs", {})) > 800:              # Angel WebSocket allows ~1000 tokens per session
+            print("[WARNING] [WS] 800+ tokens already subscribed - chain not re-centred (REST quotes fill gaps)")
+            return
+        self._chain_centre = atm
+        toks = []
+        for e in self.expiries()[:2]:
+            for k in range(atm - config.CHAIN_WS_RANGE, atm + config.CHAIN_WS_RANGE + 50, 50):
+                for opt in ("CE", "PE"):
+                    r = self._tok(e, k, opt)
+                    if r:
+                        toks.append(r[1])
+        feed.subscribe(toks)
+        print(f"[WS] chain pre-subscribed around {atm}: {len(toks)} option tokens")
 
     def spot_bars(self, minutes):
         key = (minutes, self.minute)
@@ -129,15 +188,27 @@ class LiveContext(Context):
         return bars
 
     def spot_history_bars(self, minutes, days):
+        """Previous sessions' bars: saved bar files first (complete days), getCandleData only for days not saved."""
         days = days or 20
         prev = instruments.previous_trading_days(self.today, days)
-        out = []
-        for d in prev:                     # one call per day keeps within the API's range limits
-            d0 = datetime.combine(d, datetime.min.time())
+        out, rest_days = [], 0
+        for d in prev:
+            saved = self._load_day_bars(d)
+            if len(saved) >= 370:
+                for j in range(0, 375 // minutes + 1):
+                    s0, e0 = j * minutes, min(j * minutes + minutes - 1, 374)
+                    seg = [saved[k] for k in range(s0, e0 + 1) if k in saved]
+                    if s0 <= 374 and seg:
+                        out.append((d.isoformat(), j, seg[0][0], max(b[1] for b in seg), min(b[2] for b in seg), seg[-1][3]))
+                continue
+            rest_days += 1
+            d0 = datetime.combine(d, datetime.min.time())     # one call per day keeps within the API's range limits
             for ts, o, h, l, c in self._candles(d0.replace(hour=9, minute=15), d0.replace(hour=15, minute=30), minutes):
-                s = minute_index(ts)
-                if 0 <= s <= 374:
-                    out.append((d.isoformat(), s // minutes, o, h, l, c))
+                s0 = minute_index(ts)
+                if 0 <= s0 <= 374:
+                    out.append((d.isoformat(), s0 // minutes, o, h, l, c))
+        if rest_days:
+            print(f"[HISTORY] {len(prev) - rest_days} day(s) from saved bars, {rest_days} via getCandleData")
         return out
 
     # ---- orders --------------------------------------------------------

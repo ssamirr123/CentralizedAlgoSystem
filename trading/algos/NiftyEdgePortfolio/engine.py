@@ -56,6 +56,10 @@ def run():
     _expire_stale_legs(ctx)
     import feed
     feed.subscribe([l.token for l in store.legs(st) if l.token])
+    try:
+        ctx.prewarm_chains()
+    except Exception as e:
+        print(f"[WARNING] [ENGINE] chain pre-subscribe failed (REST quotes will be used): {e}")
     print(f"[ENGINE] resumed {len(store.legs(st))} open legs from {config.STATE_FILE}: "
           f"{[(l.strategy, l.symbol, l.qty, l.entry_price) for l in store.legs(st)]}")
     last_min = None
@@ -100,6 +104,11 @@ def run():
                 day_started = True
                 ctx.run_deferred_exits()
                 ctx.refresh_broker_sls()
+            if done % 30 == 0 or done == 0:
+                try:
+                    ctx.prewarm_chains()            # at the open (real spot) and re-centred if NIFTY moved 500+
+                except Exception as e:
+                    print(f"[WARNING] [ENGINE] chain pre-subscribe failed: {e}")
             ctx.minute = done
             for s in strategies:
                 try:
@@ -110,6 +119,7 @@ def run():
                 guard.after_minute(ctx)
             except Exception as e:
                 print(f"[ERROR] [ENGINE] risk check error: {e}")
+            ctx.persist_bars()
             last_min = done
 
         if 0 <= mi <= config.LAST_MINUTE and day_started and time.monotonic() - last_intrabar >= 2:
