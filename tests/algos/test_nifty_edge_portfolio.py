@@ -376,3 +376,20 @@ def test_bars_are_saved_and_reused_for_restart_and_history(nep, monkeypatch, tmp
     h = c1.spot_history_bars(10, 1)
     assert calls == []                                     # no getCandleData: read from the saved file
     assert h[0] == ("2026-06-01", 0, 100.0, 110.0, 99.0, 109.5) and len(h) == 38
+
+
+def test_journal_strategy_summary(nep, monkeypatch, tmp_path):
+    import csv
+    config = importlib.import_module("config")
+    monkeypatch.setattr(config, "JOURNAL_FILE", tmp_path / "journal.csv")
+    journal = importlib.import_module("state.journal")
+    with open(config.JOURNAL_FILE, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=journal.FIELDS)
+        w.writeheader()
+        for s, dt, n in (("st10", "2026-11-27 10:00:00", -1200.0), ("stbt", "2026-11-27 09:35:00", 3400.0),
+                         ("btst9", "2026-11-26 09:20:00", -300.0)):
+            w.writerow(dict(strategy=s, exit_dt=dt, gross_rs=n + 50, charges_rs=50, net_rs=n))
+    day = journal.summary("2026-11-27", "2026-11-27")
+    assert set(day) == {"st10", "stbt"} and day["stbt"]["net"] == 3400.0 and day["st10"]["wins"] == 0
+    assert journal.summary()["btst9"]["trades"] == 1
+    assert "TOTAL" in journal.format_summary(day, "x")
