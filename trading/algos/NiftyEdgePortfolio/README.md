@@ -8,9 +8,9 @@ independent plug-in with its own on/off switch, lots, order tag, state and P&L.
 
 | Plug-in | Rules (exactly as backtested) | Lots |
 |---|---|---|
-| `strangle60` | Expiry day. 09:19 close: CE ≥ ATM and PE ≤ ATM nearest ₹60 (skip if > ₹18 away). 09:20 close: sell both. Exit a leg when a 1-min close ≥ 2× entry. Exit 15:15. | 2 |
+| `strangle60` | Expiry day. 09:19 close: CE ≥ ATM and PE ≤ ATM nearest ₹60 (skip if > ₹18 away). 09:20 close: sell both. Exit a leg when a 1-min close ≥ 2× entry. Exit 15:15. | 1 |
 | `otm4_1day` | DTE1. 09:20 close: sell CE ATM+200 and PE ATM−200. SL: 1-min close ≥ 1.5× entry (overnight too). Exit expiry day 15:15. | 1 |
-| `btst9` | Daily. 09:20 close: per side, strike nearest ₹100 (next weekly on expiry day). Sell on the candle after a close ≤ 50% of that. SL 1.5× on closes. Exit next session 09:20. | 2 |
+| `btst9` | Daily. 09:20 close: per side, strike nearest ₹100 (next weekly on expiry day). Sell on the candle after a close ≤ 50% of that. SL 1.5× on closes. Exit next session 09:20. | 1 |
 | `st10` | 10-min Supertrend(10,3) on spot. On a flip, close the short and sell the ATM option against the trend (PE in an up-trend, CE in a down-trend), next weekly on expiry day; roll at 09:20 on expiry day. Naked, held overnight. | 1 |
 | `stbt` | Daily "Sell Today Buy Tomorrow". Range = spot 09:15–11:14. First 1-min close beyond it (11:15–15:15): UP → sell PE ATM+200, DOWN → sell CE ATM−200 (next weekly on expiry day). SL: spot 0.5% against, on 1-min high/low, overnight included. Exit next session 09:35. Added 26 Nov 2026 — paper first. | 1 |
 
@@ -91,7 +91,7 @@ Credentials come from the environment / `trading/.env` (`ANGELONE_CLIENT_ID`, `A
 - Risk: `DAILY_LOSS_LIMIT` ₹25k (blocks new entries), `PORTFOLIO_DD_STOP` ₹1.4L (flatten + `runtime/HALTED`;
   delete the file by hand to resume).
 
-**Sizing (P30 optimisation, 26 Nov 2026):** strangle60 ×2, otm4_1day ×1, btst9 ×2, st10 ×1, stbt ×1 — backtest ₹23.1L vs ₹19.2L at 1 lot each, max DD −₹86.1k, peak margin ~₹10L on Tuesday (verify with the broker).
+**Sizing (27 Nov 2026): 1 lot each.** The P30 sizing (strangle60 ×2, btst9 ×2) was reverted: real margin is ~₹1.58L per naked short leg per lot (2-lot expiry strangle = ₹6.3L), so it needed ~₹19L. 1 lot each: worst-case peak ~₹12.9L on Tuesday, usually ₹10–11L; the live margin check skips an entry that does not fit.
 
 ## Market data (WebSocket first)
 - **NIFTY 1-min bars** are built from WebSocket index ticks (`feed.index_bars`); N-min bars are aggregated from them. Saved every minute to `runtime/bars/YYYY-MM-DD.json` and reloaded after a restart.

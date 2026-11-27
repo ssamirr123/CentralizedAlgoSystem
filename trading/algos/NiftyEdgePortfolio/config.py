@@ -67,14 +67,18 @@ FREEZE_QTY = 1800            # exchange freeze quantity per order
 CHAIN_HALF_WIDTH = 2000      # subscribe strikes ATM +/- this for chain scans
 
 # ============================ STRATEGIES ============================
-# Live plan (Algo Portfolio page, P30 optimisation 26 Nov 2026): strangle60 x2, otm4 x1, btst9 x2, st10 x1, stbt x1 on Rs12.5L (peak margin ~Rs10L, verify with broker).
+# Live plan (27 Nov 2026): 1 lot each on Rs12.5L. P30 sizing (strangle60 x2, btst9 x2) was reverted: real margin
+# is ~Rs1.58L per naked short leg per lot (user: 2-lot expiry strangle = Rs6.3L), so 2/1/2/1/1 needed ~Rs19L.
+# margin_per_lot = margin for ONE entry call of that strategy (per lot): strangle60 / otm4 enter 2 legs at once,
+# btst9 enters one side at a time, st10 / stbt one leg. Worst case all open (Tuesday) ~Rs12.9L, usually Rs10-11L;
+# the live margin check (broker available margin) skips an entry if it does not fit.
 # Rollout: strangle60 first, then otm4_1day + btst9, then st10 - flip "enabled" one at a time.
 STRATEGIES = {
-    "strangle60": {"enabled": True,  "lots": 2, "tag": "NEP_S60",   "margin_per_lot": 125000},
-    "otm4_1day":  {"enabled": True, "lots": 1, "tag": "NEP_OTM4",  "margin_per_lot": 200000},
-    "btst9":      {"enabled": True, "lots": 2, "tag": "NEP_BTST9", "margin_per_lot": 100000},
-    "st10":       {"enabled": True, "lots": 1, "tag": "NEP_ST10",  "margin_per_lot": 150000},
-    "stbt":       {"enabled": True, "lots": 1, "tag": "NEP_STBT",  "margin_per_lot": 200000},   # added 26 Nov 2026 (P27); paper first
+    "strangle60": {"enabled": True, "lots": 1, "tag": "NEP_S60",   "margin_per_lot": 315000},   # 2 short legs (expiry day)
+    "otm4_1day":  {"enabled": True, "lots": 1, "tag": "NEP_OTM4",  "margin_per_lot": 315000},   # 2 short legs
+    "btst9":      {"enabled": True, "lots": 1, "tag": "NEP_BTST9", "margin_per_lot": 158000},   # per side (1 leg)
+    "st10":       {"enabled": True, "lots": 1, "tag": "NEP_ST10",  "margin_per_lot": 158000},   # 1 short ATM leg
+    "stbt":       {"enabled": True, "lots": 1, "tag": "NEP_STBT",  "margin_per_lot": 182000},   # 1 short 200-ITM leg
 }
 
 # Minute index m: 0 = 09:15 candle ... 374 = 15:29 candle.
