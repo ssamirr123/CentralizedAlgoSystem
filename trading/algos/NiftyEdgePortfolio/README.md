@@ -98,3 +98,7 @@ Credentials come from the environment / `trading/.env` (`ANGELONE_CLIENT_ID`, `A
 - **ST10 history** (20 days) is read from those saved bar files; `getCandleData` is used only for days not saved yet (first weeks after deployment) and to backfill minutes missed while the algo was down (at most every 20 s).
 - **Option prices**: CE/PE strikes ATM ±2000 of the nearest 2 expiries are pre-subscribed at start-up and at the open (re-centred if NIFTY moves 500+), so chain reads come from the WebSocket; REST quotes only fill gaps.
 - Orders, order book, positions and margin are REST by nature.
+
+## Strategy-wise P&L
+- `python pnl.py` (today) · `--week` · `--month` · `--all` · `--day YYYY-MM-DD` · `--from/--to` — realised P&L per strategy after charges, from `runtime/journal.csv`, plus the open legs. No broker login needed.
+- At the daily shutdown (15:31) `app.log` gets a `[REPORT]` table for today and for the month to date.

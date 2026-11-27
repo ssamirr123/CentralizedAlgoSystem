@@ -47,6 +47,17 @@ def _expire_stale_legs(ctx):
             store.put_leg(ctx.st, leg)
 
 
+def _print_pnl_report(ctx):
+    """Strategy-wise realised P&L for today and this month, written to app.log at the daily shutdown."""
+    try:
+        from state import journal
+        t = ctx.today
+        print("[REPORT] " + journal.format_summary(journal.summary(t.isoformat(), t.isoformat()), f"P&L by strategy {t} ({'PAPER' if config.DRY_RUN else 'LIVE'})"))
+        print("[REPORT] " + journal.format_summary(journal.summary(t.replace(day=1).isoformat(), t.isoformat()), f"P&L by strategy {t:%B %Y} (month to date)"))
+    except Exception as e:
+        print(f"[WARNING] [REPORT] strategy P&L report failed: {e}")
+
+
 def run():
     st = store.load()
     ctx = LiveContext(st)
@@ -76,6 +87,7 @@ def run():
         now = datetime.now()
         if (now.hour, now.minute) >= config.SHUTDOWN_AFTER:
             print("[STARTUP] STRATEGY STOPPED - after close, state saved, stopping for the day")
+            _print_pnl_report(ctx)
             break
         if is_stop_requested(config.ALGO_NAME):
             print("[STARTUP] STRATEGY STOPPED - stop requested by the control centre - stopping (open legs are kept and resumed on restart)")

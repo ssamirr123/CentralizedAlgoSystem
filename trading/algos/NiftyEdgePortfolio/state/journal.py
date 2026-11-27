@@ -46,3 +46,37 @@ def realised_today(today: date) -> float:
             if r["exit_dt"][:10] == today.isoformat():
                 tot += float(r["net_rs"] or 0)
     return tot
+
+
+def summary(frm: str | None = None, to: str | None = None) -> dict:
+    """Strategy-wise realised P&L from journal.csv for exit dates frm..to (YYYY-MM-DD, inclusive; None = open-ended)."""
+    out = {}
+    if not os.path.exists(config.JOURNAL_FILE):
+        return out
+    with open(config.JOURNAL_FILE) as fh:
+        for r in csv.DictReader(fh):
+            d = r["exit_dt"][:10]
+            if (frm and d < frm) or (to and d > to):
+                continue
+            s = out.setdefault(r["strategy"], {"trades": 0, "wins": 0, "gross": 0.0, "charges": 0.0, "net": 0.0})
+            net = float(r["net_rs"] or 0)
+            s["trades"] += 1
+            s["wins"] += net > 0
+            s["gross"] += float(r["gross_rs"] or 0)
+            s["charges"] += float(r["charges_rs"] or 0)
+            s["net"] += net
+    return out
+
+
+def format_summary(summ: dict, title: str) -> str:
+    lines = [title, f"  {'strategy':<12}{'trades':>7}{'win%':>7}{'gross':>12}{'charges':>10}{'net':>12}"]
+    tot = {"trades": 0, "wins": 0, "gross": 0.0, "charges": 0.0, "net": 0.0}
+    for name in sorted(summ):
+        s = summ[name]
+        for k in tot:
+            tot[k] += s[k]
+        lines.append(f"  {name:<12}{s['trades']:>7}{(100 * s['wins'] / s['trades'] if s['trades'] else 0):>6.0f}%"
+                     f"{s['gross']:>12,.0f}{s['charges']:>10,.0f}{s['net']:>12,.0f}")
+    lines.append(f"  {'TOTAL':<12}{tot['trades']:>7}{(100 * tot['wins'] / tot['trades'] if tot['trades'] else 0):>6.0f}%"
+                 f"{tot['gross']:>12,.0f}{tot['charges']:>10,.0f}{tot['net']:>12,.0f}")
+    return "\n".join(lines)
